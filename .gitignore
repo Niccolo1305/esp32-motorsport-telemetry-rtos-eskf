@@ -1,41 +1,29 @@
-# Prerequisites
-*.d
-
-# Compiled Object files
-*.slo
-*.lo
+# =========================
+# PlatformIO & C++ Build
+# =========================
+.pio/
+.vscode/
+lib/.dependencies/
 *.o
 *.obj
+*.elf
+*.bin
+*.hex
+*.map
 
-# Precompiled Headers
-*.gch
-*.pch
+# =========================
+# Python & Tooling
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
 
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
-*.app
-
-# debug information files
-*.dwo
+# =========================
+# OS / Dati Locali
+# =========================
+.DS_Store
+Thumbs.db
+*.log
