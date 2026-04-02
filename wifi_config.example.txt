@@ -1,0 +1,38 @@
+# ESP32 Telemetry — WiFi & MQTT Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# SETUP INSTRUCTIONS
+# ──────────────────
+# 1. Copy this file to the ROOT of your SD card and rename it: wifi_config.txt
+# 2. Fill in your WiFi credentials below (SSID and PASSWORD are required).
+# 3. Insert the SD card and power on the device.
+#
+# If this file is missing or contains no valid SSID, the device boots in
+# SD-only mode (no WiFi, full local logging still active).
+#
+# Lines starting with # are comments and are ignored by the firmware.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Primary WiFi network (required for WiFi to work)
+SSID=YourNetworkName
+PASSWORD=YourPassword
+
+# Optional: second network tried as fallback (e.g. phone hotspot at the track)
+#SSID2=MyHotspot
+#PASSWORD2=hotspotpassword
+
+# ── MQTT (optional) ──────────────────────────────────────────────────────────
+# Remove or leave MQTT_BROKER blank to disable MQTT entirely.
+# For private use, run a local broker on your laptop (e.g. mosquitto).
+# Public brokers are NOT recommended — telemetry data would be visible to anyone.
+#
+# Install mosquitto: https://mosquitto.org/download/
+# Default local broker address: 192.168.x.x (check your laptop's IP on the network)
+#
+MQTT_BROKER=
+MQTT_PORT=1883
+
+# Topic where telemetry JSON is published.
+# Leave blank to use the auto-generated topic: telemetry/<unit_id>/data
+# where <unit_id> is derived from the device MAC address (unique per unit).
+MQTT_TOPIC=
