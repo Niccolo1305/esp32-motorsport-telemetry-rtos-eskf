@@ -53,7 +53,7 @@ Recorded sessions are stored in a compact binary format on a micro-SD card and c
 
 ## Screenshots
 
-| Raw vs ESKF – roundabout | Tight corner (filtered) |
+| Roundabout | Tight corner (filtered) |
 |--------------------------|------------------------|
 | ![Rotonda raw vs ESKF](img/Rotonda_raw_eskf.jpeg) | ![Curva stretta filtered](img/Curva_stretta_filtered.jpeg) |
 
