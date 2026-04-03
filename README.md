@@ -44,7 +44,7 @@ Recorded sessions are stored in a compact binary format on a micro-SD card and c
 - **Shadow ESKF_6D** — 6-state filter with online gyro-bias estimation, running in parallel for validation
 - **GPS outlier rejection** via Mahalanobis innovation gate (χ² threshold 11.83, 3-DOF)
 - **ZARU stationarity detection** — variance of ωz over a 50-sample window triggers zero-angular-rate updates for thermal bias correction
-- **Async SD logging** via FreeRTOS queue — 122 bytes/record at 50 Hz, auto lap splitting
+- **Async SD logging** via FreeRTOS queue — 122 bytes/record at 50 Hz
 - **MQTT publishing** at 10 Hz over Wi-Fi for live telemetry monitoring
 - **MoTeC i2 Pro export** — native `.ld` format, 12 channels (8 @ 50 Hz + 4 @ 10 Hz)
 - **Interactive dashboard** built with Plotly/Dash for post-session analysis
