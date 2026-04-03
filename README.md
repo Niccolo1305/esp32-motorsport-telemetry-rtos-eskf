@@ -3,7 +3,7 @@ Dual-core FreeRTOS telemetry firmware for ESP32-S3 with 50Hz ESKF sensor fusion 
 
 # ESP32 Telemetria
 
-![Firmware](https://img.shields.io/badge/firmware-v1.0.0-blue)
+![Firmware](https://img.shields.io/badge/firmware-v1.1.0-blue)
 ![Platform](https://img.shields.io/badge/platform-ESP32--S3-informational)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 
@@ -20,7 +20,7 @@ ESP32 Telemetria is a self-contained data-acquisition unit that fits in your han
 
 Recorded sessions are stored in a compact binary format on a micro-SD card and can be post-processed through a Python toolchain that outputs interactive dashboards or native **MoTeC i2 Pro** log files — the same format used by professional motorsport engineers.
 
-**Current firmware:** v1.0.0
+**Current firmware:** v1.1.0
 
 ---
 
@@ -343,7 +343,7 @@ To recalibrate:
 1. Collect a new tumble-test recording (rotate through all orientations)
 2. Convert with `bin_to_csv.py`
 3. Refit the ellipsoid offline (see `Dati telemetria/Tumble Test/`)
-4. Update `CALIB_B[3]` and `CALIB_W[3][3]` in `src/Telemetria.ino` around line 735
+4. Update `CALIB_B[3]` and `CALIB_W[3][3]` in `src/config.h`
 
 | Report | Description |
 |--------|-------------|
@@ -433,8 +433,20 @@ Default: `telemetry/<unit_id>/data` where `<unit_id>` is derived from the last 3
 ESP32-Telemetria/
 │
 ├── src/
-│   ├── Telemetria.ino          # Main firmware (~2 200 lines)
-│   └── eskf.h                  # Header-only ESKF library (ESKF2D + ESKF_6D)
+│   ├── Telemetria.ino          # Entry point: setup() + loop() (~1 230 lines)
+│   ├── config.h                # Constants, pins, calibration matrices
+│   ├── types.h                 # Struct definitions (TelemetryRecord, ImuRawData, …)
+│   ├── globals.h / globals.cpp # Shared state (extern declarations + definitions)
+│   ├── eskf.h                  # Header-only ESKF library (ESKF2D + ESKF_6D)
+│   ├── madgwick.h              # Header-only Madgwick AHRS with adaptive β
+│   ├── math_utils.h            # Inline math (fast_inv_sqrt, ellipsoid calibration, …)
+│   ├── filter_task.h / .cpp    # 12-step signal processing pipeline (Task_Filter)
+│   ├── imu_task.h / .cpp       # IMU polling task (Task_I2C)
+│   ├── gps_task.h / .cpp       # GPS parsing task (Task_GPS)
+│   ├── sd_writer.h / .cpp      # Async SD logging task (Task_SD_Writer)
+│   ├── wifi_manager.h / .cpp   # Wi-Fi connection, reconnect, radio on/off
+│   ├── calibration.h / .cpp    # Boot & manual IMU calibration
+│   └── display.h / .cpp        # LCD helper functions
 │
 ├── Tool/
 │   ├── bin_to_csv.py           # Binary → CSV converter with interactive lap split
@@ -537,6 +549,35 @@ If the device was moved during the 2-second boot tare, gyro bias will be off —
 | Hardware interrupt for BtnA | Planned | `attachInterrupt()` on GPIO 41 — captures clicks during blocking SD calls |
 | Shake detection at boot | Planned | Detect motion during tare window and warn or auto-repeat |
 | Dashboard multi-lap support | Under evaluation | Requires downsampling or virtualised rendering above 150k rows |
+
+---
+
+## Changelog
+
+### v1.1.0 — Modular Refactoring
+
+The monolithic `Telemetria.ino` (~2 200 lines) has been split into 13 focused modules while keeping runtime behaviour identical (zero logic changes, same RAM/Flash footprint).
+
+| Module | Responsibility |
+|--------|----------------|
+| `config.h` | All constants, pin definitions, calibration matrices |
+| `types.h` | Struct definitions (`TelemetryRecord`, `ImuRawData`, `GpsData`, …) |
+| `globals.h` / `.cpp` | Shared state via `extern` declarations |
+| `math_utils.h` | Inline math utilities (fast inverse sqrt, ellipsoid calibration, trimmed mean) |
+| `madgwick.h` | Madgwick AHRS with adaptive β |
+| `filter_task.h` / `.cpp` | Complete 12-step signal processing pipeline |
+| `imu_task.h` / `.cpp` | IMU polling at 50 Hz with `vTaskDelayUntil` |
+| `gps_task.h` / `.cpp` | GPS NMEA parsing with mutex-protected shared data |
+| `sd_writer.h` / `.cpp` | Async SD logging with retry logic |
+| `wifi_manager.h` / `.cpp` | Wi-Fi connect/reconnect/shutdown/startup |
+| `calibration.h` / `.cpp` | Boot and manual IMU calibration |
+| `display.h` / `.cpp` | LCD helper functions |
+
+`Telemetria.ino` now contains only `setup()` and `loop()` (~1 230 lines).
+
+### v1.0.0 — Initial Release
+
+First public release with full ESKF sensor fusion, SD logging, MQTT telemetry, and MoTeC i2 Pro export.
 
 ---
 
