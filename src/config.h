@@ -5,7 +5,7 @@
 #include <math.h>
 
 // ── Firmware ────────────────────────────────────────────────────────────────
-const char *const FIRMWARE_VERSION = "v1.0.0";
+const char *const FIRMWARE_VERSION = "v1.1.0";
 
 // ── Timing and Sampling ────────────────────────────────────────────────────
 const float FREQ_HZ = 50.0f;           // Core system sampling frequency (IMU + ESKF)
@@ -46,22 +46,37 @@ static constexpr int MAX_WIFI_NETWORKS = 2;
 #define CS_PIN   5 // If the card is not detected, try 38
 
 // ── Ellipsoidal Calibration (Tumble Test) ──────────────────────────────────
-// Parameters computed from Ellipsoid Fitting on 16,750 samples.
+// ⚠️ DEFAULT UNCALIBRATED STATE
+// You MUST perform your own tumble test to populate these matrices.
+// See the README for instructions. Failure to do so will cause ESKF drift.
+//
 // Formula: a_calibrated = W * (a_raw - b)
 // Applied in Task_Filter as STEP 1 (before rotate_3d and Madgwick).
-//
-// Result: σ(‖a‖) 0.042 g → 0.023 g (−45.6 %)
-// AZ bias = −0.065 g corrects the anomaly identified in pendulum tests.
 
+// Bias vector (Offset) - Default: 0.0f
 const float CALIB_B[3] = {
-    -0.00125f, // AX
-    +0.00429f, // AY
-    -0.06491f  // AZ ← dominant term
+    0.0f, // AX
+    0.0f, // AY
+    0.0f  // AZ
 };
 
-// Diagonal ≈ 1.000 (near-perfect scale factors)
-// Off-diagonal < 0.002 (negligible cross-axis coupling)
-// ESP32-S3 executes the 9 MACs on the hardware FPU in < 10 ns at 240 MHz.
-const float CALIB_W[3][3] = {{+1.000824f, -0.000511f, -0.001575f},
-                             {-0.000511f, +1.000989f, -0.000132f},
-                             {-0.001575f, -0.000132f, +1.003466f}};
+// Transformation Matrix (Scale & Orthogonality) - Default: Identity Matrix
+// WARNING: Do not set the main diagonal to 0, or acceleration will be multiplied by 0!
+const float CALIB_W[3][3] = {
+    {1.0f, 0.0f, 0.0f},
+    {0.0f, 1.0f, 0.0f},
+    {0.0f, 0.0f, 1.0f}
+};
+
+/*
+// EXAMPLE OF A CALIBRATED SET (From the author's specific MPU-6886 unit)
+// Result: σ(‖a‖) 0.042 g → 0.023 g (−45.6 %)
+// AZ bias = −0.065 g corrects the anomaly identified in pendulum tests.
+const float CALIB_B_EXAMPLE[3] = { -0.00125f, +0.00429f, -0.06491f };
+
+const float CALIB_W_EXAMPLE[3][3] = {
+    {+1.000824f, -0.000511f, -0.001575f},
+    {-0.000511f, +1.000989f, -0.000132f},
+    {-0.001575f, -0.000132f, +1.003466f}
+};
+*/
