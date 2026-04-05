@@ -10,7 +10,7 @@ Dual-core FreeRTOS telemetry firmware for ESP32-S3 with 50Hz ESKF sensor fusion 
 > Motorsport telemetry system for the **M5Stack Atom S3** (ESP32-S3).
 > 50 Hz IMU · GPS fusion · Error-State Kalman Filter · SD logging · MoTeC i2 Pro export
 
-![Dashboard – full lap raw vs ESKF](img/Giro_completo_raw.jpeg)
+![Dashboard – full lap raw](img/Giro_completo_raw.jpeg)
 
 ---
 
