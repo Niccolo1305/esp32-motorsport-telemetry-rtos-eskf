@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────────────────────
-# Motorsport Telemetry Analysis Dashboard  v1.2.0
+# Motorsport Telemetry Analysis Dashboard  v1.2.2
 # ──────────────────────────────────────────────────────────────────────────────
 # A high-performance, interactive telemetry viewer built with Dash and Plotly.
 # Designed to visualize and analyze 200,000+ row CSV files from data-logger
@@ -23,7 +23,7 @@ import sys
 import os
 import numpy as np
 import pandas as pd
-from pyproj import Transformer
+
 from dash import (Dash, dcc, html, Input, Output, State,
                   callback, no_update, ctx, Patch)
 import dash_bootstrap_components as dbc
@@ -224,9 +224,19 @@ def load_and_prepare(path: str) -> pd.DataFrame:
 def _convert_kf_to_wgs84(df: pd.DataFrame) -> pd.DataFrame:
     """Project Kalman-filter (x, y) ENU metres back to WGS-84 latitude/longitude.
 
-    Uses an Azimuthal Equidistant projection centered on the first valid GPS
-    fix to perform the inverse transform.  If no valid GPS data exists, the
-    output columns are filled with zeros.
+    Uses the same equirectangular (flat-earth) projection that the firmware
+    uses in ``wgs84_to_enu()`` (eskf.h) so that the inverse transform is
+    exact.  The firmware forward transform is:
+        east  = dlon · cos(lat0) · R
+        north = dlat · R
+    so the inverse is:
+        lat = lat0 + north / R
+        lon = lon0 + east / (R · cos(lat0))
+
+    The firmware ENU origin (lat0, lon0) is recovered from the first row that
+    has a valid GPS fix by subtracting its kf_x/kf_y offset.  This makes the
+    conversion correct even for part-files that start mid-session, where the
+    first GPS coordinate is far from the original firmware origin.
 
     Args:
         df: DataFrame containing ``gps_lat (°)``, ``gps_lon (°)``,
@@ -239,16 +249,23 @@ def _convert_kf_to_wgs84(df: pd.DataFrame) -> pd.DataFrame:
     if valid.empty:
         df["kf_lat"] = 0.0; df["kf_lon"] = 0.0
         return df
-    lat0, lon0 = valid["gps_lat (°)"].iloc[0], valid["gps_lon (°)"].iloc[0]
-    proj = f"+proj=aeqd +lat_0={lat0} +lon_0={lon0} +datum=WGS84 +units=m"
-    tr = Transformer.from_crs(proj, "EPSG:4326", always_xy=True)
-    kf_lon, kf_lat = tr.transform(df["kf_x (m)"].values, df["kf_y (m)"].values)
-    df["kf_lat"], df["kf_lon"] = kf_lat, kf_lon
+    R = 6_371_000.0
+    # Recover the firmware ENU origin: the GPS coordinate of this row minus
+    # the ENU offset the firmware computed for it (kf_x, kf_y).
+    row0 = valid.iloc[0]
+    gps_lat0 = row0["gps_lat (°)"]
+    gps_lon0 = row0["gps_lon (°)"]
+    cos_lat_approx = np.cos(np.radians(gps_lat0))
+    lat0 = gps_lat0 - np.degrees(row0["kf_y (m)"] / R)
+    lon0 = gps_lon0 - np.degrees(row0["kf_x (m)"] / (R * cos_lat_approx))
+    cos_lat0 = np.cos(np.radians(lat0))
+    df["kf_lat"] = lat0 + np.degrees(df["kf_y (m)"].values / R)
+    df["kf_lon"] = lon0 + np.degrees(df["kf_x (m)"].values / (R * cos_lat0))
     return df
 
 
 print(f"\n{BOLD}╔══════════════════════════════════════════════════════╗{RESET}")
-print(f"{BOLD}║       TELEMETRY DASHBOARD — File Selector            ║{RESET}")
+print(f"{BOLD}║       TELEMETRY DASHBOARD v1.2.2 — File Selector     ║{RESET}")
 print(f"{BOLD}╚══════════════════════════════════════════════════════╝{RESET}\n")
 
 CSV_PATH = _select_csv()
@@ -793,7 +810,7 @@ app = Dash(__name__,
                dbc.themes.VAPOR,
                "https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap",
            ],
-           title="Telemetry Dashboard v1.2.0",
+           title="Telemetry Dashboard v1.2.2",
            update_title=None)
 
 
@@ -822,7 +839,7 @@ app.layout = html.Div(style={
 }, children=[
     # ── Header ────────────────────────────────────────────────────────────
     html.H1(["Telemetry Dashboard ",
-             html.Span("v1.2.0", style={
+             html.Span("v1.2.2", style={
                  "fontSize": "14px", "fontWeight": "400", "color": ACCENT,
                  "verticalAlign": "super", "marginLeft": "8px",
                  "border": f"1px solid {ACCENT}", "borderRadius": "6px",
@@ -1208,7 +1225,7 @@ def find_free_port(start=8050, end=8060):
 
 if __name__ == "__main__":
     port = find_free_port()
-    print(f"\n  Telemetry Dashboard v1.2.0")
+    print(f"\n  Telemetry Dashboard v1.2.2")
     print(f"   {N:,} samples — {DF['t_s'].iloc[-1]:.1f} s / {DF['distance_m'].iloc[-1]:.0f} m")
     if port != 8050:
         print(f"   Port 8050 in use — using port {port} instead")
