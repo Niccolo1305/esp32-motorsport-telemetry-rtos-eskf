@@ -640,6 +640,25 @@
 //     protocols, and Kalman filter math are byte-for-byte identical.
 //   - Telemetria.ino now contains only setup() and loop().
 //
+// v1.1.1 — Madgwick Dual-Gate Adaptive Beta Fix
+//   - BUG (MINOR, Physics) — Adaptive beta gate too wide during cornering:
+//     The single accel-deviation gate used a 0.15 g divisor. At 0.3–0.5 g
+//     of sustained lateral acceleration ‖a‖ stays near 1 g by Pythagoras
+//     (0.3 g lateral → only ~0.045 g deviation from 1 g), so beta_eff
+//     remained non-zero and Madgwick kept pulling the quaternion toward the
+//     tilted net-force vector. Observed effect: ~7°/s gravity-reference drift
+//     in roundabout logs.
+//     Fix (madgwick.h): dual gate via fminf of two independent factors:
+//       k_acc = fmaxf(0, 1 − dist_from_1g / 0.05f)   [tightened: 0.15→0.05]
+//       k_gyr = fmaxf(0, 1 − |gz| / 0.2618f)          [new: 15°/s cutoff]
+//       beta_eff = beta × fminf(k_acc, k_gyr)
+//     k_acc fully suppresses beta above ~0.32 g lateral; k_gyr suppresses
+//     it above 15°/s yaw rate, catching sustained cornering before the accel
+//     magnitude has time to wander. Both must be quiet simultaneously for
+//     Madgwick to apply any accelerometer correction.
+//     No changes to gradient descent math, quaternion integration, or
+//     get_gravity_vector().
+//
 // ==========================================================
 
 #include <M5Unified.h>

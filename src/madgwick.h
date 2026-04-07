@@ -2,7 +2,7 @@
 // madgwick.h — Madgwick AHRS (Attitude and Heading Reference System)
 //
 // Header-only. Uses fast_inv_sqrt from math_utils.h.
-// Adaptive beta: decays linearly from full to zero as ||a|| deviates from 1g.
+// Adaptive beta: dual gate (accel deviation from 1g + yaw rate); fminf of both.
 #pragma once
 
 #include <math.h>
@@ -63,13 +63,18 @@ public:
     s2 *= inv_norm_s;
     s3 *= inv_norm_s;
 
-    // LINEAR ADAPTIVE BETA
-    // distance = 0.000 g → full beta | distance = 0.150 g → zero beta
-    // Threshold 0.15 g ≈ 0.75 g lateral (Pythagoras): correct for car manoeuvres.
-    // With ellipsoidal calibration active, ‖a‖ at rest ≈ 1.000 g exactly
-    // → working point always in full-beta regime when stationary.
+    // DUAL-GATE ADAPTIVE BETA
+    // Madgwick trusts the accelerometer as a gravity reference only when both
+    // gates are quiet: accel magnitude near 1g AND yaw rate below 15°/s.
+    // k_acc: fully off when ‖a‖ deviates >0.05 g from 1g (lateral >~0.32 g).
+    // k_gyr: fully off when |gz| >15°/s (0.2618 rad/s), suppressing drift
+    //        during sustained cornering even if ‖a‖ hasn't yet wandered far.
+    // Designed to fully disable accel correction above ~0.3 g lateral or
+    // |yaw rate| >15°/s, preventing the ~7°/s gravity drift seen in roundabouts.
     float dist_from_1g = fabsf(raw_norm - 1.0f);
-    float beta_eff = beta * fmaxf(0.0f, 1.0f - (dist_from_1g / 0.15f));
+    float k_acc = fmaxf(0.0f, 1.0f - (dist_from_1g / 0.05f));
+    float k_gyr = fmaxf(0.0f, 1.0f - (fabsf(gz) / 0.2618f));
+    float beta_eff = beta * fminf(k_acc, k_gyr);
 
     // STEP 3 — Quaternion derivative: q_dot = 0.5 * q ⊗ ω
     float qDot0 = 0.5f * (-q1 * gx - q2 * gy - q3 * gz);
