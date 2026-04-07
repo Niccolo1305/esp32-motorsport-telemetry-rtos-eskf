@@ -34,6 +34,19 @@ Recorded sessions are stored in a compact binary format on a micro-SD card and c
 | Storage | Micro-SD | SPI (pins 5–8) |
 | Display | Built-in LCD | M5Unified |
 
+## Bill of Materials
+
+The entire project is designed to be affordable, modular, and extremely compact. You can build the full telemetry stack for **under $30**.
+
+| Component | Role | Price (Est.) | Link |
+|:----------|:-----|:-------------|:-----|
+| **ATOMS3 Dev Kit** (0.85" screen) | Core MCU (ESP32-S3 dual-core), MPU-6886 IMU, built-in LCD | ~$15.50 | [M5Stack Store](https://shop.m5stack.com/products/atoms3-dev-kit-w-0-85-inch-screen?variant=43676991258881) |
+| **GPS/BDS Unit v1.1** (AT6668) | 10 Hz position and speed data for ESKF sequential correction | ~$9.95 | [M5Stack Store](https://shop.m5stack.com/products/gps-bds-unit-v1-1-at6668) |
+| **ATOMIC TF-Card Reader** | SPI interface for 50 Hz async binary data logging | ~$4.50 | [M5Stack Store](https://shop.m5stack.com/products/atomic-tf-card-reader) |
+| **Total** | | **~$29.95** | |
+
+> A standard Micro SD card (FAT32, ≤ 16 GB, Class 10 or faster) is also required.
+
 ---
 
 ## Features
@@ -53,9 +66,9 @@ Recorded sessions are stored in a compact binary format on a micro-SD card and c
 
 ## Screenshots
 
-| Roundabout | Tight corner (filtered) |
-|--------------------------|------------------------|
-| ![Rotonda raw vs ESKF](img/Rotonda_raw_eskf.jpeg) | ![Curva stretta filtered](img/Curva_stretta_filtered.jpeg) |
+| Fast corner · filtered + ESKF · 3D G-G | Tight corner (filtered) |
+|----------------------------------------|-------------------------|
+| ![Fast corner filtered ESKF dashboard](img/Curva_lunga_yaw_grip_eskf.png) | ![Curva stretta filtered](img/Curva_stretta_filtered.jpeg) |
 
 | Fast corner (raw) | Yaw · Roll · Grip |
 |-------------------|-------------------|
