@@ -1,0 +1,81 @@
+ZARU 3-axis — Note di revisione (v1.2.1)
+========================================
+Data implementazione: 2026-04-10
+
+## Cosa e stato modificato e perche
+
+Prima del v0.9.0, ZARU aggiornava bias_gz direttamente: tutti i valori gx/gy/gz
+loggati su SD erano automaticamente privi di drift termico.
+
+Con il Data Fork (v0.9.0), thermal_bias_gz venne spostato su un ramo separato
+applicato solo a gz_eskf prima del Kalman. Effetto collaterale: i canali gx/gy/gz
+e raw_gx/gy/gz nel CSV iniziarono a driftare dopo pochi minuti di sessione.
+
+v1.2.1 estende ZARU a tutti e 3 gli assi (gx, gy, gz) e applica la correzione
+ai valori in uscita (SD log, MQTT, display) senza toccare Madgwick ne ESKF.
+
+File modificato: src/filter_task.cpp
+  - Aggiunti gx_var_buf[50] e gy_var_buf[50] (stesso indice e warm-up di gz)
+  - thermal_bias_gx/gy appresi quando is_stationary
+  - thermal_bias_gx/gy aggiornati con EMA lenta (alpha=0.01) su rettilineo veloce
+  - shared_telemetry.ema_gx/gy/gz = ema - thermal_bias (corretto)
+  - rec.gx/gy/gz = ema - thermal_bias (corretto)
+  - rec.raw_gx/gy/gz = gyro_r - thermal_bias (corretto)
+  - Madgwick e ESKF invariati
+  - Formato binario invariato (122 byte/record)
+
+
+## Come verificare se la patch funziona
+
+TEST 1 — Statico (5 minuti, dispositivo fermo):
+  - Accendere il dispositivo, lasciarlo fermo per almeno 5 minuti
+  - Convertire il .bin in CSV con bin_to_csv.py
+  - Aprire il CSV e verificare le colonne gx, gy, gz:
+    ATTESO: valori stabili intorno a 0, range < 0.05 deg/s per tutta la sessione
+    FALLITO: valori che driftano lentamente (tipicamente 0.1-0.4 deg/s in 5 min)
+  - Confronto: stesso test con firmware v1.2.0 mostra drift evidente
+
+TEST 2 — Sessione con sosta + movimento:
+  - Registrare una sessione con almeno 2 minuti di sosta iniziale
+  - Verificare che gx/gy/gz tornino a ~0 dopo ogni sosta
+  - Verificare che kf6_bgz e gz siano sostanzialmente coincidenti (< 0.01 deg/s)
+
+TEST 3 — Controllo ESKF invariato:
+  - Confrontare kf_heading tra v1.2.0 e v1.2.1 sullo stesso percorso
+  - ATTESO: identico (ESKF non e stato toccato)
+
+
+## Come rimuovere o disabilitare se crea problemi
+
+OPZIONE A — Disabilita rapida senza rimuovere il codice:
+  In filter_task.cpp, nel blocco adaptive ZARU, impostare:
+    thermal_bias_gx = 0.0f;
+    thermal_bias_gy = 0.0f;
+  Questo azzera la correzione per gx e gy (gz rimane attivo).
+
+OPZIONE B — Revert completo a v1.2.0:
+  I 5 punti da ripristinare in filter_task.cpp:
+  1. STEP 8 static vars: rimuovere gx_var_buf, gy_var_buf, thermal_bias_gx/gy
+  2. Buffer feed: rimuovere le 2 righe gx_var_buf/gy_var_buf[gz_var_idx]
+  3. Mean loop: rimuovere sum_gx, sum_gy, mean_gx, mean_gy
+  4. Adaptive ZARU: rimuovere le 2 righe thermal_bias_gx/gy = mean_gx/gy
+  5. Straight-line ZARU: rimuovere le 2 righe thermal_bias_gx/gy con EMA
+  6. shared_telemetry: ripristinare ema_gx/gy/gz senza sottrazione
+  7. SD record: ripristinare rec.gx/gy/gz e rec.raw_gx/gy/gz senza sottrazione
+
+
+## Rischi noti e limiti
+
+- gx/gy ZARU apprende il bias medio della finestra is_stationary.
+  Se il veicolo e in piega costante a bassa velocita (GPS < 2 km/h, var_gz bassa)
+  il gate mean_gz < 2.5 deg/s blocca l'aggiornamento di gz ma NON di gx/gy.
+  In pratica questo scenario e molto raro (piega lenta stazionaria).
+
+- Straight-line ZARU per gx/gy assume roll=0 e pitch=0 sul rettilineo.
+  Se la moto percorre un rettilineo in salita sostenuta, ema_gy contiene
+  la pitch rate vera (non solo il bias) -> thermal_bias_gy potrebbe spostarsi.
+  Il gate |lin_ay| < 0.02g non copre questo caso. Impatto: leggera sovracorrezione
+  su gy durante salite veloci. Accettabile per uso attuale.
+
+- Durante il warm-up (primi 50 campioni = 1 secondo), thermal_bias_gx/gy = 0.
+  Nessun impatto pratico.

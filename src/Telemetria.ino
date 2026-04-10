@@ -689,6 +689,27 @@
 //                           gyro/accel/temperature table + 4-subplot PNG.
 //       kgs_calc.py       — computes the 3×3 K_gs matrix from per-face means.
 //
+// v1.2.1 — ZARU 3-axis: drift correction applied to logged gyro channels
+//   - Root cause: in v0.9.0 the Data Fork moved ZARU correction to a branch
+//     exclusive to the ESKF (gz_eskf = gz_rad - thermal_bias_gz). The EMA
+//     and raw gyro channels logged to SD, MQTT, and display kept the
+//     uncorrected pre-ZARU signal, causing visible drift in gx/gy/gz after
+//     a few minutes even when the vehicle was stationary.
+//   - Before v0.9.0: ZARU updated bias_gz directly → all consumers clean.
+//   - Fix: ZARU extended to all 3 axes. Two additional circular buffers
+//     (gx_var_buf, gy_var_buf, VAR_BUF_SIZE=50) share the same index and
+//     warm-up counter as gz_var_buf. mean_gx and mean_gy are computed in
+//     the same loop pass, zero extra iteration cost.
+//   - thermal_bias_gx/gy learned when is_stationary (same condition as gz).
+//     Also updated via slow EMA (α=0.01) in the straight-line ZARU block
+//     (speed > 40 km/h, |lin_ay| < 0.02 g): on a fast straight roll≈0
+//     and pitch≈0, so ema_gx/gy residuals are pure thermal bias.
+//   - Correction subtracted at output only (shared_telemetry, SD rec.gx/gy/gz,
+//     rec.raw_gx/gy/gz). Buffers read pre-correction EMA values → no
+//     feedback loop. Madgwick and ESKF inputs unchanged.
+//   - Record binary format unchanged (122 bytes): no new fields.
+//     gx/gy/gz and raw_gx/gy/gz now carry ZARU-corrected values.
+//
 // ==========================================================
 
 #include <M5Unified.h>
