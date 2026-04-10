@@ -101,37 +101,50 @@ void Task_Filter(void *pvParameters) {
         prev_gy = ema_gy;
         prev_gz = ema_gz;
 
-        // ── STEP 8: Statistical ZUPT/ZARU Engine (ema_gz Variance) ────
-        // Circular buffer of 50 samples (1 s at 50 Hz) of EMA-filtered gz.
-        // Buffer variance determines the stationary condition (is_stationary)
-        // together with GPS speed.
-        // NOTE: the buffer uses ema_gz (EMA) to suppress high-frequency noise
-        // that would otherwise cause false negatives on variance.
-        // Raw gz_rad goes to the ESKF via the Data Fork.
+        // ── STEP 8: Statistical ZUPT/ZARU Engine — 3-axis (v1.2.1) ────
+        // Circular buffer of 50 samples (1 s at 50 Hz) of EMA-filtered gyro.
+        // gz variance determines is_stationary (together with GPS speed).
+        // gx/gy share the same index and warm-up counter: no extra overhead.
+        // NOTE: buffers use pre-correction EMA values to avoid feedback loop —
+        // thermal_bias is subtracted only at the output (log/display), not here.
+        // Raw gz_rad goes to the ESKF via the Data Fork (unchanged).
         //
         // Warm-up: variance is not computed until gz_var_count >= VAR_BUF_SIZE
         // → prevents false positives from a partially filled buffer.
         static float gz_var_buf[VAR_BUF_SIZE];
+        static float gx_var_buf[VAR_BUF_SIZE]; // v1.2.1: ZARU extended to gx
+        static float gy_var_buf[VAR_BUF_SIZE]; // v1.2.1: ZARU extended to gy
         static int gz_var_idx = 0;
         static int gz_var_count = 0;
         static float thermal_bias_gz = 0.0f; // [°/s] learned dynamic thermal offset
+        static float thermal_bias_gx = 0.0f; // [°/s] v1.2.1
+        static float thermal_bias_gy = 0.0f; // [°/s] v1.2.1
 
         gz_var_buf[gz_var_idx] = ema_gz;
+        gx_var_buf[gz_var_idx] = ema_gx; // same index and warm-up as gz
+        gy_var_buf[gz_var_idx] = ema_gy;
         gz_var_idx = (gz_var_idx + 1) % VAR_BUF_SIZE;
         if (gz_var_count < VAR_BUF_SIZE) gz_var_count++;
 
         // Variance and mean computed only after complete warm-up.
-        // var_gz and mean_gz are used after the mutex release to
-        // determine is_stationary together with GPS speed.
+        // var_gz and mean_gz used to determine is_stationary.
+        // mean_gx/gy used to update thermal_bias_gx/gy when stationary.
         float var_gz = -1.0f;  // sentinel: <0 = warm-up incomplete
         float mean_gz = 0.0f;
+        float mean_gx = 0.0f;
+        float mean_gy = 0.0f;
         if (gz_var_count >= VAR_BUF_SIZE) {
           float sum = 0.0f, sum_sq = 0.0f;
+          float sum_gx = 0.0f, sum_gy = 0.0f;
           for (int i = 0; i < VAR_BUF_SIZE; i++) {
-            sum += gz_var_buf[i];
+            sum    += gz_var_buf[i];
             sum_sq += gz_var_buf[i] * gz_var_buf[i];
+            sum_gx += gx_var_buf[i];
+            sum_gy += gy_var_buf[i];
           }
           mean_gz = sum / (float)VAR_BUF_SIZE;
+          mean_gx = sum_gx / (float)VAR_BUF_SIZE;
+          mean_gy = sum_gy / (float)VAR_BUF_SIZE;
           // fmaxf: prevents numerically negative variance from floating-point
           // cancellation when samples are nearly identical (vehicle stationary).
           var_gz = fmaxf(0.0f,
@@ -142,9 +155,10 @@ void Task_Filter(void *pvParameters) {
         shared_telemetry.ema_ax = ema_ax;
         shared_telemetry.ema_ay = ema_ay;
         shared_telemetry.ema_az = ema_az;
-        shared_telemetry.ema_gx = ema_gx;
-        shared_telemetry.ema_gy = ema_gy;
-        shared_telemetry.ema_gz = ema_gz;
+        // v1.2.1: ZARU correction applied at output (buffer read pre-correction)
+        shared_telemetry.ema_gx = ema_gx - thermal_bias_gx;
+        shared_telemetry.ema_gy = ema_gy - thermal_bias_gy;
+        shared_telemetry.ema_gz = ema_gz - thermal_bias_gz;
 
         // lap_snap captured inside the lock: consistent with the EMA data just computed.
         uint8_t lap_snap = (system_state == 2) ? 1 : 0;
@@ -208,6 +222,8 @@ void Task_Filter(void *pvParameters) {
         // drift without introducing latency.
         if (is_stationary) {
           thermal_bias_gz = mean_gz; // [°/s], instant learning
+          thermal_bias_gx = mean_gx; // v1.2.1
+          thermal_bias_gy = mean_gy; // v1.2.1
         }
 
         // ── Straight-line ZARU (v0.9.7, BUG-3 fix v0.9.13) ─────────
@@ -226,6 +242,8 @@ void Task_Filter(void *pvParameters) {
         if (!is_stationary && last_gps.valid && last_gps.speed_kmh > 40.0f) {
           if (fabsf(lin_ay) < 0.02f && fabsf(ema_gz) < 2.0f) {
             thermal_bias_gz = 0.01f * ema_gz + 0.99f * thermal_bias_gz;
+            thermal_bias_gx = 0.01f * ema_gx + 0.99f * thermal_bias_gx; // v1.2.1: roll≈0 on straight
+            thermal_bias_gy = 0.01f * ema_gy + 0.99f * thermal_bias_gy; // v1.2.1: pitch≈0 on straight
           }
         }
 
@@ -294,9 +312,10 @@ void Task_Filter(void *pvParameters) {
           rec.ax = ema_ax;
           rec.ay = ema_ay;
           rec.az = ema_az;
-          rec.gx = ema_gx;
-          rec.gy = ema_gy;
-          rec.gz = ema_gz;
+          // v1.2.1: ZARU correction applied to logged values (same as shared_telemetry)
+          rec.gx = ema_gx - thermal_bias_gx;
+          rec.gy = ema_gy - thermal_bias_gy;
+          rec.gz = ema_gz - thermal_bias_gz;
           rec.temp_c = data.temp_c;
           rec.lap = lap_snap;
           // GPS: use the static cache last_gps (already updated above)
@@ -312,8 +331,11 @@ void Task_Filter(void *pvParameters) {
           rec.kf_vel = eskf.speed_ms();
           rec.kf_heading = eskf.heading();
           // Raw post-Madgwick IMU: bypasses EMA, zero-latency (feeds ESKF via Data Fork)
+          // v1.2.1: ZARU correction applied to raw gyro channels as well
           rec.raw_ax = lin_ax; rec.raw_ay = lin_ay; rec.raw_az = lin_az;
-          rec.raw_gx = gx_r;   rec.raw_gy = gy_r;   rec.raw_gz = gz_r;
+          rec.raw_gx = gx_r - thermal_bias_gx;
+          rec.raw_gy = gy_r - thermal_bias_gy;
+          rec.raw_gz = gz_r - thermal_bias_gz;
           // ESKF 6D Shadow (v0.9.8)
           rec.kf6_x = eskf6.px();
           rec.kf6_y = eskf6.py();
