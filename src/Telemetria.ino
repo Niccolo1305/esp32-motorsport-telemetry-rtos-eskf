@@ -704,11 +704,23 @@
 //     Also updated via slow EMA (α=0.01) in the straight-line ZARU block
 //     (speed > 40 km/h, |lin_ay| < 0.02 g): on a fast straight roll≈0
 //     and pitch≈0, so ema_gx/gy residuals are pure thermal bias.
-//   - Correction subtracted at output only (shared_telemetry, SD rec.gx/gy/gz,
-//     rec.raw_gx/gy/gz). Buffers read pre-correction EMA values → no
-//     feedback loop. Madgwick and ESKF inputs unchanged.
+//   - Correction subtracted at EMA output only (shared_telemetry, SD rec.gx/gy/gz).
+//     Buffers read pre-correction EMA values → no feedback loop.
+//     rec.raw_gx/gy/gz remain uncorrected (true post-Madgwick signal for
+//     offline diagnostics and re-processing).
+//     Madgwick and ESKF inputs unchanged.
 //   - Record binary format unchanged (122 bytes): no new fields.
-//     gx/gy/gz and raw_gx/gy/gz now carry ZARU-corrected values.
+//
+// v1.2.2 — ZARU bias snapshot: consistent correction across outputs
+//   - Bug: shared_telemetry (inside mutex) used thermal_bias from the previous
+//     cycle, while SD rec (outside mutex, after ZARU update) used the freshly
+//     updated bias. Result: 1-sample (20 ms) discrepancy between display/MQTT
+//     and SD log for the same instant.
+//   - Fix: snapshot tb_gx/gy/gz = thermal_bias_gx/gy/gz before any output.
+//     Both shared_telemetry and rec.gx/gy/gz now subtract the same snapshot.
+//   - ESKF gz_eskf intentionally uses live thermal_bias_gz (post-ZARU update)
+//     for the most accurate predict step — not affected by the snapshot.
+//   - rec.raw_gx/gy/gz unchanged (uncorrected since v1.2.1).
 //
 // ==========================================================
 
