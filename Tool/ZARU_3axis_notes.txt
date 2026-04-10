@@ -20,7 +20,7 @@ File modificato: src/filter_task.cpp
   - thermal_bias_gx/gy aggiornati con EMA lenta (alpha=0.01) su rettilineo veloce
   - shared_telemetry.ema_gx/gy/gz = ema - thermal_bias (corretto)
   - rec.gx/gy/gz = ema - thermal_bias (corretto)
-  - rec.raw_gx/gy/gz = gyro_r - thermal_bias (corretto)
+  - rec.raw_gx/gy/gz = gyro_r (NON corretto: segnale grezzo per diagnostica offline)
   - Madgwick e ESKF invariati
   - Formato binario invariato (122 byte/record)
 
@@ -61,7 +61,8 @@ OPZIONE B — Revert completo a v1.2.0:
   4. Adaptive ZARU: rimuovere le 2 righe thermal_bias_gx/gy = mean_gx/gy
   5. Straight-line ZARU: rimuovere le 2 righe thermal_bias_gx/gy con EMA
   6. shared_telemetry: ripristinare ema_gx/gy/gz senza sottrazione
-  7. SD record: ripristinare rec.gx/gy/gz e rec.raw_gx/gy/gz senza sottrazione
+  7. SD record: ripristinare rec.gx/gy/gz senza sottrazione
+     (rec.raw_gx/gy/gz sono gia non corretti, nessuna modifica necessaria)
 
 
 ## Rischi noti e limiti

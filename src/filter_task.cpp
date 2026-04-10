@@ -152,13 +152,21 @@ void Task_Filter(void *pvParameters) {
         }
         // ──────────────────────────────────────────────────────────────────
 
+        // v1.2.2: snapshot ZARU bias before output to guarantee shared_telemetry
+        // and SD record use the same correction value. Without this, the ZARU
+        // update (outside mutex) would make the SD record see a newer bias than
+        // shared_telemetry within the same cycle (1-sample / 20 ms discrepancy).
+        const float tb_gx = thermal_bias_gx;
+        const float tb_gy = thermal_bias_gy;
+        const float tb_gz = thermal_bias_gz;
+
         shared_telemetry.ema_ax = ema_ax;
         shared_telemetry.ema_ay = ema_ay;
         shared_telemetry.ema_az = ema_az;
         // v1.2.1: ZARU correction applied at output (buffer read pre-correction)
-        shared_telemetry.ema_gx = ema_gx - thermal_bias_gx;
-        shared_telemetry.ema_gy = ema_gy - thermal_bias_gy;
-        shared_telemetry.ema_gz = ema_gz - thermal_bias_gz;
+        shared_telemetry.ema_gx = ema_gx - tb_gx;
+        shared_telemetry.ema_gy = ema_gy - tb_gy;
+        shared_telemetry.ema_gz = ema_gz - tb_gz;
 
         // lap_snap captured inside the lock: consistent with the EMA data just computed.
         uint8_t lap_snap = (system_state == 2) ? 1 : 0;
@@ -247,13 +255,22 @@ void Task_Filter(void *pvParameters) {
           }
         }
 
+        // ── ESKF 5D vs 6D: different bias strategies ────────────────
+        // 5D: bias is removed externally by ZARU before entering the filter.
+        //     The 5D state has no bias term: X=[px,py,vx,vy,θ].
+        // 6D: bias is estimated internally as X[5]=b_gz (random walk model).
+        //     It receives raw gz_rad so it can learn the bias independently.
+        //     Feeding gz_eskf (already ZARU-corrected) would cause double
+        //     subtraction and collapse the bias state to ≈0, defeating the
+        //     purpose of the shadow comparison.
+        // Having two independent bias estimates (ZARU statistical vs Kalman
+        // model-based) enables offline A/B validation via kf6_bgz in the CSV.
         float gz_eskf = gz_rad - (thermal_bias_gz * DEG2RAD); // [rad/s]
         eskf.predict(lin_ax, lin_ay, gz_eskf, dt_real_sec, is_stationary);
 
-        // Shadow 6D: receives pure gz_rad (bias is in the state, no double subtraction)
         eskf6.predict(lin_ax, lin_ay, gz_rad, dt_real_sec, is_stationary);
 
-        // 6D ZUPT bias: when stationary, measured gz ≈ pure bias
+        // 6D ZUPT bias: when stationary, measured gz ≈ pure bias → observation
         if (is_stationary) {
           eskf6.correct_bias(gz_rad, 0.001f);
         }
@@ -313,9 +330,10 @@ void Task_Filter(void *pvParameters) {
           rec.ay = ema_ay;
           rec.az = ema_az;
           // v1.2.1: ZARU correction applied to logged values (same as shared_telemetry)
-          rec.gx = ema_gx - thermal_bias_gx;
-          rec.gy = ema_gy - thermal_bias_gy;
-          rec.gz = ema_gz - thermal_bias_gz;
+          // v1.2.2: uses tb_gx/gy/gz snapshot (same bias as shared_telemetry above)
+          rec.gx = ema_gx - tb_gx;
+          rec.gy = ema_gy - tb_gy;
+          rec.gz = ema_gz - tb_gz;
           rec.temp_c = data.temp_c;
           rec.lap = lap_snap;
           // GPS: use the static cache last_gps (already updated above)
@@ -331,11 +349,10 @@ void Task_Filter(void *pvParameters) {
           rec.kf_vel = eskf.speed_ms();
           rec.kf_heading = eskf.heading();
           // Raw post-Madgwick IMU: bypasses EMA, zero-latency (feeds ESKF via Data Fork)
-          // v1.2.1: ZARU correction applied to raw gyro channels as well
+          // raw_g* are NOT ZARU-corrected: true uncorrected signal for offline
+          // diagnostics and re-processing. Use gx/gy/gz (EMA) for clean values.
           rec.raw_ax = lin_ax; rec.raw_ay = lin_ay; rec.raw_az = lin_az;
-          rec.raw_gx = gx_r - thermal_bias_gx;
-          rec.raw_gy = gy_r - thermal_bias_gy;
-          rec.raw_gz = gz_r - thermal_bias_gz;
+          rec.raw_gx = gx_r;   rec.raw_gy = gy_r;   rec.raw_gz = gz_r;
           // ESKF 6D Shadow (v0.9.8)
           rec.kf6_x = eskf6.px();
           rec.kf6_y = eskf6.py();
