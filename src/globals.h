@@ -53,6 +53,9 @@ extern float sin_phi, cos_phi;
 extern float sin_theta, cos_theta;
 extern float bias_gx, bias_gy, bias_gz;
 extern float bias_ax, bias_ay, bias_az;
+// Ellipsoid-calibrated chip-frame accel at boot (used for K_gs differential correction).
+// bias_gz absorbs K_gz * a_boot; correction at runtime uses (a_cal - a_boot).
+extern float ax_boot_cal, ay_boot_cal, az_boot_cal;
 
 // ── EMA Previous Values ────────────────────────────────────────────────────
 // Read/written by Task_Filter under telemetry_mutex.

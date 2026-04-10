@@ -659,6 +659,36 @@
 //     No changes to gradient descent math, quaternion integration, or
 //     get_gravity_vector().
 //
+// v1.2.0 — G-Sensitivity Correction (K_gs 3×3 matrix, MPU-6886)
+//   - G-sensitivity characterisation: dedicated test firmware (version "test-gsen")
+//     logs chip-frame IMU data (ax_cal, ay_cal, az_cal, gx_clean, gy_clean, gz_clean)
+//     bypassing rotate_3d and Madgwick. 6-face static test at thermal equilibrium
+//     with WiFi disabled (eliminates thermal contamination from radio events).
+//   - K_gs matrix measured by differential 6-face method:
+//     K[i][j] = (gyro_i at +1g on axis_j − gyro_i at −1g on axis_j) / ΔG_j
+//     Data sources: tel_gsen4.csv (Z, X pairs) + tel_82.csv (Y pair, WiFi-off).
+//     Trim: 30 s time-trim each end + 5 % value-trim (scipy.trim_mean).
+//
+//            az(j=0)    ax(j=1)    ay(j=2)   [(°/s)/g]
+//   gx(i=0): +0.6056    +0.7969    -0.1346
+//   gy(i=1): +0.0712    +0.3539    -0.0908
+//   gz(i=2): -0.1547    -0.0372    -0.0003   <-- ESKF heading axis
+//
+//   - Boot calibration interaction: bias_gz (trimmed mean of raw gyro at boot)
+//     absorbs K_gz · a_boot at whatever orientation the device was during the
+//     2 s calibration window. The runtime correction therefore uses the
+//     incremental form Δa = a_cal − a_boot, not the absolute accel.
+//     This is orientation-independent at boot (device does not need to be flat).
+//   - New globals ax_boot_cal, ay_boot_cal, az_boot_cal (chip-frame ellipsoid-
+//     calibrated accel trimmed means) saved by calibrate_alignment() under
+//     telemetry_mutex and read by Task_Filter.
+//   - Correction applied in filter_task.cpp STEP 4, after bias subtraction and
+//     before rotate_3d(), on gx_clean / gy_clean / gz_clean (chip frame).
+//   - Analysis tools added to Tool/:
+//       gsen_analysis.py  — auto-segments 6 faces from CSV, outputs per-face
+//                           gyro/accel/temperature table + 4-subplot PNG.
+//       kgs_calc.py       — computes the 3×3 K_gs matrix from per-face means.
+//
 // ==========================================================
 
 #include <M5Unified.h>
