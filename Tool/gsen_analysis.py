@@ -1,10 +1,17 @@
 """
-gsen_analysis.py — G-Sensitivity Test Analysis
+gsen_analysis.py — G-Sensitivity Test Analysis & K_gs Validation
+
 Analizza il CSV prodotto da bin_to_csv.py durante il test a 6 posizioni statiche.
+Due modalità:
+  - Pre-K_gs: misura la G-sensitivity grezza (dati chip-frame)
+  - Post-K_gs (--validate): verifica che la correzione K_gs riduca lo spread
+    inter-faccia del giroscopio. Se la matrice è corretta, le medie gx/gy/gz
+    devono essere quasi indipendenti dall'orientazione.
 
 Usage:
-  python Tool/gsen_analysis.py                        # usa path default
-  python Tool/gsen_analysis.py path/to/gsen_test.csv
+  python Tool/gsen_analysis.py                             # analisi grezza
+  python Tool/gsen_analysis.py path/to/gsen_test.csv       # analisi grezza
+  python Tool/gsen_analysis.py --validate post_kgs.csv     # validazione K_gs
 """
 
 import sys
@@ -30,6 +37,12 @@ def load_csv(path: str) -> pd.DataFrame:
     df = pd.read_csv(path, encoding="latin-1")
     rename = {
         "t_ms (ms)":    "t_ms",
+        "ax (G)":       "ax",
+        "ay (G)":       "ay",
+        "az (G)":       "az",
+        "gx (°/s)":     "gx",
+        "gy (°/s)":     "gy",
+        "gz (°/s)":     "gz",
         "raw_ax (G)":   "raw_ax",
         "raw_ay (G)":   "raw_ay",
         "raw_az (G)":   "raw_az",
@@ -49,14 +62,23 @@ def estimate_fs(df: pd.DataFrame) -> float:
     return 1.0 / dt if dt > 0 else 50.0
 
 
-def detect_faces(df: pd.DataFrame, fs: float):
+def detect_faces(df: pd.DataFrame, fs: float, use_gyro: bool = False):
     """
-    Rileva le N_FACES finestre statiche usando la rolling std di |a|.
+    Rileva le N_FACES finestre statiche.
+    - use_gyro=False (default): rolling std di |a| (pre-K_gs, chip-frame data)
+    - use_gyro=True (validate mode): rolling std di |g| (post-Madgwick, gravity removed)
+      Works because during face rotations gyro axes spike, while at rest they are ~0.
     Ritorna lista di (i_start, i_end) ordinata per tempo e il rolling_std.
     """
     win = max(1, int(MOTION_WIN_S * fs))
-    rolling_std = df["a_norm"].rolling(win, center=True, min_periods=1).std().fillna(0)
-    is_still = rolling_std < MOTION_STD_THR
+    if use_gyro:
+        g_norm = np.sqrt(df["raw_gx"] ** 2 + df["raw_gy"] ** 2 + df["raw_gz"] ** 2)
+        rolling_std = g_norm.rolling(win, center=True, min_periods=1).std().fillna(0)
+        threshold = 1.0  # °/s — gyro std during rotation is >> 1
+    else:
+        rolling_std = df["a_norm"].rolling(win, center=True, min_periods=1).std().fillna(0)
+        threshold = MOTION_STD_THR
+    is_still = rolling_std < threshold
 
     # Raggruppa campioni still contigui in segmenti
     segments = []
@@ -109,15 +131,19 @@ def face_stats(seg: pd.DataFrame, time_trim: int) -> dict:
     return results
 
 
-def print_table(results: list):
+def print_table(results: list, validate_mode: bool = False):
     W = 106
     print()
     print("=" * W)
-    print("  G-SENSITIVITY TEST — Risultati per faccia (dati chip-frame, pre-rotate_3d)")
+    if validate_mode:
+        print("  G-SENSITIVITY TEST — Risultati per faccia (vehicle-frame, post-K_gs)")
+    else:
+        print("  G-SENSITIVITY TEST — Risultati per faccia (dati chip-frame, pre-rotate_3d)")
     print("=" * W)
 
     # Intestazione giroscopio
-    print(f"\n{'GIROSCOPIO':}")
+    gyro_label = "GIROSCOPIO (raw_g*: post-K_gs, pre-ZARU)" if validate_mode else "GIROSCOPIO"
+    print(f"\n{gyro_label:}")
     print(f"  {'Faccia':<10} {'N':>6} │ "
           f"{'gx_mean':>10} {'σ_gx':>8} │ "
           f"{'gy_mean':>10} {'σ_gy':>8} │ "
@@ -134,23 +160,25 @@ def print_table(results: list):
               f"{r['raw_gy_mean']:>+10.4f} {r['raw_gy_std']:>8.4f} │ "
               f"{r['raw_gz_mean']:>+10.4f} {r['raw_gz_std']:>8.4f}")
 
-    # Intestazione accelerometro
-    print(f"\n{'ACCELEROMETRO (conferma orientazione)':}")
-    print(f"  {'Faccia':<10} │ "
-          f"{'ax_mean':>10} {'σ_ax':>8} │ "
-          f"{'ay_mean':>10} {'σ_ay':>8} │ "
-          f"{'az_mean':>10} {'σ_az':>8}")
-    print(f"  {'':10} │ "
-          f"{'(g)':>10} {'(g)':>8} │ "
-          f"{'(g)':>10} {'(g)':>8} │ "
-          f"{'(g)':>10} {'(g)':>8}")
-    print("  " + "-" * (W - 2))
-    for r in results:
-        flag = " *" if r["uncertain"] else ""
-        print(f"  {r['label']+flag:<10} │ "
-              f"{r['raw_ax_mean']:>+10.4f} {r['raw_ax_std']:>8.4f} │ "
-              f"{r['raw_ay_mean']:>+10.4f} {r['raw_ay_std']:>8.4f} │ "
-              f"{r['raw_az_mean']:>+10.4f} {r['raw_az_std']:>8.4f}")
+    if not validate_mode:
+        # Intestazione accelerometro (solo in raw mode — in validate mode
+        # raw_ax/ay/az sono linear accel con gravita rimossa, non utili)
+        print(f"\n{'ACCELEROMETRO (conferma orientazione)':}")
+        print(f"  {'Faccia':<10} │ "
+              f"{'ax_mean':>10} {'σ_ax':>8} │ "
+              f"{'ay_mean':>10} {'σ_ay':>8} │ "
+              f"{'az_mean':>10} {'σ_az':>8}")
+        print(f"  {'':10} │ "
+              f"{'(g)':>10} {'(g)':>8} │ "
+              f"{'(g)':>10} {'(g)':>8} │ "
+              f"{'(g)':>10} {'(g)':>8}")
+        print("  " + "-" * (W - 2))
+        for r in results:
+            flag = " *" if r["uncertain"] else ""
+            print(f"  {r['label']+flag:<10} │ "
+                  f"{r['raw_ax_mean']:>+10.4f} {r['raw_ax_std']:>8.4f} │ "
+                  f"{r['raw_ay_mean']:>+10.4f} {r['raw_ay_std']:>8.4f} │ "
+                  f"{r['raw_az_mean']:>+10.4f} {r['raw_az_std']:>8.4f}")
 
     # Temperatura
     print(f"\n{'TEMPERATURA':}")
@@ -248,19 +276,123 @@ def plot(df: pd.DataFrame, segments: list, results: list, rolling_std: pd.Series
     plt.show()
 
 
+def validate_kgs(results: list):
+    """
+    K_gs validation: if the matrix is correct, gyro means across all faces
+    should be nearly identical (G-sensitivity removed). The spread (max-min)
+    of the per-face means is the metric: smaller = better correction.
+
+    Uses raw_gx/gy/gz (post-K_gs, pre-ZARU) to avoid ZARU masking the result.
+    """
+    W = 106
+    print()
+    print("=" * W)
+    print("  K_gs VALIDATION — Spread inter-faccia (dati vehicle-frame, post-K_gs, pre-ZARU)")
+    print("=" * W)
+
+    axes = [("gx", "raw_gx"), ("gy", "raw_gy"), ("gz", "raw_gz")]
+
+    print(f"\n  {'Asse':<6} │ {'min(mean)':>10} {'max(mean)':>10} │ "
+          f"{'spread':>10} │ {'Verdetto'}")
+    print("  " + "-" * 70)
+
+    all_ok = True
+    for label, col in axes:
+        means = [r[f"{col}_mean"] for r in results]
+        mn, mx = min(means), max(means)
+        spread = mx - mn
+        # Threshold: spread < 0.3 °/s is good (pre-K_gs was 1-2 °/s typically)
+        if spread < 0.15:
+            verdict = "OTTIMO — spread < 0.15 °/s"
+        elif spread < 0.30:
+            verdict = "OK — spread < 0.30 °/s"
+        elif spread < 0.50:
+            verdict = "MARGINALE — possibile errore nella matrice"
+            all_ok = False
+        else:
+            verdict = "FALLITO — K_gs probabilmente errata o contaminata"
+            all_ok = False
+        print(f"  {label:<6} │ {mn:>+10.4f} {mx:>+10.4f} │ {spread:>10.4f} │ {verdict}")
+
+    # Per-face detail
+    print(f"\n  {'Faccia':<10} │ {'raw_gx':>10} {'raw_gy':>10} {'raw_gz':>10} │ "
+          f"{'gx(EMA)':>10} {'gy(EMA)':>10} {'gz(EMA)':>10}")
+    print(f"  {'':10} │ {'(°/s)':>10} {'(°/s)':>10} {'(°/s)':>10} │ "
+          f"{'(°/s)':>10} {'(°/s)':>10} {'(°/s)':>10}")
+    print("  " + "-" * 90)
+    for r in results:
+        flag = " *" if r["uncertain"] else ""
+        # gx/gy/gz (EMA+ZARU) columns may not exist in old CSVs
+        gx_ema = r.get("gx_mean", float("nan"))
+        gy_ema = r.get("gy_mean", float("nan"))
+        gz_ema = r.get("gz_mean", float("nan"))
+        print(f"  {r['label']+flag:<10} │ "
+              f"{r['raw_gx_mean']:>+10.4f} {r['raw_gy_mean']:>+10.4f} {r['raw_gz_mean']:>+10.4f} │ "
+              f"{gx_ema:>+10.4f} {gy_ema:>+10.4f} {gz_ema:>+10.4f}")
+
+    print()
+    if all_ok:
+        print("  RISULTATO: matrice K_gs valida — spread inter-faccia accettabile.")
+    else:
+        print("  RISULTATO: matrice K_gs potenzialmente errata.")
+        print("  Possibili cause:")
+        print("    - Drift di bias durante il test originale (instabilita bias, non termico)")
+        print("    - Rampa termica durante la misura (verificare colonna ΔT)")
+        print("    - Errore nell'ordine o orientazione delle facce")
+        print("  Azione: ripetere il 6-face test a temperatura stabile e ricalcolare K_gs.")
+    print("=" * W)
+
+
+def face_stats_validate(seg: pd.DataFrame, time_trim: int) -> dict:
+    """
+    Come face_stats ma include anche gx/gy/gz (EMA+ZARU) se presenti.
+    """
+    if len(seg) > 2 * time_trim + 10:
+        core = seg.iloc[time_trim:-time_trim]
+    else:
+        core = seg
+
+    n = len(core)
+    results = {"n": n}
+
+    for col in ["raw_gx", "raw_gy", "raw_gz", "raw_ax", "raw_ay", "raw_az"]:
+        vals = core[col].values
+        results[f"{col}_mean"] = trim_mean(vals, VALUE_TRIM)
+        results[f"{col}_std"] = float(np.std(vals))
+
+    # EMA+ZARU columns (v1.2.1+)
+    for col in ["gx", "gy", "gz"]:
+        if col in core.columns:
+            vals = core[col].values
+            results[f"{col}_mean"] = trim_mean(vals, VALUE_TRIM)
+            results[f"{col}_std"] = float(np.std(vals))
+
+    results["t_ini"] = float(core["temp_c"].iloc[0])
+    results["t_fin"] = float(core["temp_c"].iloc[-1])
+    results["delta_t"] = results["t_fin"] - results["t_ini"]
+
+    return results
+
+
 def main():
-    path = sys.argv[1] if len(sys.argv) > 1 else CSV_PATH
+    # Parse args
+    validate_mode = "--validate" in sys.argv
+    args = [a for a in sys.argv[1:] if a != "--validate"]
+    path = args[0] if args else CSV_PATH
+
     if not os.path.exists(path):
         print(f"Errore: file non trovato: {path}")
         sys.exit(1)
 
     print(f"\nCaricamento: {path}")
+    if validate_mode:
+        print("  Modalita: VALIDAZIONE K_gs (post-correzione)")
     df = load_csv(path)
     fs = estimate_fs(df)
     dur = df["t_s"].iloc[-1] - df["t_s"].iloc[0]
     print(f"  Sample rate: {fs:.1f} Hz  |  Durata: {dur:.1f} s  |  Campioni: {len(df)}")
 
-    segments, rolling_std = detect_faces(df, fs)
+    segments, rolling_std = detect_faces(df, fs, use_gyro=validate_mode)
     n_found = len(segments)
 
     if n_found == 0:
@@ -272,10 +404,11 @@ def main():
               f"Considera di abbassare MOTION_STD_THR ({MOTION_STD_THR}).")
 
     time_trim = int(TIME_TRIM_S * fs)
+    stats_fn = face_stats_validate if validate_mode else face_stats
     results = []
     for i, (i0, i1) in enumerate(segments):
         seg = df.iloc[i0:i1 + 1]
-        stats = face_stats(seg, time_trim)
+        stats = stats_fn(seg, time_trim)
         label = FACE_LABELS[i] if i < len(FACE_LABELS) else f"Face_{i+1}"
         stats["label"] = label
         stats["uncertain"] = (i == n_found - 1)
@@ -283,7 +416,10 @@ def main():
         stats["i1"] = i1
         results.append(stats)
 
-    print_table(results)
+    print_table(results, validate_mode)
+
+    if validate_mode:
+        validate_kgs(results)
 
     png_path = os.path.splitext(path)[0] + "_gsen.png"
     plot(df, segments, results, rolling_std, fs, png_path)
