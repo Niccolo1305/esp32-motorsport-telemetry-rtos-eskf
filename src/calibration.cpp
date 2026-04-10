@@ -62,6 +62,12 @@ void calibrate_alignment() {
     bias_gy = trimmed_mean(samples_gy, CALIB_SAMPLES);
     bias_gz = trimmed_mean(samples_gz, CALIB_SAMPLES);
 
+    // Store boot accel for K_gs differential correction in Task_Filter.
+    // bias_gz absorbed K_gz * a_boot; runtime correction uses (a_cal - a_boot).
+    ax_boot_cal = ax;
+    ay_boot_cal = ay;
+    az_boot_cal = az;
+
     float phi = atan2f(ay, az);
     float norm_ay_az_sq = ay * ay + az * az;
     float norm_ay_az = (norm_ay_az_sq > 0.0f)

@@ -5,7 +5,7 @@
 #include <math.h>
 
 // ── Firmware ────────────────────────────────────────────────────────────────
-const char *const FIRMWARE_VERSION = "v1.1.0";
+const char *const FIRMWARE_VERSION = "v1.2.0";
 
 // ── Timing and Sampling ────────────────────────────────────────────────────
 const float FREQ_HZ = 50.0f;           // Core system sampling frequency (IMU + ESKF)
