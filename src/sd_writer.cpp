@@ -2,7 +2,7 @@
 // sd_writer.cpp — FreeRTOS Task_SD_Writer (Core 1, priority 1)
 //
 // Opens the file in APPEND mode (created with FILE_WRITE in setup()).
-// Pure binary writes: 122 bytes/record, no formatting.
+// Pure binary writes: 127 bytes/record (v1.3.1), no formatting.
 // Flush every 50 packets = 1 s at 50 Hz: durability/throughput trade-off.
 #include "sd_writer.h"
 

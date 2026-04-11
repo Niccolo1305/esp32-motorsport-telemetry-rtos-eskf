@@ -16,13 +16,15 @@ import math
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 CHUNK_SIZE_DEFAULT = 122          # record size v0.9.8 (no header, 122 bytes)
-FMT_DEFAULT = '<I7fBddffBf4f6f5f' # struct format for 122-byte record
 HEADER_MAGIC = b'TEL'             # FileHeader magic bytes (v0.9.7+)
 HEADER_V1_SIZE = 25               # v1: record_size is uint8_t  (25 bytes)
 HEADER_V2_SIZE = 26               # v2: record_size is uint16_t (26 bytes)
 PROGRESS_EVERY = 5000
 
-HEADER = [
+# ── Format Registry ──────────────────────────────────────────────────────────
+# 122-byte record (v0.9.8 — v1.3.0)
+FMT_122 = '<I7fBddffBf4f6f5f'
+HEADER_122 = [
     't_ms (ms)',
     'ax (G)', 'ay (G)', 'az (G)', 'gx (°/s)', 'gy (°/s)', 'gz (°/s)', 'temp_c (°C)',
     'lap',
@@ -34,19 +36,35 @@ HEADER = [
     'raw_ax (G)', 'raw_ay (G)', 'raw_az (G)', 'raw_gx (°/s)', 'raw_gy (°/s)', 'raw_gz (°/s)',
     'kf6_x (m)', 'kf6_y (m)', 'kf6_vel (m/s)', 'kf6_heading (rad)', 'kf6_bgz (rad/s)'
 ]
-
-COL_FMT = [
-    '{:d}',                                                                 # t_ms
-    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.1f}',   # ax,ay,az, gx,gy,gz, temp_c
-    '{:d}',                                                                 # lap
-    '{:.7f}', '{:.7f}',                                                     # gps_lat, gps_lon
-    '{:.2f}', '{:.2f}',                                                     # gps_speed_kmh, gps_alt_m
-    '{:d}',                                                                 # gps_sats
-    '{:.2f}',                                                               # gps_hdop
-    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}',                                 # kf_x, kf_y, kf_vel, kf_heading
-    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}',             # raw_ax,ay,az, gx,gy,gz
-    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}'                        # kf6_x, kf6_y, kf6_vel, kf6_heading, kf6_bgz
+COL_FMT_122 = [
+    '{:d}',
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.1f}',
+    '{:d}',
+    '{:.7f}', '{:.7f}',
+    '{:.2f}', '{:.2f}',
+    '{:d}',
+    '{:.2f}',
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}',
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}',
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}'
 ]
+
+# 127-byte record (v1.3.1+): adds zaru_flags (uint8) + tbias_gz (float)
+FMT_127 = '<I7fBddffBf4f6f5fBf'
+HEADER_127 = HEADER_122 + ['zaru_flags', 'tbias_gz (°/s)']
+COL_FMT_127 = COL_FMT_122 + ['{:d}', '{:.5f}']
+
+# Default aliases (used for legacy files without header)
+FMT_DEFAULT = FMT_122
+HEADER = HEADER_122
+COL_FMT = COL_FMT_122
+
+def get_format(record_size):
+    """Return (struct_fmt, header_list, col_fmt_list) for a given record size."""
+    if record_size == 127:
+        return FMT_127, HEADER_127, COL_FMT_127
+    # Default: 122-byte format (also used for legacy files)
+    return FMT_122, HEADER_122, COL_FMT_122
 
 HEADER_LINE = ','.join(HEADER) + '\n'
 
@@ -197,7 +215,7 @@ def bin_to_csv_lines(bin_path, total=None):
     """Yield CSV rows from a binary telemetry file (with or without FileHeader)."""
     hdr, offset = read_file_header(bin_path)
     chunk_size = hdr['record_size'] if hdr else CHUNK_SIZE_DEFAULT
-    fmt = FMT_DEFAULT  # struct format is fixed for now
+    fmt, _, col_fmt = get_format(chunk_size)
     with open(bin_path, 'rb') as f:
         if offset > 0:
             f.seek(offset)
@@ -207,7 +225,7 @@ def bin_to_csv_lines(bin_path, total=None):
             if len(chunk) < chunk_size:
                 break
             vals = struct.unpack(fmt, chunk)
-            line = ','.join(fmt_col.format(v) for fmt_col, v in zip(COL_FMT, vals))
+            line = ','.join(f.format(v) for f, v in zip(col_fmt, vals))
             yield line
             count += 1
             if count % PROGRESS_EVERY == 0 and total:
@@ -402,9 +420,12 @@ def main():
         if not os.path.isfile(bin_file):
             print(f"  {RED}File not found: {bin_file}{RESET}")
             sys.exit(1)
+        global HEADER_LINE
         hdr, _ = read_file_header(bin_file)
         if hdr:
             print(f"  Firmware: {hdr['firmware_version']}, record_size={hdr['record_size']}B")
+            _, hdr_cols, _ = get_format(hdr['record_size'])
+            HEADER_LINE = ','.join(hdr_cols) + '\n'
         print(f"  Direct conversion: {bin_file} → {csv_file}")
         total = bin_record_count(bin_file)
         no_split(bin_to_csv_lines(bin_file, total), csv_file)
@@ -423,12 +444,16 @@ def main():
 
     if ext == '.bin':
         # Detect FileHeader (v0.9.7+)
+        global HEADER_LINE
         hdr, hdr_offset = read_file_header(input_file)
         if hdr:
             print(f"  {GREEN}FileHeader detected:{RESET} firmware {BOLD}{hdr['firmware_version']}{RESET}, "
                   f"record_size={hdr['record_size']}B, "
                   f"header_v{hdr['header_version']}, "
                   f"start={hdr['start_time_ms']}ms")
+            # Update HEADER_LINE for the detected record format
+            _, hdr_cols, _ = get_format(hdr['record_size'])
+            HEADER_LINE = ','.join(hdr_cols) + '\n'
         else:
             print(f"  {DIM}Legacy file (no header) — record_size={CHUNK_SIZE_DEFAULT}B{RESET}")
 
