@@ -71,7 +71,7 @@ static constexpr int MAX_WIFI_NETWORKS = 2;
 // Formula: a_calibrated = W * (a_raw - b)
 // Applied in Task_Filter as STEP 1 (before rotate_3d and Madgwick).
 
-// Bias vector (Offset) - Default: 0.0f
+/* Bias vector (Offset) - Default: 0.0f
 const float CALIB_B[3] = {
     0.0f, // AX
     0.0f, // AY
@@ -85,16 +85,14 @@ const float CALIB_W[3][3] = {
     {0.0f, 1.0f, 0.0f},
     {0.0f, 0.0f, 1.0f}
 };
-
-/*
+*/
 // EXAMPLE OF A CALIBRATED SET (From the author's specific MPU-6886 unit)
 // Result: σ(‖a‖) 0.042 g → 0.023 g (−45.6 %)
 // AZ bias = −0.065 g corrects the anomaly identified in pendulum tests.
-const float CALIB_B_EXAMPLE[3] = { -0.00125f, +0.00429f, -0.06491f };
+const float CALIB_B[3] = { -0.00125f, +0.00429f, -0.06491f };
 
-const float CALIB_W_EXAMPLE[3][3] = {
+const float CALIB_W[3][3] = {
     {+1.000824f, -0.000511f, -0.001575f},
     {-0.000511f, +1.000989f, -0.000132f},
     {-0.001575f, -0.000132f, +1.003466f}
 };
-*/
