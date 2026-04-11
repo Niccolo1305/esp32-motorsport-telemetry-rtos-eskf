@@ -220,24 +220,33 @@ void Task_Filter(void *pvParameters) {
           thermal_bias_gy = mean_gy; // v1.2.1
         }
 
-        // ── Straight-line ZARU (v0.9.7, BUG-3 fix v0.9.13) ─────────
-        // On a fast straight the true rotation is ~0: the ema_gz residual
-        // is the current thermal bias. 1 % EMA to filter micro steering
-        // corrections and disturbances. Convergence ~5 s at α=0.01, 50 Hz.
+        // ── Enhanced Straight-Line ZARU (v1.3.1) ──────────────────
+        // Triple gate: lateral accel + yaw rate + COG variation.
+        // COG computed over a long baseline (>15 m displacement) to
+        // suppress GPS position noise (σ_COG ≈ σ_pos/baseline).
+        // Learning uses mean from variance buffer (not ema) for
+        // consistency with the static ZARU path.
         //
-        // BUG-3 fixes:
-        //   - Speed threshold raised 20→40 km/h: at 20 km/h (5.5 m/s),
-        //     ω=2°/s corresponds to R=157 m (a real curve, not a straight).
-        //     At 40 km/h (11.1 m/s), R=318 m — a genuine highway straight.
-        //   - Lateral gate uses lin_ay (raw post-Madgwick) instead of ema_ay:
-        //     EMA τ≈313 ms smooths a rapid lane change (100 ms) below the
-        //     0.02 g threshold, making the gate too permeable. Raw lin_ay
-        //     captures the instantaneous lateral load without phase delay.
-        if (!is_stationary && last_gps.valid && last_gps.speed_kmh > 40.0f) {
-          if (fabsf(lin_ay) < 0.02f && fabsf(ema_gz) < 2.0f) {
-            thermal_bias_gz = 0.01f * ema_gz + 0.99f * thermal_bias_gz;
-            thermal_bias_gx = 0.01f * ema_gx + 0.99f * thermal_bias_gx; // v1.2.1: roll≈0 on straight
-            thermal_bias_gy = 0.01f * ema_gy + 0.99f * thermal_bias_gy; // v1.2.1: pitch≈0 on straight
+        // Previous version (v0.9.7): only lat + gz gates, no COG.
+        // BUG-3 fixes preserved: speed 40 km/h, lin_ay (not ema_ay).
+        static float cog_ref_east = 0.0f;   // reference position for COG computation
+        static float cog_ref_north = 0.0f;
+        static float prev_cog_rad = 0.0f;
+        static bool has_cog_ref = false;
+        static float cog_variation = 99.0f; // default: no straight detected
+
+        bool straight_zaru_active = false;
+        if (!is_stationary && last_gps.valid &&
+            last_gps.speed_kmh > STRAIGHT_MIN_SPEED_KMH) {
+          bool lat_gate = fabsf(lin_ay) < STRAIGHT_MAX_LAT_G;
+          bool gz_gate  = fabsf(ema_gz) < 2.0f;
+          bool cog_gate = fabsf(cog_variation) < STRAIGHT_COG_MAX_RAD;
+
+          if (lat_gate && gz_gate && cog_gate) {
+            thermal_bias_gz = STRAIGHT_ALPHA * mean_gz + (1.0f - STRAIGHT_ALPHA) * thermal_bias_gz;
+            thermal_bias_gx = STRAIGHT_ALPHA * mean_gx + (1.0f - STRAIGHT_ALPHA) * thermal_bias_gx;
+            thermal_bias_gy = STRAIGHT_ALPHA * mean_gy + (1.0f - STRAIGHT_ALPHA) * thermal_bias_gy;
+            straight_zaru_active = true;
           }
         }
 
@@ -259,6 +268,18 @@ void Task_Filter(void *pvParameters) {
         // 6D ZUPT bias: when stationary, measured gz ≈ pure bias → observation
         if (is_stationary) {
           eskf6.correct_bias(gz_rad, 0.001f);
+        }
+
+        // ── NHC: Non-Holonomic Constraint (v1.3.1) ──────────────────
+        // v_lateral = 0 pseudo-measurement: constrains heading drift
+        // continuously while in motion (> 5 km/h). Disabled during
+        // extreme lateral dynamics (|lin_ay| > 0.5 g).
+        bool nhc_active = false;
+        if (eskf.speed_ms() > NHC_MIN_SPEED_MS &&
+            fabsf(lin_ay) < NHC_MAX_LAT_G) {
+          eskf.correct_nhc(NHC_R);
+          eskf6.correct_nhc(NHC_R);
+          nhc_active = true;
         }
 
         // ── GPS Staleness Detection (v0.9.11) ────────────────────────
@@ -291,6 +312,32 @@ void Task_Filter(void *pvParameters) {
           eskf.correct(east_m, north_m, last_gps.speed_kmh, last_gps.hdop);
           eskf6.correct(east_m, north_m, last_gps.speed_kmh, last_gps.hdop);
           last_eskf_epoch = last_gps.epoch;
+
+          // ── COG variation for Enhanced Straight-Line ZARU (v1.3.1) ──
+          // Long-baseline approach: COG computed only after >15 m displacement
+          // from the reference position. Suppresses GPS position noise
+          // (σ_COG ≈ σ_pos/baseline ≈ 1.5m/15m ≈ 0.1 rad).
+          if (last_gps.speed_kmh > 20.0f) {
+            if (!has_cog_ref) {
+              cog_ref_east = east_m;
+              cog_ref_north = north_m;
+              has_cog_ref = true;
+            } else {
+              float de = east_m - cog_ref_east;
+              float dn = north_m - cog_ref_north;
+              float dist = sqrtf(de * de + dn * dn);
+              if (dist > COG_MIN_BASELINE_M) {
+                float current_cog = atan2f(de, dn);
+                cog_variation = current_cog - prev_cog_rad;
+                // wrap to [-π, π]
+                if (cog_variation >  (float)M_PI) cog_variation -= 2.0f * (float)M_PI;
+                if (cog_variation < -(float)M_PI) cog_variation += 2.0f * (float)M_PI;
+                prev_cog_rad = current_cog;
+                cog_ref_east = east_m;
+                cog_ref_north = north_m;
+              }
+            }
+          }
         }
 
         // ── ESKF → shared_telemetry (race condition fix v0.9.2) ──────
@@ -345,6 +392,13 @@ void Task_Filter(void *pvParameters) {
           rec.kf6_vel = eskf6.speed_ms();
           rec.kf6_heading = eskf6.heading();
           rec.kf6_bgz = eskf6.bias_gz();
+          // ZARU/NHC diagnostic flags (v1.3.1)
+          uint8_t flags = 0;
+          if (is_stationary)       flags |= 0x01; // bit 0: Static ZARU
+          if (straight_zaru_active) flags |= 0x02; // bit 1: Straight ZARU
+          if (nhc_active)          flags |= 0x04; // bit 2: NHC
+          rec.zaru_flags = flags;
+          rec.tbias_gz = tb_gz; // snapshot bias (same value as shared_telemetry)
           xQueueSend(sd_queue, &rec, 0); // timeout=0: discard if queue full
         }
       }

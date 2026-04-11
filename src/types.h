@@ -38,12 +38,14 @@ struct WifiCredential {
 //   float kf6_vel          4 bytes
 //   float kf6_heading      4 bytes
 //   float kf6_bgz          4 bytes  — estimated gz bias [rad/s]
+//   uint8_t zaru_flags     1 byte   — ZARU/NHC activation flags (v1.3.1)
+//   float tbias_gz         4 bytes  — learned thermal bias gz [deg/s] (v1.3.1)
 //                         ────────
-//   TOTAL:                122 bytes/sample
+//   TOTAL:                127 bytes/sample
 //
-// Python read: struct.unpack('<I7fBddffBf4f6f5f', chunk_122_byte)
+// Python read: struct.unpack('<I7fBddffBf4f6f5fBf', chunk_127_byte)
 //
-// 16 GB SD at 50 Hz: ~138 million samples ≈ 31 h of continuous logging
+// 16 GB SD at 50 Hz: ~133 million samples ≈ 30 h of continuous logging
 
 struct __attribute__((packed)) TelemetryRecord {
   uint32_t timestamp_ms; // 4  — IMU hardware clock (us/1000)
@@ -70,8 +72,27 @@ struct __attribute__((packed)) TelemetryRecord {
   float kf6_vel;     // 4  — 6D speed [m/s]
   float kf6_heading; // 4  — 6D heading [rad]
   float kf6_bgz;     // 4  — estimated gz bias [rad/s]
+  // ── ZARU/NHC Diagnostics (v1.3.1) ──
+  //
+  // zaru_flags — bitmask, each bit = 1 when the system is active this sample:
+  //   bit 0 (0x01): Static ZARU      — vehicle stationary (< 2 km/h, low variance)
+  //                                     → thermal_bias_gz = mean_gz (instant)
+  //   bit 1 (0x02): Straight ZARU    — fast straight (> 40 km/h, triple gate)
+  //                                     → thermal_bias_gz updated via slow EMA
+  //   bit 2 (0x04): NHC              — Non-Holonomic Constraint (v_lat = 0)
+  //                                     → ESKF heading correction, always in motion
+  //
+  // Typical combinations in the CSV:
+  //   0 = nessun sistema attivo (curva lenta, < 5 km/h senza stazionarietà)
+  //   1 = ai box, fermo — ZARU statico
+  //   4 = in curva o rettilineo lento — solo NHC
+  //   6 = rettilineo veloce — NHC + Straight ZARU insieme
+  //   5 = impossibile (stationary + NHC: velocità < 2 E > 5 km/h)
+  //
+  uint8_t zaru_flags;
+  float tbias_gz;     // 4  — thermal_bias_gz [deg/s] (learned bias value)
 };
-static_assert(sizeof(TelemetryRecord) == 122, "TelemetryRecord must be 122 bytes");
+static_assert(sizeof(TelemetryRecord) == 127, "TelemetryRecord must be 127 bytes");
 
 // ── Binary File Header ─────────────────────────────────────────────────────
 // Written at the start of every .bin file on the SD (v0.9.7).

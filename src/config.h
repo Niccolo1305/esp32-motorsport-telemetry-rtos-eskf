@@ -5,7 +5,7 @@
 #include <math.h>
 
 // ── Firmware ────────────────────────────────────────────────────────────────
-const char *const FIRMWARE_VERSION = "v1.3.0";
+const char *const FIRMWARE_VERSION = "v1.3.1";
 
 // ── Timing and Sampling ────────────────────────────────────────────────────
 const float FREQ_HZ = 50.0f;           // Core system sampling frequency (IMU + ESKF)
@@ -30,6 +30,24 @@ static constexpr int VAR_BUF_SIZE = 50;                // 1 s of samples at 50 H
 static constexpr float VAR_STILLNESS_THRESHOLD = 0.05f; // [(deg/s)^2] ema_gz variance threshold
 static constexpr float ZUPT_GPS_MAX_KMH = 2.0f;        // [km/h] GPS speed threshold
 static constexpr int SD_FLUSH_EVERY = 50;               // flush interval: 1 s at 50 Hz
+
+// ── Non-Holonomic Constraint (NHC) ──────────────────────────────────────
+// Lateral velocity pseudo-measurement v_lat = 0 constrains heading drift
+// continuously while the vehicle is in motion. Disabled during extreme
+// lateral dynamics (drifting, aquaplaning) via the lateral-G gate.
+static constexpr float NHC_R = 0.5f;                    // [(m/s)²] lateral vel measurement noise
+static constexpr float NHC_MIN_SPEED_MS = 1.4f;         // ~5 km/h — below this NHC is off
+static constexpr float NHC_MAX_LAT_G = 0.5f;            // [g] disable NHC above this lateral accel
+
+// ── Enhanced Straight-Line ZARU ──────────────────────────────────────────
+// COG-variation gate and gx (roll) bias learning on fast straights.
+// COG is computed over a long baseline (COG_MIN_BASELINE_M) to suppress
+// GPS position noise: σ_COG ≈ σ_pos/baseline ≈ 1.5m/15m = 0.1 rad.
+static constexpr float STRAIGHT_ALPHA = 0.01f;          // EMA alpha for straight-line bias learning
+static constexpr float STRAIGHT_COG_MAX_RAD = 0.10f;    // [rad] ~5.7° max COG change over baseline
+static constexpr float STRAIGHT_MIN_SPEED_KMH = 40.0f;  // min speed for straight detection
+static constexpr float STRAIGHT_MAX_LAT_G = 0.05f;      // [g] max lateral accel (raised for track vibrations)
+static constexpr float COG_MIN_BASELINE_M = 15.0f;      // [m] min displacement for COG computation
 
 // ── WiFi ───────────────────────────────────────────────────────────────────
 static constexpr int MAX_WIFI_NETWORKS = 2;

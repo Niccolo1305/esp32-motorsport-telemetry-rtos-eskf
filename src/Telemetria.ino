@@ -733,6 +733,24 @@
 //   - Removed globals: ax_boot_cal, ay_boot_cal, az_boot_cal.
 //   - Tools gsen_analysis.py and kgs_calc.py retained for reference.
 //
+// v1.3.1 — NHC, Enhanced Straight-Line ZARU, Diagnostic Logging
+//   - Non-Holonomic Constraint (NHC): lateral velocity pseudo-measurement
+//     v_lat = 0 added to both ESKF2D and ESKF_6D via correct_nhc().
+//     Active above 5 km/h, disabled when |lin_ay| > 0.5 g (drifting).
+//     Constrains heading drift continuously while in motion.
+//   - Enhanced Straight-Line ZARU: triple gate replaces the previous
+//     dual gate (v0.9.7). New COG-variation gate computed over a long
+//     baseline (>15 m displacement) rejects curved roads that happen to
+//     have low lin_ay. Lateral threshold raised 0.02→0.05 g for track
+//     vibrations. Bias learning uses mean from variance buffer (not EMA).
+//     Config constants: STRAIGHT_COG_MAX_RAD, STRAIGHT_MAX_LAT_G,
+//     COG_MIN_BASELINE_M.
+//   - ZARU/NHC Diagnostic Logging: TelemetryRecord extended from 122→127
+//     bytes. New fields: zaru_flags (uint8 bitmask: bit 0 = Static ZARU,
+//     bit 1 = Straight ZARU, bit 2 = NHC) and tbias_gz (learned thermal
+//     bias gz in °/s). bin_to_csv.py updated with format registry for
+//     automatic detection of 122 vs 127 byte records.
+//
 // ==========================================================
 
 #include <M5Unified.h>

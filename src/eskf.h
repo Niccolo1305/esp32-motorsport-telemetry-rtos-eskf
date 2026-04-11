@@ -324,6 +324,46 @@ public:
         while (X(4) < -(float)M_PI) X(4) += 2.0f * (float)M_PI;
     }
 
+    // -- NHC: Non-Holonomic Constraint (v1.3.1) --
+    // Pseudo-measurement v_lateral = 0: a ground vehicle cannot slide
+    // sideways (under tyre adhesion limits). Constrains heading drift
+    // continuously while in motion, complementing the static/straight ZARU.
+    void correct_nhc(float R_nhc) {
+        float vx_ = X(2), vy_ = X(3), th = X(4);
+        float sin_th = sinf(th), cos_th = cosf(th);
+
+        // Predicted lateral velocity in body frame
+        float v_lat = -vx_ * sin_th + vy_ * cos_th;
+        float y = 0.0f - v_lat;  // innovation (measurement z = 0)
+
+        // Jacobian H = d(v_lat)/dX
+        Matrix<1, 5> H;
+        H.Fill(0.0f);
+        H(0, 2) = -sin_th;                          // d/dvx
+        H(0, 3) =  cos_th;                          // d/dvy
+        H(0, 4) = -(vx_ * cos_th + vy_ * sin_th);  // d/dθ
+
+        // Scalar Kalman update (same pattern as UPDATE 2: speed)
+        Matrix<1, 1> S_mat = H * P * (~H);
+        float S = S_mat(0, 0) + R_nhc;
+        if (fabsf(S) < 1e-10f) return;
+
+        Matrix<5, 1> K = P * (~H) * (1.0f / S);
+        X = X + K * y;
+
+        // Joseph form covariance update
+        Matrix<5, 5> I_KH;
+        I_KH.Fill(0.0f);
+        for (int i = 0; i < 5; i++) I_KH(i, i) = 1.0f;
+        I_KH = I_KH - K * H;
+        Matrix<5, 5> KKt;
+        for (int i = 0; i < 5; i++)
+            for (int j = 0; j < 5; j++)
+                KKt(i, j) = K(i) * K(j);
+        P = I_KH * P * (~I_KH) + KKt * R_nhc;
+        symmetrize_P();
+    }
+
     // -- Getter --
     float px()       const { return X(0); }
     float py()       const { return X(1); }
@@ -653,6 +693,42 @@ public:
             for (int j = 0; j < 6; j++)
                 KKt_b(i, j) = K_b(i) * K_b(j);
         P = I_KH_b * P * (~I_KH_b) + KKt_b * R_bias;
+        symmetrize_P();
+    }
+
+    // -- NHC: Non-Holonomic Constraint (v1.3.1) --
+    // Same as ESKF2D but 6×6 state. H(0,5) = 0: bias state is not
+    // observable from lateral velocity alone.
+    void correct_nhc(float R_nhc) {
+        float vx_ = X(2), vy_ = X(3), th = X(4);
+        float sin_th = sinf(th), cos_th = cosf(th);
+
+        float v_lat = -vx_ * sin_th + vy_ * cos_th;
+        float y = 0.0f - v_lat;
+
+        Matrix<1, 6> H;
+        H.Fill(0.0f);
+        H(0, 2) = -sin_th;
+        H(0, 3) =  cos_th;
+        H(0, 4) = -(vx_ * cos_th + vy_ * sin_th);
+        // H(0, 5) = 0: bias does not appear in lateral velocity
+
+        Matrix<1, 1> S_mat = H * P * (~H);
+        float S = S_mat(0, 0) + R_nhc;
+        if (fabsf(S) < 1e-10f) return;
+
+        Matrix<6, 1> K = P * (~H) * (1.0f / S);
+        X = X + K * y;
+
+        Matrix<6, 6> I_KH;
+        I_KH.Fill(0.0f);
+        for (int i = 0; i < 6; i++) I_KH(i, i) = 1.0f;
+        I_KH = I_KH - K * H;
+        Matrix<6, 6> KKt;
+        for (int i = 0; i < 6; i++)
+            for (int j = 0; j < 6; j++)
+                KKt(i, j) = K(i) * K(j);
+        P = I_KH * P * (~I_KH) + KKt * R_nhc;
         symmetrize_P();
     }
 
