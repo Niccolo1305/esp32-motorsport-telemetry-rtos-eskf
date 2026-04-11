@@ -2,19 +2,16 @@
 gsen_analysis.py — G-Sensitivity Test Analysis & K_gs Validation
 
 Analizza il CSV prodotto da bin_to_csv.py durante il test a 6 posizioni statiche.
-Tre modalità:
-  - Pre-K_gs (default): misura la G-sensitivity grezza (dati chip-frame)
-  - Post-K_gs (--validate): verifica che la correzione K_gs nel firmware riduca
-    lo spread inter-faccia del giroscopio.
-  - Offline (--validate-offline): per dati da firmware v1.2.2-diag-kgs (K_gs e
-    rotate_3d disabilitate, raw_ax/ay/az = accel chip-frame). Applica K_gs in
-    Python e confronta spread prima/dopo su dati indipendenti.
+Due modalità:
+  - Pre-K_gs: misura la G-sensitivity grezza (dati chip-frame)
+  - Post-K_gs (--validate): verifica che la correzione K_gs riduca lo spread
+    inter-faccia del giroscopio. Se la matrice è corretta, le medie gx/gy/gz
+    devono essere quasi indipendenti dall'orientazione.
 
 Usage:
-  python Tool/gsen_analysis.py                                        # analisi grezza
-  python Tool/gsen_analysis.py path/to/gsen_test.csv                  # analisi grezza
-  python Tool/gsen_analysis.py --validate post_kgs.csv                # validazione firmware
-  python Tool/gsen_analysis.py --validate-offline diag_kgs_test.csv   # validazione offline
+  python Tool/gsen_analysis.py                             # analisi grezza
+  python Tool/gsen_analysis.py path/to/gsen_test.csv       # analisi grezza
+  python Tool/gsen_analysis.py --validate post_kgs.csv     # validazione K_gs
 """
 
 import sys
@@ -32,7 +29,6 @@ TIME_TRIM_S    = 30.0             # [s] da scartare a inizio e fine di ogni fine
 VALUE_TRIM     = 0.05             # frazione trim_mean per parte (5% su ogni lato)
 MOTION_WIN_S   = 2.0              # [s] finestra rolling per rilevare rotazione
 MOTION_STD_THR = 0.015            # [g] soglia std rolling: sopra = in movimento
-MIN_FACE_S     = 10.0             # [s] segmento minimo per essere considerato una faccia
 FACE_LABELS    = ["Z_up", "Z_down", "X_up", "X_down", "Y_up", "Y_down"]
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -100,10 +96,6 @@ def detect_faces(df: pd.DataFrame, fs: float, use_gyro: bool = False):
 
     if not segments:
         return [], rolling_std
-
-    # Filter out segments shorter than MIN_FACE_S
-    min_samples = max(1, int(MIN_FACE_S * fs))
-    segments = [(s, e) for s, e in segments if (e - s + 1) >= min_samples]
 
     # Tieni i N_FACES più lunghi e riordina per posizione temporale
     segments.sort(key=lambda s: s[1] - s[0], reverse=True)
@@ -284,119 +276,6 @@ def plot(df: pd.DataFrame, segments: list, results: list, rolling_std: pd.Series
     plt.show()
 
 
-def validate_kgs_offline(results: list):
-    """
-    Offline K_gs validation for data from v1.2.2-diag-kgs firmware.
-    Input: chip-frame data WITHOUT K_gs applied (raw_gx/gy/gz = chip-frame gyro,
-           raw_ax/ay/az = chip-frame accel with gravity).
-    Applies K_gs matrix in Python using per-face mean accel as gravity proxy,
-    then compares spread before vs after correction.
-
-    K_gs matrix [(deg/s)/g], chip frame:
-                az(j=0)    ax(j=1)    ay(j=2)
-      gx(i=0): +0.6056    +0.7969    -0.1346
-      gy(i=1): +0.0712    +0.3539    -0.0908
-      gz(i=2): -0.1547    -0.0372    -0.0003
-
-    Correction: g_corr = g_raw - K_gs @ (a_face - a_boot)
-    where a_boot = accel at boot face (first face = Z_up by convention).
-    """
-    K_gs = np.array([
-        [+0.6056, +0.7969, -0.1346],  # gx row: az, ax, ay
-        [+0.0712, +0.3539, -0.0908],  # gy row
-        [-0.1547, -0.0372, -0.0003],  # gz row
-    ])
-
-    # Boot face = first face (sensor boots on this orientation)
-    a_boot = np.array([
-        results[0]["raw_ax_mean"],
-        results[0]["raw_ay_mean"],
-        results[0]["raw_az_mean"],
-    ])
-
-    W = 106
-    print()
-    print("=" * W)
-    print("  K_gs OFFLINE VALIDATION — chip-frame data, K_gs applied in Python")
-    print("=" * W)
-    print(f"\n  Boot face: {results[0]['label']}  "
-          f"a_boot = [{a_boot[0]:+.4f}, {a_boot[1]:+.4f}, {a_boot[2]:+.4f}] g")
-
-    # Compute corrected gyro means per face
-    corrected = []
-    for r in results:
-        a_face = np.array([r["raw_ax_mean"], r["raw_ay_mean"], r["raw_az_mean"]])
-        da = a_face - a_boot  # [dax, day, daz] — but K_gs columns are [az, ax, ay]
-        # K_gs column order is az(0), ax(1), ay(2); da is [ax, ay, az]
-        da_kgs = np.array([da[2], da[0], da[1]])  # reorder to [daz, dax, day]
-        correction = K_gs @ da_kgs
-        corr_gx = r["raw_gx_mean"] - correction[0]
-        corr_gy = r["raw_gy_mean"] - correction[1]
-        corr_gz = r["raw_gz_mean"] - correction[2]
-        corrected.append({
-            "label": r["label"],
-            "uncertain": r["uncertain"],
-            "raw_gx": r["raw_gx_mean"], "raw_gy": r["raw_gy_mean"], "raw_gz": r["raw_gz_mean"],
-            "corr_gx": corr_gx, "corr_gy": corr_gy, "corr_gz": corr_gz,
-            "da": da_kgs,
-        })
-
-    # Per-face detail table
-    print(f"\n  {'Faccia':<10} │ {'raw_gx':>8} {'raw_gy':>8} {'raw_gz':>8} │ "
-          f"{'corr_gx':>8} {'corr_gy':>8} {'corr_gz':>8} │ "
-          f"{'da_az':>7} {'da_ax':>7} {'da_ay':>7}")
-    print(f"  {'':10} │ {'(°/s)':>8} {'(°/s)':>8} {'(°/s)':>8} │ "
-          f"{'(°/s)':>8} {'(°/s)':>8} {'(°/s)':>8} │ "
-          f"{'(g)':>7} {'(g)':>7} {'(g)':>7}")
-    print("  " + "-" * (W - 2))
-    for c in corrected:
-        flag = " *" if c["uncertain"] else ""
-        print(f"  {c['label']+flag:<10} │ "
-              f"{c['raw_gx']:>+8.4f} {c['raw_gy']:>+8.4f} {c['raw_gz']:>+8.4f} │ "
-              f"{c['corr_gx']:>+8.4f} {c['corr_gy']:>+8.4f} {c['corr_gz']:>+8.4f} │ "
-              f"{c['da'][0]:>+7.3f} {c['da'][1]:>+7.3f} {c['da'][2]:>+7.3f}")
-
-    # Spread comparison
-    print(f"\n  {'Asse':<6} │ {'spread RAW':>12} │ {'spread CORR':>12} │ "
-          f"{'riduzione':>10} │ {'Verdetto'}")
-    print("  " + "-" * 80)
-
-    all_ok = True
-    for axis in ["gx", "gy", "gz"]:
-        raw_means = [c[f"raw_{axis}"] for c in corrected]
-        corr_means = [c[f"corr_{axis}"] for c in corrected]
-        raw_spread = max(raw_means) - min(raw_means)
-        corr_spread = max(corr_means) - min(corr_means)
-        if raw_spread > 0:
-            reduction = (1.0 - corr_spread / raw_spread) * 100
-        else:
-            reduction = 0.0
-
-        if corr_spread < 0.15:
-            verdict = "OTTIMO"
-        elif corr_spread < 0.30:
-            verdict = "OK"
-        elif corr_spread < 0.50:
-            verdict = "MARGINALE"
-            all_ok = False
-        else:
-            verdict = "FALLITO"
-            all_ok = False
-        print(f"  {axis:<6} │ {raw_spread:>10.4f} °/s │ {corr_spread:>10.4f} °/s │ "
-              f"{reduction:>+9.1f}% │ {verdict}")
-
-    print()
-    if all_ok:
-        print("  RISULTATO: K_gs riduce lo spread su dati indipendenti — matrice valida.")
-    else:
-        print("  RISULTATO: K_gs non riduce sufficientemente lo spread.")
-        print("  Azioni possibili:")
-        print("    - Ricalcolare K_gs con kgs_calc.py usando i dati di questo test")
-        print("    - Verificare drift termico nella tabella temperatura")
-        print("    - Controllare ordine facce e orientazione")
-    print("=" * W)
-
-
 def validate_kgs(results: list):
     """
     K_gs validation: if the matrix is correct, gyro means across all faces
@@ -498,53 +377,17 @@ def face_stats_validate(seg: pd.DataFrame, time_trim: int) -> dict:
 def main():
     # Parse args
     validate_mode = "--validate" in sys.argv
-    validate_offline = "--validate-offline" in sys.argv
-    # --lap N: filter by lap column value (default: 1 in validate mode)
-    lap_filter = None
-    args_clean = []
-    skip_next = False
-    for i, a in enumerate(sys.argv[1:]):
-        if skip_next:
-            skip_next = False
-            continue
-        if a in ("--validate", "--validate-offline"):
-            continue
-        if a == "--lap":
-            if i + 1 < len(sys.argv) - 1:
-                lap_filter = int(sys.argv[i + 2])
-                skip_next = True
-            continue
-        args_clean.append(a)
-    path = args_clean[0] if args_clean else CSV_PATH
-
-    # Default: in validate mode, filter lap=1 (warm-up data excluded)
-    if (validate_mode or validate_offline) and lap_filter is None:
-        lap_filter = 1
+    args = [a for a in sys.argv[1:] if a != "--validate"]
+    path = args[0] if args else CSV_PATH
 
     if not os.path.exists(path):
         print(f"Errore: file non trovato: {path}")
         sys.exit(1)
 
     print(f"\nCaricamento: {path}")
-    if validate_offline:
-        print("  Modalita: VALIDAZIONE OFFLINE K_gs (chip-frame, K_gs applicata in Python)")
-    elif validate_mode:
+    if validate_mode:
         print("  Modalita: VALIDAZIONE K_gs (post-correzione)")
     df = load_csv(path)
-
-    # Filter by lap if requested
-    if lap_filter is not None and "lap" in df.columns:
-        n_before = len(df)
-        df = df[df["lap"] == lap_filter].reset_index(drop=True)
-        print(f"  Filtro lap={lap_filter}: {n_before} -> {len(df)} campioni")
-
-    # Sanity filter: remove rows with corrupted temperature (outside 0-100°C)
-    if "temp_c" in df.columns:
-        sane = (df["temp_c"] > 0) & (df["temp_c"] < 100)
-        n_bad = (~sane).sum()
-        if n_bad > 0:
-            df = df[sane].reset_index(drop=True)
-            print(f"  Rimossi {n_bad} campioni con temperatura fuori range (0-100°C)")
     fs = estimate_fs(df)
     dur = df["t_s"].iloc[-1] - df["t_s"].iloc[0]
     print(f"  Sample rate: {fs:.1f} Hz  |  Durata: {dur:.1f} s  |  Campioni: {len(df)}")
@@ -573,11 +416,9 @@ def main():
         stats["i1"] = i1
         results.append(stats)
 
-    print_table(results, validate_mode and not validate_offline)
+    print_table(results, validate_mode)
 
-    if validate_offline:
-        validate_kgs_offline(results)
-    elif validate_mode:
+    if validate_mode:
         validate_kgs(results)
 
     png_path = os.path.splitext(path)[0] + "_gsen.png"
