@@ -722,6 +722,17 @@
 //     for the most accurate predict step — not affected by the snapshot.
 //   - rec.raw_gx/gy/gz unchanged (uncorrected since v1.2.1).
 //
+// v1.3.0 — Remove K_gs G-sensitivity correction
+//   - K_gs matrix (v1.2.0) removed from filter_task.cpp.
+//   - Validation test (tel_94, firmware v1.2.2-diag-kgs) showed that MPU-6886
+//     bias drift on gx/gy (~0.08 °/s/min, non-thermal) dominates the
+//     G-sensitivity signal (~0.5 °/s). K_gs applied offline increased
+//     inter-face spread instead of reducing it (-35% gx, -38% gy).
+//   - ZARU 3-axis (v1.2.1) already corrects both thermal and electronic
+//     drift in real-time, making K_gs redundant.
+//   - Removed globals: ax_boot_cal, ay_boot_cal, az_boot_cal.
+//   - Tools gsen_analysis.py and kgs_calc.py retained for reference.
+//
 // ==========================================================
 
 #include <M5Unified.h>

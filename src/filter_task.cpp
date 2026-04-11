@@ -45,28 +45,14 @@ void Task_Filter(void *pvParameters) {
         float ay_r = ay_r_raw - bias_ay;
         float az_r = az_r_raw - bias_az;
 
-        // STEP 4: Gyroscope — electronic bias + G-sensitivity correction + vehicle-frame rotation
+        // STEP 4: Gyroscope — electronic bias + vehicle-frame rotation
+        // K_gs (G-sensitivity matrix) was removed in v1.3.0: the MPU-6886 bias
+        // drift (~0.08 °/s/min on gx/gy, non-thermal) dominates the G-sensitivity
+        // signal (~0.5 °/s), making K_gs unreliable. ZARU 3-axis handles both
+        // thermal and electronic drift in real-time. See tel_94 validation test.
         float gx_clean = data.gx - bias_gx;
         float gy_clean = data.gy - bias_gy;
         float gz_clean = data.gz - bias_gz;
-
-        // K_gs correction (chip frame, before rotate_3d).
-        // K_gs[(deg/s)/g] measured by 6-face static test (tel_gsen4 + tel_82).
-        // bias_gz absorbed K_gz * a_boot at boot → subtract only the incremental
-        // change: K_gs * (a_cal - a_boot).  Orientation-independent at boot.
-        //
-        //            az(j=0)    ax(j=1)    ay(j=2)
-        //  gx(i=0): +0.6056    +0.7969    -0.1346
-        //  gy(i=1): +0.0712    +0.3539    -0.0908
-        //  gz(i=2): -0.1547    -0.0372    -0.0003  <-- ESKF heading
-        {
-          const float daz = az_cal - az_boot_cal;
-          const float dax = ax_cal - ax_boot_cal;
-          const float day = ay_cal - ay_boot_cal;
-          gx_clean -= (+0.6056f) * daz + (+0.7969f) * dax + (-0.1346f) * day;
-          gy_clean -= (+0.0712f) * daz + (+0.3539f) * dax + (-0.0908f) * day;
-          gz_clean -= (-0.1547f) * daz + (-0.0372f) * dax + (-0.0003f) * day;
-        }
 
         float gx_r, gy_r, gz_r;
         rotate_3d(gx_clean, gy_clean, gz_clean, gx_r, gy_r, gz_r, cos_phi,
