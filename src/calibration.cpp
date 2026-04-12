@@ -92,6 +92,11 @@ void calibrate_alignment() {
     ahrs.q[2] = 0.0f;
     ahrs.q[3] = 0.0f;
 
+    // v1.3.2: signal Task_Filter to reset ESKF, ZARU buffers, and GPS origin.
+    // The flag is set here under telemetry_mutex so Task_Filter reads it
+    // coherently on the next iteration (after this mutex is released).
+    recalibration_pending = true;
+
     xSemaphoreGive(telemetry_mutex);
   } else {
     Serial.println("[CALIB] Mutex timeout 2s: calibration aborted!");

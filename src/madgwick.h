@@ -89,6 +89,12 @@ public:
     q3 += (qDot3 - beta_eff * s3) * sampleperiod;
 
     // STEP 5 — Quaternion normalisation
+    // AUDIT-NOTE (CROSS-INFO-6, not applied): > 0.0f uses exact zero
+    // comparison. Suggested alternative: > 1e-8f (consistent with other
+    // guards in the codebase). Not changed: norm_q_sq is the sum of 4
+    // squared floats from an active quaternion — cannot be exactly 0.0f
+    // in normal operation. The guard is a pure safety net; tightening
+    // the threshold adds no observable benefit.
     float norm_q_sq = q0 * q0 + q1 * q1 + q2 * q2 + q3 * q3;
     if (norm_q_sq > 0.0f) {
       float inv_norm_q = fast_inv_sqrt(norm_q_sq);

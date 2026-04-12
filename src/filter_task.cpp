@@ -16,6 +16,32 @@ void Task_Filter(void *pvParameters) {
   uint32_t last_eskf_epoch = 0; // last GPS epoch processed by the ESKF
   uint64_t last_timestamp_us = 0;
 
+  // ── v1.3.2: function-scope state (was static inside loop) ─────────────────
+  // Moved here so calibrate_alignment() can trigger a full reset via
+  // recalibration_pending without needing access to Task_Filter internals.
+  float gz_var_buf[VAR_BUF_SIZE] = {};
+  float gx_var_buf[VAR_BUF_SIZE] = {};  // v1.2.1: ZARU extended to gx
+  float gy_var_buf[VAR_BUF_SIZE] = {};  // v1.2.1: ZARU extended to gy
+  int gz_var_idx = 0;
+  int gz_var_count = 0;
+  float thermal_bias_gz = 0.0f;  // [°/s] learned dynamic thermal offset
+  float thermal_bias_gx = 0.0f;  // [°/s] v1.2.1
+  float thermal_bias_gy = 0.0f;  // [°/s] v1.2.1
+  GpsData last_gps = {};         // GPS snapshot cache (anti-Null-Island)
+  float cog_ref_east = 0.0f;
+  float cog_ref_north = 0.0f;
+  float prev_cog_rad = 0.0f;  // AUDIT-NOTE (PIPELINE-MINOR-4, not applied):
+                               // first COG variation is computed against 0.0f
+                               // (due-North) instead of actual initial heading.
+                               // If heading is near 0 at acquisition, the gate
+                               // may open one baseline early. Self-corrects
+                               // after the second baseline. Straight-Line ZARU
+                               // requires speed >40 km/h — cannot trigger in
+                               // the first seconds, so impact is negligible.
+  bool has_cog_ref = false;
+  float cog_variation = 99.0f;   // default: no straight detected
+  bool first_sample_after_recalib = false;
+
   for (;;) {
     if (xQueueReceive(imuQueue, &data, portMAX_DELAY) == pdTRUE) {
 
@@ -29,7 +55,46 @@ void Task_Filter(void *pvParameters) {
       }
       last_timestamp_us = data.timestamp_us;
 
+      // AUDIT-NOTE (CROSS-MINOR-3, not applied): telemetry_mutex is held for
+      // the entire STEP 1-7 pipeline (~500 µs). Only shared_telemetry output
+      // strictly needs the lock; variance buffers and EMA state are Task_Filter-
+      // private. Narrowing the scope is architecturally cleaner but requires
+      // careful coordination with calibrate_alignment(), which reads/writes
+      // prev_ax/ay/az/gx/gy/gz (EMA state) under the same mutex. Deferred:
+      // 500 µs hold = 2.5% of 20 ms period; loop() timeout is 5 ms — no risk.
       if (xSemaphoreTake(telemetry_mutex, portMAX_DELAY) == pdTRUE) {
+
+        // ── RECALIBRATION RESET (v1.3.2) ────────────────────────────────────
+        // calibrate_alignment() sets this flag under telemetry_mutex after
+        // writing new biases and resetting the quaternion. Task_Filter clears
+        // it here, discards the stale IMU sample that was queued during the
+        // 2 s calibration window, and resets all navigation/filter state.
+        if (recalibration_pending.load()) {
+          recalibration_pending = false;
+          eskf.reset();
+          eskf6.reset();
+          gps_origin_set = false;
+          memset(gz_var_buf, 0, sizeof(gz_var_buf));
+          memset(gx_var_buf, 0, sizeof(gx_var_buf));
+          memset(gy_var_buf, 0, sizeof(gy_var_buf));
+          gz_var_idx = 0;
+          gz_var_count = 0;
+          thermal_bias_gz = 0.0f;
+          thermal_bias_gx = 0.0f;
+          thermal_bias_gy = 0.0f;
+          cog_ref_east = 0.0f;
+          cog_ref_north = 0.0f;
+          prev_cog_rad = 0.0f;
+          has_cog_ref = false;
+          cog_variation = 99.0f;
+          last_gps = GpsData{};
+          last_eskf_epoch = 0;
+          last_timestamp_us = 0;
+          first_sample_after_recalib = true;
+          Serial.println("[FILTER] Recalibration reset complete.");
+          xSemaphoreGive(telemetry_mutex);
+          continue; // discard stale IMU sample, start fresh
+        }
 
         // STEP 1: Ellipsoidal calibration (chip native frame)
         float ax_cal = data.ax, ay_cal = data.ay, az_cal = data.az;
@@ -80,6 +145,15 @@ void Task_Filter(void *pvParameters) {
         float ema_gx = alpha * gx_r + (1.0f - alpha) * prev_gx;
         float ema_gy = alpha * gy_r + (1.0f - alpha) * prev_gy;
         float ema_gz = alpha * gz_r + (1.0f - alpha) * prev_gz;
+
+        // v1.3.2: seed EMA from first raw sample after recalibration to prevent
+        // 313 ms decay transient that would otherwise start from 0.0f prev values.
+        if (first_sample_after_recalib) {
+          ema_ax = lin_ax; ema_ay = lin_ay; ema_az = lin_az;
+          ema_gx = gx_r;   ema_gy = gy_r;   ema_gz = gz_r;
+          first_sample_after_recalib = false;
+        }
+
         prev_ax = ema_ax;
         prev_ay = ema_ay;
         prev_az = ema_az;
@@ -97,14 +171,6 @@ void Task_Filter(void *pvParameters) {
         //
         // Warm-up: variance is not computed until gz_var_count >= VAR_BUF_SIZE
         // → prevents false positives from a partially filled buffer.
-        static float gz_var_buf[VAR_BUF_SIZE];
-        static float gx_var_buf[VAR_BUF_SIZE]; // v1.2.1: ZARU extended to gx
-        static float gy_var_buf[VAR_BUF_SIZE]; // v1.2.1: ZARU extended to gy
-        static int gz_var_idx = 0;
-        static int gz_var_count = 0;
-        static float thermal_bias_gz = 0.0f; // [°/s] learned dynamic thermal offset
-        static float thermal_bias_gx = 0.0f; // [°/s] v1.2.1
-        static float thermal_bias_gy = 0.0f; // [°/s] v1.2.1
 
         gz_var_buf[gz_var_idx] = ema_gz;
         gx_var_buf[gz_var_idx] = ema_gx; // same index and warm-up as gz
@@ -164,7 +230,6 @@ void Task_Filter(void *pvParameters) {
         // and shares no state with loop().
 
         // GPS snapshot for SD and ESKF
-        static GpsData last_gps;
         if (xSemaphoreTake(gps_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
           last_gps = shared_gps_data;
           xSemaphoreGive(gps_mutex);
@@ -229,11 +294,8 @@ void Task_Filter(void *pvParameters) {
         //
         // Previous version (v0.9.7): only lat + gz gates, no COG.
         // BUG-3 fixes preserved: speed 40 km/h, lin_ay (not ema_ay).
-        static float cog_ref_east = 0.0f;   // reference position for COG computation
-        static float cog_ref_north = 0.0f;
-        static float prev_cog_rad = 0.0f;
-        static bool has_cog_ref = false;
-        static float cog_variation = 99.0f; // default: no straight detected
+        // v1.3.2: cog_ref_east/north/prev_cog_rad/has_cog_ref/cog_variation
+        // are now function-scope (moved for recalibration reset support).
 
         bool straight_zaru_active = false;
         if (!is_stationary && last_gps.valid &&
@@ -345,6 +407,13 @@ void Task_Filter(void *pvParameters) {
         // global object without a mutex, while Task_Filter updated it at 50 Hz
         // → potentially incoherent MQTT payload.
         // Fix: atomic copy of the 4 getters under telemetry_mutex.
+        //
+        // AUDIT-NOTE (PIPELINE-MINOR-3, not applied): 2 ms timeout means if
+        // loop() holds the mutex (e.g. during MQTT reconnect), ESKF output is
+        // not copied to shared_telemetry for that cycle. Display and MQTT show
+        // fresh EMA (written in the first lock) but stale ESKF position for
+        // one 20 ms frame. Self-heals next cycle. Not fixed: 1-cycle stale
+        // data at 50 Hz is not observable and does not affect the SD record.
         if (xSemaphoreTake(telemetry_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
           shared_telemetry.kf_x = eskf.px();
           shared_telemetry.kf_y = eskf.py();

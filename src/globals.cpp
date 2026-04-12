@@ -66,6 +66,7 @@ std::atomic<uint32_t> sd_records_written{0};
 std::atomic<uint32_t> gps_uart_overflow_count{0};
 std::atomic<bool> gps_stale{false};
 std::atomic<int> system_state{0};
+std::atomic<bool> recalibration_pending{false}; // v1.3.2
 
 // ── SD State ───────────────────────────────────────────────────────────────
 bool sd_mounted = false;

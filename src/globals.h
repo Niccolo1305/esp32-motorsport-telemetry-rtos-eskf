@@ -82,6 +82,7 @@ extern std::atomic<uint32_t> sd_records_written; // records-written counter (MQT
 extern std::atomic<uint32_t> gps_uart_overflow_count; // GPS UART overflow (ISR callback)
 extern std::atomic<bool> gps_stale;         // true if last GPS fix > 5 s ago
 extern std::atomic<int> system_state;       // 0=idle, 1=countdown, 2=racing
+extern std::atomic<bool> recalibration_pending; // v1.3.2: set by calibrate_alignment(), cleared by Task_Filter
 
 // ── SD State ───────────────────────────────────────────────────────────────
 extern bool sd_mounted;

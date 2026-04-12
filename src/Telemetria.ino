@@ -63,74 +63,104 @@
 //
 //
 // ==============================================================================================
-// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz)
+// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.3.2
 // ==============================================================================================
 //
 // Raw ImuRawData from xQueueOverwrite queue (Task_I2C, Core 0)
 //   |
+//   | STEP 0: Dynamic dt from hardware timestamp
+//   |   dt_real_sec = delta(timestamp_us) / 1e6
+//   |   Guard: if dt <= 0 or dt > 1.0 s -> fallback to DT=0.02 s
+//   |   Compensates FreeRTOS scheduler jitter. Feeds Madgwick + ESKF.
+//   |
 //   | STEP 1: Ellipsoidal Calibration (native chip frame)
 //   |   a_cal = CALIB_W * (a_raw - CALIB_B)
 //   |   Corrects hard-iron (-0.065g on Z) and soft-iron (cross-axis < 0.002).
-//   |   Sigma(||a||) from 0.042g to 0.023g.
+//   |   Sigma(||a||) reduced from 0.042g to 0.023g (-45.6%).
 //   |
 //   | STEP 2: Geometric Alignment (chip frame -> vehicle frame)
 //   |   rotate_3d(a_cal, cos_phi, sin_phi, cos_theta, sin_theta)
-//   |   phi/theta angles computed in calibrate_alignment() at boot (2s, 100 samples).
+//   |   phi/theta computed in calibrate_alignment() (2s, 100 samples at boot).
 //   |
 //   | STEP 3: Mounting Bias (residuals post-ellipsoid)
 //   |   a_r = a_r_raw - bias_a{x,y,z}
-//   |   Mean of 100 calibrate_alignment() samples = mechanical zero.
+//   |   bias_a = trimmed mean of rotated calibration samples minus [0,0,1g].
 //   |
 //   | STEP 4: Gyroscope — static bias + vehicle frame rotation
-//   |   g_clean = g_raw - bias_g{x,y,z}    (static bias from boot)
-//   |   rotate_3d(g_clean, ...) -> g_r       (same frame as STEP 2)
-//   |   g_rad = g_r * DEG2RAD
+//   |   g_clean = g_raw - bias_g{x,y,z}    (boot trimmed-mean bias)
+//   |   rotate_3d(g_clean, ...) -> g_r [deg/s], g_rad = g_r * DEG2RAD
+//   |   K_gs removed v1.3.0: ZARU handles thermal+electronic drift.
 //   |
-//   | STEP 5: Madgwick AHRS (quaternion, adaptive beta)
+//   | STEP 5: Madgwick AHRS (quaternion, dual-gate adaptive beta, v1.1.1)
 //   |   ahrs.update_imu(gx_rad, gy_rad, gz_rad, ax_r, ay_r, az_r)
-//   |   Linear beta: full when ||a|| ~ 1g, zero when deviation > 0.15g.
+//   |   k_acc = max(0, 1 - |||a||-1| / 0.05)  -> off above ~0.32g lateral
+//   |   k_gyr = max(0, 1 - |gz| / 0.2618)     -> off above 15 deg/s yaw
+//   |   beta_eff = beta * min(k_acc, k_gyr)
 //   |   Output: quaternion q[4] representing 3D orientation.
 //   |
 //   | STEP 6: Gravity Cancellation via Quaternion
 //   |   ahrs.get_gravity_vector(grav_x, grav_y, grav_z)
-//   |   lin_a{x,y,z} = a_r - grav  [g, gravity removed]
+//   |   lin_a{x,y,z} = a_r - grav  [g, gravity removed, zero latency]
 //   |
-//   +----------- DATA FORK -----------+
-//   |                                 |
-//   | (RAW, zero latency)             | (EMA, tau ~313ms)
-//   |                                 |
-//   | STEP 7: EMA alpha=0.06          |
-//   | ema_a = alpha*lin_a+(1-a)*prev  | -> Display 5Hz
-//   | ema_g = alpha*g_r+(1-a)*prev    | -> MQTT 10Hz
-//   |                                 | -> SD Log 50Hz
-//   | STEP 8: Statistical Engine      |
-//   | Circular buffer 50 samples ema_gz |
-//   | var_gz = E[x^2] - E[x]^2       |
-//   | mean_gz = buffer mean           |
-//   |                                 |
-//   | STEP 9: Stillness Condition     |
-//   | is_stationary = (var_gz < 0.05) |
-//   |       AND (gps_speed < 2 km/h)  |
-//   |                                 |
-//   | STEP 10: Adaptive ZARU          |
-//   | If is_stationary:               |
-//   |   thermal_bias_gz=mean_gz[deg/s]|
-//   |                                 |
-//   +---------------------------------+
+//   +─────────── DATA FORK ──────────────+
+//   |                                    |
+//   | LEFT: RAW path (zero latency)      | RIGHT: EMA path (tau ~313ms)
+//   | -> ESKF navigation                 |
+//   |                                    | STEP 7: EMA alpha=0.06
+//   |                                    | ema_a = alpha*lin_a+(1-a)*prev
+//   |                                    | ema_g = alpha*g_r +(1-a)*prev
+//   |                                    | -> Display 5Hz, MQTT 10Hz, SD 50Hz
+//   |                                    |
+//   |                                    | STEP 8: Statistical Engine (3-axis, v1.2.1)
+//   |                                    | Circular buffer 50 samples (1s at 50Hz)
+//   |                                    | var_gz = E[x^2] - E[x]^2 (clamped >= 0)
+//   |                                    | mean_gz/gx/gy = buffer means
+//   |                                    |
+//   |                                    | STEP 9: Stationary Condition
+//   |                                    | is_stationary = (var_gz >= 0 [warm-up])
+//   |                                    |   AND (var_gz < 0.05)
+//   |                                    |   AND (GPS speed < 2 km/h OR no fix)
+//   |                                    |   AND (|mean_gz| < 2.5 deg/s) [Sanity Gate v0.9.9]
+//   |                                    |
+//   |                                    | STEP 10a: Static ZARU
+//   |                                    | If is_stationary:
+//   |                                    |   thermal_bias_g{x,y,z} = mean_g{x,y,z} (instant)
+//   |                                    |
+//   |                                    | STEP 10b: Straight-Line ZARU (v1.3.1)
+//   |                                    | If !stationary AND speed > 40 km/h AND triple gate:
+//   |                                    |   gate 1: |lin_ay| < 0.05g  (no lateral load)
+//   |                                    |   gate 2: |ema_gz| < 2.0 deg/s (no rotation)
+//   |                                    |   gate 3: |cog_variation| < 0.10 rad (COG stable)
+//   |                                    |   thermal_bias_gz += 0.01*(mean_gz - bias) [slow EMA]
+//   +────────────────────────────────────+
 //   |
-//   | STEP 11: ESKF Predict (raw post-Madgwick data)
-//   |   gz_eskf = gz_rad - thermal_bias_gz * DEG2RAD
-//   |   eskf.predict(lin_ax, lin_ay, gz_eskf, dt, is_stationary)
-//   |   -> Integrates position and velocity in ENU frame at 50Hz
-//   |   -> Internal ZUPT: if is_stationary, forces vx=vy=0
+//   | STEP 11: GPS Snapshot (gps_mutex, 2ms timeout, static cache anti-Null-Island)
+//   |   GPS staleness: if valid fix age > 5s -> predict-only, alarm display
 //   |
-//   | STEP 12: ESKF Correct (on fresh GPS fix, ~10Hz)
-//   |   WGS84 -> ENU (wgs84_to_enu)
-//   |   eskf.correct(east, north, speed_kmh, hdop)
-//   |   -> UPDATE 1: 2D Position (always active)
-//   |   -> UPDATE 2: Scalar velocity (if > 5 km/h)
-//   |   -> UPDATE 3: Course Over Ground (if > 5 km/h and dist > 1m)
-//   |   -> Dynamic R: R_dyn = 0.05 * HDOP^2
+//   | STEP 12a: ESKF 5D Predict (50Hz)
+//   |   gz_eskf = gz_rad - thermal_bias_gz * DEG2RAD  [ZARU-corrected]
+//   |   eskf.predict(lin_ax, lin_ay, gz_eskf, dt_real_sec, is_stationary)
+//   |   Body->ENU: a_enu = R(theta)*[ax,ay]*9.80665
+//   |   ZUPT: if is_stationary, vx=vy=0
+//   |
+//   | STEP 12b: ESKF 6D Predict (shadow, v0.9.8)
+//   |   eskf6.predict(lin_ax, lin_ay, gz_rad, dt, is_stationary) [raw gz, no ZARU]
+//   |   Internal X[5]=b_gz bias estimated by Kalman (not ZARU)
+//   |   If is_stationary: eskf6.correct_bias(gz_rad, 0.001) [bias observation]
+//   |
+//   | STEP 13: NHC — Non-Holonomic Constraint (v1.3.1, 50Hz)
+//   |   v_lateral = -vx*sin(theta) + vy*cos(theta) = 0 pseudo-measurement
+//   |   Active: ESKF speed > 1.4 m/s AND |lin_ay| < 0.5g
+//   |   R_nhc = 0.5 (m/s)^2; constrains heading drift between GPS corrections
+//   |
+//   | STEP 14: ESKF Correct (on fresh GPS epoch, ~10Hz)
+//   |   WGS84 -> ENU via wgs84_to_enu() (double precision, float output)
+//   |   UPDATE 1: 2D Position (always) — R_dyn = 0.05 * HDOP^2
+//   |             Innovation Gate: Mahalanobis d^2 > 11.83 -> R * 50
+//   |   UPDATE 2: Scalar speed [if GPS > 5 km/h] — R_v = 1.0 (m/s)^2
+//   |   UPDATE 3: COG heading [if GPS > 5 km/h AND dist > 1m] — R_th adaptive
+//   |   All updates: Joseph-form covariance + symmetrize_P()
+//   |   COG variation computed over >15m baseline -> feeds Straight-Line ZARU gate
 //   |
 // ==============================================================================================
 //
@@ -751,6 +781,39 @@
 //     bias gz in °/s). bin_to_csv.py updated with format registry for
 //     automatic detection of 122 vs 127 byte records.
 //
+// v1.3.2 — Recalibration State Reset, ESKF R_ Hardening, FSR Verification
+//   - [FIX MAJOR] Full state reset on manual recalibration (long-press):
+//     calibrate_alignment() now signals Task_Filter via recalibration_pending
+//     (std::atomic<bool>). Task_Filter resets ESKF 5D+6D state/covariance,
+//     GPS ENU origin (gps_origin_set=false), ZARU variance buffers (3-axis),
+//     thermal biases, COG tracking state, and timing variables. EMA seeded
+//     from first post-calibration raw sample to suppress decay transient.
+//     Previously: Madgwick quaternion reset but ESKF heading/position and
+//     ZARU buffers retained pre-calibration state → trajectory artefact.
+//     All 14 formerly-static Task_Filter locals promoted to function-scope.
+//     See filter_task.cpp recalibration_pending block for implementation.
+//   - [FIX MINOR] ESKF2D and ESKF_6D correct(): GPS position measurement
+//     noise matrix R_ is no longer mutated in-place during Innovation Gate
+//     (Mahalanobis d²>11.83 → R×50). Local R_pos used instead. Behaviorally
+//     identical — R_ was overwritten at top of each correct() call anyway.
+//     Prevents future code reading R_ between calls from seeing stale value.
+//   - [FIX INFO] Boot-time FSR register read-back: after Wire.begin() and
+//     before DLPF writes, GYRO_CONFIG (0x1B) and ACCEL_CONFIG (0x1C) are
+//     read to verify M5Unified set ±8g / ±2000 dps. Logs error to Serial
+//     and shows "FSR: ERROR!" on LCD for 2 s if mismatch (non-blocking).
+//   - [FIX COSMETIC] motec_exporter.py: format label now correctly prints
+//     "127B (raw+6D+ZARU)" for v1.3.1+ files (was always "122B").
+//   - [DOC] Pipeline comment block rewritten for v1.3.2 accuracy (all
+//     D-1..D-8 discrepancies from data_pipeline_audit.md resolved).
+//   - Not applied — see inline notes in source:
+//     · telemetry_mutex scope reduction (CROSS-MINOR-3): filter_task.cpp:51
+//     · ESKF output mutex 2ms timeout (PIPELINE-MINOR-3): filter_task.cpp:396
+//     · prev_cog_rad init (PIPELINE-MINOR-4): filter_task.cpp:33
+//     · Stack overflow auto-guard (CROSS-INFO-5): Telemetria.ino heartbeat
+//     · norm_q_sq exact-zero comparison (CROSS-INFO-6): madgwick.h:93
+//     · wgs84_to_enu float32 precision (CROSS-MINOR-2): eskf.h:70
+//     · xQueueOverwrite depth=1 comment (CROSS-MINOR-4): Telemetria.ino:908
+//
 // ==========================================================
 
 #include <M5Unified.h>
@@ -805,6 +868,38 @@ void setup() {
   //   0x1D ACCEL_CONFIG2 → A_DLPF_CFG = 4 → accel BW ~21 Hz
   Wire.begin(38, 39);
 
+  // ── FSR VERIFICATION (v1.3.2) ──────────────────────────────────────────────
+  // M5Unified sets ±8g / ±2000 dps during M5.begin(). Verify the registers
+  // actually reflect this before the calibration pipeline uses the scale factors.
+  // GYRO_CONFIG  (0x1B): bits 4:3 = 0b11 → ±2000 dps
+  // ACCEL_CONFIG (0x1C): bits 4:3 = 0b10 → ±8 g
+  {
+    Wire.beginTransmission(0x68);
+    Wire.write(0x1B);
+    Wire.endTransmission(false);
+    Wire.requestFrom(0x68, 1);
+    uint8_t gyro_cfg = Wire.available() ? Wire.read() : 0xFF;
+
+    Wire.beginTransmission(0x68);
+    Wire.write(0x1C);
+    Wire.endTransmission(false);
+    Wire.requestFrom(0x68, 1);
+    uint8_t accel_cfg = Wire.available() ? Wire.read() : 0xFF;
+
+    bool gyro_ok  = ((gyro_cfg  & 0x18) == 0x18); // bits 4:3 = 11 = ±2000 dps
+    bool accel_ok = ((accel_cfg & 0x18) == 0x10); // bits 4:3 = 10 = ±8 g
+    if (gyro_ok && accel_ok) {
+      Serial.printf("[IMU] FSR OK: GYRO=0x%02X (+/-2000dps) ACCEL=0x%02X (+/-8g)\n",
+                    gyro_cfg, accel_cfg);
+    } else {
+      Serial.printf("[IMU] FSR MISMATCH! GYRO=0x%02X (want 0x18) ACCEL=0x%02X (want 0x10)\n",
+                    gyro_cfg, accel_cfg);
+      setLabel(30, "FSR: ERROR!", RED, BLACK);
+      vTaskDelay(pdMS_TO_TICKS(2000));
+      setLabel(30, "");
+    }
+  }
+
   Wire.beginTransmission(0x68);
   Wire.write(0x1A);
   Wire.write(0x04);
@@ -843,6 +938,11 @@ void setup() {
   connect_wifi();
 
   telemetry_mutex = xSemaphoreCreateMutex();
+  // AUDIT-NOTE (CROSS-MINOR-4, not applied): depth=1 is intentional —
+  // xQueueOverwrite() requires a queue of length exactly 1 (mailbox pattern).
+  // This is correct per FreeRTOS docs. A comment was suggested but not added
+  // since the pairing of depth=1 + xQueueOverwrite is self-documenting to
+  // FreeRTOS practitioners and adding it risks diverging again.
   imuQueue = xQueueCreate(1, sizeof(ImuRawData));
 
   if (telemetry_mutex == NULL || imuQueue == NULL) {
@@ -1248,6 +1348,15 @@ void loop() {
       // ── MQTT Heartbeat every 60 s (v0.9.11) ───────────────────────
       // Records written, uptime, active alarms. Allows verifying from the
       // dashboard that SD logging is working throughout the session.
+      //
+      // AUDIT-NOTE (CROSS-INFO-5, not applied): v0.9.12 added an automated
+      // stack overflow guard (Task_Filter self-terminates when free stack <
+      // 512 words). This was removed during the modular refactoring (v1.1.0).
+      // Stack watermarks below are still reported via MQTT for manual
+      // monitoring. Auto-guard not re-added: risk of false-positive task kill
+      // if threshold is too aggressive; MQTT monitoring is sufficient.
+      // Task_Filter stack: 16384 bytes (v0.9.12). ESKF_6D correct() uses
+      // ~2.5 KB for temporary 6×6 matrices — largest single-frame allocation.
       static int heartbeat_counter = 0;
       heartbeat_counter++;
       if (heartbeat_counter >= 600) { // 600 × 100ms = 60s
