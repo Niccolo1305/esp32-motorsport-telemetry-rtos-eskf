@@ -67,6 +67,13 @@ static constexpr double EARTH_RADIUS_M = 6371000.0;
 static constexpr double DEG2RAD_D = M_PI / 180.0;
 
 // -- WGS84 -> ENU conversion --
+// AUDIT-NOTE (CROSS-MINOR-2, not applied): computation is double-precision
+// but output is cast to float32. At ±10 km from origin, float32 precision
+// is ~0.001 m — adequate for sessions ≤30 min. For sessions >2 h the ESKF
+// state (P matrix float32) may accumulate drift. Full fix would require a
+// periodic ENU origin reset (re-centre to current GPS position) or a
+// double-precision state vector — neither is practical on the ESP32-S3's
+// float32 FPU. Not applied: all motorsport sessions are well within limits.
 inline void wgs84_to_enu(double lat, double lon,
                          double lat0, double lon0,
                          float &east_m, float &north_m) {
@@ -159,10 +166,12 @@ public:
 
         if (hdop < 0.5f || hdop > 50.0f) hdop = 1.0f;
         float r_dynamic = 0.05f * (hdop * hdop);
-        R_(0, 0) = r_dynamic;
-        R_(1, 1) = r_dynamic;
-        R_(0, 1) = 0.0f;
-        R_(1, 0) = 0.0f;
+        // v1.3.2: use local R_pos instead of mutating member R_ to prevent
+        // stale inflated values if correct() is ever called from multiple sites.
+        Matrix<2, 2> R_pos;
+        R_pos.Fill(0.0f);
+        R_pos(0, 0) = r_dynamic;
+        R_pos(1, 1) = r_dynamic;
 
         // UPDATE 1: 2D POSITION
         // BUG-2 fix: do-while(0) allows break instead of return on degenerate
@@ -179,10 +188,10 @@ public:
             Matrix<2, 1> y = z - HX;
 
             Matrix<2, 2> S;
-            S(0, 0) = P(0, 0) + R_(0, 0);
-            S(0, 1) = P(0, 1) + R_(0, 1);
-            S(1, 0) = P(1, 0) + R_(1, 0);
-            S(1, 1) = P(1, 1) + R_(1, 1);
+            S(0, 0) = P(0, 0) + R_pos(0, 0);
+            S(0, 1) = P(0, 1) + R_pos(0, 1);
+            S(1, 0) = P(1, 0) + R_pos(1, 0);
+            S(1, 1) = P(1, 1) + R_pos(1, 1);
 
             float det = S(0, 0) * S(1, 1) - S(0, 1) * S(1, 0);
             if (fabsf(det) > 1e-10f) {
@@ -197,12 +206,12 @@ public:
                 float d2 = y(0) * (S_inv(0, 0) * y(0) + S_inv(0, 1) * y(1))
                          + y(1) * (S_inv(1, 0) * y(0) + S_inv(1, 1) * y(1));
                 if (d2 > 11.83f) {
-                    R_(0, 0) *= 50.0f;
-                    R_(1, 1) *= 50.0f;
-                    S(0, 0) = P(0, 0) + R_(0, 0);
+                    R_pos(0, 0) *= 50.0f;
+                    R_pos(1, 1) *= 50.0f;
+                    S(0, 0) = P(0, 0) + R_pos(0, 0);
                     S(0, 1) = P(0, 1);
                     S(1, 0) = P(1, 0);
-                    S(1, 1) = P(1, 1) + R_(1, 1);
+                    S(1, 1) = P(1, 1) + R_pos(1, 1);
                     det = S(0, 0) * S(1, 1) - S(0, 1) * S(1, 0);
                     if (fabsf(det) < 1e-10f) break; // BUG-2: was return (v0.9.11)
                     inv_det = 1.0f / det;
@@ -228,7 +237,7 @@ public:
                     I_KH(i, 0) -= K(i, 0);
                     I_KH(i, 1) -= K(i, 1);
                 }
-                P = I_KH * P * (~I_KH) + K * R_ * (~K);
+                P = I_KH * P * (~I_KH) + K * R_pos * (~K);
                 symmetrize_P();
             }
         } while (0);
@@ -507,10 +516,11 @@ public:
 
         if (hdop < 0.5f || hdop > 50.0f) hdop = 1.0f;
         float r_dynamic = 0.05f * (hdop * hdop);
-        R_(0, 0) = r_dynamic;
-        R_(1, 1) = r_dynamic;
-        R_(0, 1) = 0.0f;
-        R_(1, 0) = 0.0f;
+        // v1.3.2: local R_pos — same fix as ESKF2D (member R_ not mutated)
+        Matrix<2, 2> R_pos;
+        R_pos.Fill(0.0f);
+        R_pos(0, 0) = r_dynamic;
+        R_pos(1, 1) = r_dynamic;
 
         // UPDATE 1: 2D POSITION
         // BUG-2 fix: do-while(0) allows break instead of return (see ESKF2D)
@@ -526,10 +536,10 @@ public:
             Matrix<2, 1> y = z - HX;
 
             Matrix<2, 2> S;
-            S(0, 0) = P(0, 0) + R_(0, 0);
-            S(0, 1) = P(0, 1) + R_(0, 1);
-            S(1, 0) = P(1, 0) + R_(1, 0);
-            S(1, 1) = P(1, 1) + R_(1, 1);
+            S(0, 0) = P(0, 0) + R_pos(0, 0);
+            S(0, 1) = P(0, 1) + R_pos(0, 1);
+            S(1, 0) = P(1, 0) + R_pos(1, 0);
+            S(1, 1) = P(1, 1) + R_pos(1, 1);
 
             float det = S(0, 0) * S(1, 1) - S(0, 1) * S(1, 0);
             if (fabsf(det) > 1e-10f) {
@@ -544,12 +554,12 @@ public:
                 float d2 = y(0) * (S_inv(0, 0) * y(0) + S_inv(0, 1) * y(1))
                          + y(1) * (S_inv(1, 0) * y(0) + S_inv(1, 1) * y(1));
                 if (d2 > 11.83f) {
-                    R_(0, 0) *= 50.0f;
-                    R_(1, 1) *= 50.0f;
-                    S(0, 0) = P(0, 0) + R_(0, 0);
+                    R_pos(0, 0) *= 50.0f;
+                    R_pos(1, 1) *= 50.0f;
+                    S(0, 0) = P(0, 0) + R_pos(0, 0);
                     S(0, 1) = P(0, 1);
                     S(1, 0) = P(1, 0);
-                    S(1, 1) = P(1, 1) + R_(1, 1);
+                    S(1, 1) = P(1, 1) + R_pos(1, 1);
                     det = S(0, 0) * S(1, 1) - S(0, 1) * S(1, 0);
                     if (fabsf(det) < 1e-10f) break; // BUG-2: was return (v0.9.11)
                     inv_det = 1.0f / det;
@@ -575,7 +585,7 @@ public:
                     I_KH(i, 0) -= K(i, 0);
                     I_KH(i, 1) -= K(i, 1);
                 }
-                P = I_KH * P * (~I_KH) + K * R_ * (~K);
+                P = I_KH * P * (~I_KH) + K * R_pos * (~K);
                 symmetrize_P();
             }
         } while (0);

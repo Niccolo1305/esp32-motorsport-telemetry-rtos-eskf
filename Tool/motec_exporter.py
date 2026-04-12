@@ -29,7 +29,8 @@ import math
 from datetime import datetime
 
 # ── Telemetry binary format ───────────────────────────────────────────────────
-# Matches struct TelemetryRecord in Telemetria.ino (__attribute__((packed)), 122 B)
+# Matches struct TelemetryRecord in Telemetria.ino (__attribute__((packed)))
+# Supported sizes: 127 B (v1.3.1+), 122 B (v0.9.8–v1.3.0), 78 B (v0.8.0–v0.9.7)
 #
 #   Field order and types (little-endian):
 #   t_ms            uint32    4 B   — IMU hardware timestamp (ms)
@@ -47,8 +48,10 @@ from datetime import datetime
 #                            122 B  total
 
 HEADER_MAGIC  = b'TEL'                   
+RECORD_FMT_127 = '<I7fBddffBf4f6f5fBf'  # 127-byte record (v1.3.1+, + zaru_flags + tbias_gz)
 RECORD_FMT_122 = '<I7fBddffBf4f6f5f'  # 122-byte record (v0.9.8+, raw IMU + 6D)
 RECORD_FMT_78  = '<I7fBddffBf4f'       # 78-byte record (v0.8.0–v0.9.7, EMA only)
+RECORD_SIZE_127 = struct.calcsize(RECORD_FMT_127)
 RECORD_SIZE_122 = struct.calcsize(RECORD_FMT_122)
 RECORD_SIZE_78  = struct.calcsize(RECORD_FMT_78)
 
@@ -62,6 +65,8 @@ FIELD_NAMES_122 = [
     'raw_ax', 'raw_ay', 'raw_az', 'raw_gx', 'raw_gy', 'raw_gz',
     'kf6_x', 'kf6_y', 'kf6_vel', 'kf6_heading', 'kf6_bgz',
 ]
+
+FIELD_NAMES_127 = FIELD_NAMES_122 + ['zaru_flags', 'tbias_gz']
 
 FIELD_NAMES_78 = [
     't_ms',
@@ -142,7 +147,11 @@ def read_bin(path):
         fw_version  = 'unknown'
         print(f'        No FileHeader (legacy file) — assuming {record_size}B record size')
 
-    if record_size == RECORD_SIZE_122:
+    if record_size == RECORD_SIZE_127:
+        fmt        = RECORD_FMT_127
+        fields     = FIELD_NAMES_127
+        has_raw    = True
+    elif record_size == RECORD_SIZE_122:
         fmt        = RECORD_FMT_122
         fields     = FIELD_NAMES_122
         has_raw    = True
@@ -417,7 +426,12 @@ def main():
         print(f'[MoTeC] ERROR: unsupported format "{ext}"  (use .bin or .csv)')
         sys.exit(1)
 
-    fmt_label = '122B (raw+6D)' if has_raw else '78B (EMA only)'
+    if not has_raw:
+        fmt_label = '78B (EMA only)'
+    elif records and 'zaru_flags' in records[0]:
+        fmt_label = '127B (raw+6D+ZARU)'
+    else:
+        fmt_label = '122B (raw+6D)'
     print(f'        Records: {len(records)}, format: {fmt_label}')
 
     export_motec_ld(records, has_raw, output_path, args.venue, fw_version, input_name)
