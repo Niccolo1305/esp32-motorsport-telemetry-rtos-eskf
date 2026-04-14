@@ -5,7 +5,7 @@
 #include <math.h>
 
 // ── Firmware ────────────────────────────────────────────────────────────────
-const char *const FIRMWARE_VERSION = "v1.3.2";
+const char *const FIRMWARE_VERSION = "v1.3.4";
 
 // ── Timing and Sampling ────────────────────────────────────────────────────
 const float FREQ_HZ = 50.0f;           // Core system sampling frequency (IMU + ESKF)
@@ -48,6 +48,17 @@ static constexpr float STRAIGHT_COG_MAX_RAD = 0.10f;    // [rad] ~5.7° max COG 
 static constexpr float STRAIGHT_MIN_SPEED_KMH = 40.0f;  // min speed for straight detection
 static constexpr float STRAIGHT_MAX_LAT_G = 0.05f;      // [g] max lateral accel (raised for track vibrations)
 static constexpr float COG_MIN_BASELINE_M = 15.0f;      // [m] min displacement for COG computation
+
+// ── Virtual Gravity Plane Lock (VGPL) v1.3.4 ────────────────────────────
+// Centripetal compensation: subtracts estimated centripetal acceleration
+// (v_eskf × gz_rad) from the accelerometer BEFORE feeding Madgwick.
+// This allows beta to remain > 0 at all times, preventing the quaternion
+// drift caused by gyroscope bias integration when beta was forced to 0.
+// Replaces the Dual-Gate Adaptive Beta (v1.1.1) which failed in practice
+// due to MPU-6886 gx/gy electronic bias drift (~0.076 °/s/min).
+static constexpr float VGPL_NORM_GATE = 0.15f;          // [g] residual norm deviation that fully disables beta
+static constexpr float VGPL_RATE_LIMIT = 0.15f;         // [g/sample] max centripetal change per 20 ms cycle
+static constexpr float VGPL_BETA_FLOOR = 0.005f;        // minimum beta (never fully zero, slow self-correction)
 
 // ── WiFi ───────────────────────────────────────────────────────────────────
 static constexpr int MAX_WIFI_NETWORKS = 2;

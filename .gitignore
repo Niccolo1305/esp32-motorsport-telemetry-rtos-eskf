@@ -27,3 +27,22 @@ env/
 .DS_Store
 Thumbs.db
 *.log
+
+# =========================
+# File e cartelle extra locali
+# =========================
+.claude/
+Codebase Repomix file .md per LLM/
+Pipeline/
+Problema da risolvere.md
+Testdrive per fix madgwick/
+Tool/analyze_roundabout_deep.py
+Tool/analyze_roundabout_fix.py
+Tool/analyze_tbias_deep.py
+Tool/analyze_zaru.py
+Tool/simulate_vgpl.py
+Tool/verify_vgpl_theory.py
+claude.exe
+cross_domain_audit_report.md
+data_pipeline_audit.md
+CLAUDE.md

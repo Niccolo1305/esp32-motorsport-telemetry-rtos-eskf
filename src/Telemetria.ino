@@ -63,7 +63,7 @@
 //
 //
 // ==============================================================================================
-// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.3.2
+// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.3.4
 // ==============================================================================================
 //
 // Raw ImuRawData from xQueueOverwrite queue (Task_I2C, Core 0)
@@ -91,11 +91,13 @@
 //   |   rotate_3d(g_clean, ...) -> g_r [deg/s], g_rad = g_r * DEG2RAD
 //   |   K_gs removed v1.3.0: ZARU handles thermal+electronic drift.
 //   |
-//   | STEP 5: Madgwick AHRS (quaternion, dual-gate adaptive beta, v1.1.1)
-//   |   ahrs.update_imu(gx_rad, gy_rad, gz_rad, ax_r, ay_r, az_r)
-//   |   k_acc = max(0, 1 - |||a||-1| / 0.05)  -> off above ~0.32g lateral
-//   |   k_gyr = max(0, 1 - |gz| / 0.2618)     -> off above 15 deg/s yaw
-//   |   beta_eff = beta * min(k_acc, k_gyr)
+//   | STEP 5: VGPL Centripetal Compensation + Madgwick AHRS (v1.3.4)
+//   |   cent_y = (v_eskf * gz_rad) / G_ACCEL (body-frame lateral [G])
+//   |   Confidence-gated by ESKF P matrix, rate-limited for spike protection.
+//   |   ax_madg = ax_r, ay_madg = ay_r - cent_y, az_madg = az_r
+//   |   ahrs.update_imu(gx_rad, gy_rad, gz_rad, ax_madg, ay_madg, az_madg)
+//   |   Norm-gate: k_norm = max(0, 1 - |norm-1| / 0.15)
+//   |   beta_eff = max(0.005, beta * k_norm)  -> never zero, always correcting
 //   |   Output: quaternion q[4] representing 3D orientation.
 //   |
 //   | STEP 6: Gravity Cancellation via Quaternion
@@ -814,6 +816,66 @@
 //     · wgs84_to_enu float32 precision (CROSS-MINOR-2): eskf.h:70
 //     · xQueueOverwrite depth=1 comment (CROSS-MINOR-4): Telemetria.ino:908
 //
+// v1.3.3 — GPS Hardware Abstraction Layer (HAL)
+//   - [ARCH] Introduced IGpsProvider pure interface (IGpsProvider.h) with
+//     three virtual methods: begin(), update(GpsData&), getOverflowCount().
+//     Decouples Task_GPS from the physical UART/TinyGPSPlus implementation,
+//     enabling hardware substitution and mock testing without modifying the
+//     task or any other module.
+//   - [ARCH] Implemented SerialGpsWrapper (SerialGpsWrapper.h, header-only)
+//     as the concrete IGpsProvider. Encapsulates: HardwareSerial(UART1),
+//     TinyGPSPlus sentence decoding, UART overflow ISR callback
+//     (std::atomic<uint32_t> member), 500 ms AT6668 startup delay, and
+//     CASIC $PCAS02,100 10 Hz rate command. Object has static lifetime
+//     (file-scope in Telemetria.ino) to prevent dangling ISR capture.
+//   - [REFACTOR] gps_task.cpp: Task_GPS now receives IGpsProvider* via
+//     pvParameters. Zero direct references to HardwareSerial, TinyGPSPlus,
+//     or overflow counter. IPC contract (shared_gps_data + gps_mutex)
+//     unchanged — filter_task.cpp, sd_writer.cpp, display.cpp unaffected.
+//   - [CLEANUP] globals.h / globals.cpp: removed TinyGPSPlus gps,
+//     HardwareSerial gpsSerial, std::atomic<uint32_t> gps_uart_overflow_count,
+//     and #include <TinyGPSPlus.h>. Hardware objects now owned by wrapper.
+//   - [CLEANUP] Telemetria.ino setup(): GPS init block replaced by
+//     gpsWrapper.begin(). Task_GPS creation passes &gpsWrapper as pvParameters.
+//
+// v1.3.4 — VGPL: Virtual Gravity Plane Lock (centripetal-compensated Madgwick)
+//   - [FIX CRITICAL] Post-validation failure of the Dual-Gate Adaptive Beta
+//     (v1.1.1). Field data (20 s sustained cornering at 27°/s, 31→45 km/h)
+//     showed -0.5G false longitudinal deceleration with Pearson r=-0.83
+//     between cumulative yaw and ax — classic gravity quaternion drift.
+//     Root cause: forcing beta=0 during cornering left the quaternion at
+//     the mercy of gyroscope integration. MPU-6886 electronic bias drift
+//     on gx (-0.076°/s/min, documented in MPU6886_BiasDrift_Report) and gy
+//     (-0.030°/s/min) accumulated ~30° of tilt error over 20 seconds,
+//     leaking 0.5G of gravity into the horizontal body-frame axes.
+//     The ZARU could not mitigate this because it only corrects gz bias
+//     (used by ESKF heading), not the Madgwick's internal quaternion state.
+//   - [ARCH] New approach: centripetal compensation (VGPL). Instead of
+//     disabling accelerometer correction during cornering, the estimated
+//     centripetal acceleration (v_eskf * gz_rad / G_ACCEL) is subtracted
+//     from the accelerometer BEFORE feeding it to Madgwick. After
+//     compensation, the accelerometer reads ~1G (pure gravity) even at
+//     high lateral G → beta stays >0 always → accelerometer continuously
+//     corrects gyro bias → no drift.
+//   - [IMPL] filter_task.cpp STEP 5: v_eskf from previous ESKF cycle
+//     (20 ms delay, <0.005G error). Confidence-gated via ESKF P(2,2)+P(3,3):
+//     as GPS is lost and velocity variance grows, compensation fades to zero
+//     (graceful degradation to uncompensated Madgwick). Rate-limited at
+//     0.15G/sample to suppress gz spikes. prev_cent_y promoted to function
+//     scope for recalibration reset support.
+//   - [IMPL] madgwick.h: dual-gate (k_acc, k_gyr) replaced by single
+//     norm-gate on the compensated accelerometer. k_norm reduces beta only
+//     for residual unmodelled dynamics (bumps, impacts). Beta floor at 0.005
+//     guarantees slow self-correction even during extreme scenarios.
+//   - [IMPL] config.h: VGPL_NORM_GATE=0.15 [g], VGPL_RATE_LIMIT=0.15
+//     [g/sample], VGPL_BETA_FLOOR=0.005.
+//   - Theoretical improvement: steady-state tilt error drops from
+//     sin(bias*T)*1G (unbounded, 0.5G at 20s) to
+//     sin(bias/(beta*Fs))*1G = 0.001G (bounded, 80x reduction).
+//   - Gravity removal (STEP 6) continues to use RAW ax_r/ay_r (not
+//     compensated) to preserve real dynamic forces in lin_ax/lin_ay.
+//   - Record binary format unchanged (127 bytes). No new fields.
+//
 // ==========================================================
 
 #include <M5Unified.h>
@@ -828,7 +890,12 @@
 #include "imu_task.h"
 #include "filter_task.h"
 #include "gps_task.h"
+#include "SerialGpsWrapper.h"
 #include "sd_writer.h"
+
+// GPS hardware wrapper — static lifetime required (onReceiveError lambda captures this).
+// Instantiated here so begin() can be called in setup() and &gpsWrapper passed to Task_GPS.
+static SerialGpsWrapper gpsWrapper(1, GPS_BAUD, GPS_RX_PIN, GPS_TX_PIN);
 
 // ==========================================================
 // --- SETUP ---
@@ -1104,25 +1171,14 @@ void setup() {
   // ─────────────────────────────────────────────────────────────────────────
 
   // ── GPS SETUP ─────────────────────────────────────────────────────────────
-  // UART1 on AtomS3 Grove pins (RX=1, TX=2) at 115200 baud (ATGM336H-6N default).
-  // Buffer, baud rate, and update rate are configured below before task launch.
+  // Hardware init is delegated to SerialGpsWrapper::begin():
+  //   - UART1 on Grove pins (RX=1, TX=2), 115200 baud, RX buffer 512 B
+  //   - UART overflow ISR callback (atomic counter)
+  //   - 500 ms AT6668 startup delay
+  //   - CASIC $PCAS02,100 command to set 10 Hz update rate
   gps_mutex = xSemaphoreCreateMutex();
-  gpsSerial.setRxBufferSize(512);  // default 256 too tight for 10 Hz NMEA at 115200
-  gpsSerial.begin(GPS_BAUD, SERIAL_8N1, GPS_RX_PIN, GPS_TX_PIN);
-  // UART overflow callback: increments atomic counter read by Task_GPS.
-  // Runs in ISR context: atomic operation only, no Serial/mutex.
-  gpsSerial.onReceiveError([](hardwareSerial_error_t err) {
-    if (err == UART_BUFFER_FULL_ERROR || err == UART_FIFO_OVF_ERROR)
-      gps_uart_overflow_count++;
-  });
-  Serial.println("[GPS] UART1 initialized on pins RX=1, TX=2 at 115200 baud.");
   setLabel(30, "GPS: init...");
-  vTaskDelay(pdMS_TO_TICKS(500)); // wait for AT6668 chip startup before sending CASIC commands
-  // Force update rate to 10 Hz via CASIC protocol (AT6668).
-  // Reduces IMU dead-reckoning from ~1000 ms to ~100 ms, eliminating the Sawtooth Effect.
-  // NMEA checksum verified: XOR("PCAS02,100") = 0x1E
-  gpsSerial.print("$PCAS02,100*1E\r\n");
-  Serial.println("[GPS] Update rate set to 10Hz (CASIC $PCAS02,100).");
+  gpsWrapper.begin();
   setLabel(30, "");
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -1134,7 +1190,8 @@ void setup() {
                           &TaskFilterHandle, 1);
   // Task_GPS on Core 0 alongside Task_I2C: both lightweight, no contention.
   // Priority 2: below Task_I2C (3) — IMU timing is never disturbed.
-  xTaskCreatePinnedToCore(Task_GPS, "GPS", 4096, NULL, 2, NULL, 0);
+  // gpsWrapper is passed as pvParameters so Task_GPS is hardware-agnostic (IGpsProvider*).
+  xTaskCreatePinnedToCore(Task_GPS, "GPS", 4096, &gpsWrapper, 2, NULL, 0);
 }
 
 // ==========================================================

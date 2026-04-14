@@ -2,7 +2,8 @@
 // madgwick.h — Madgwick AHRS (Attitude and Heading Reference System)
 //
 // Header-only. Uses fast_inv_sqrt from math_utils.h.
-// Adaptive beta: dual gate (accel deviation from 1g + yaw rate); fminf of both.
+// VGPL norm-gate: reduces beta only when compensated accel norm deviates from 1g.
+// Centripetal compensation is applied upstream in filter_task.cpp (v1.3.4).
 #pragma once
 
 #include <math.h>
@@ -63,18 +64,17 @@ public:
     s2 *= inv_norm_s;
     s3 *= inv_norm_s;
 
-    // DUAL-GATE ADAPTIVE BETA
-    // Madgwick trusts the accelerometer as a gravity reference only when both
-    // gates are quiet: accel magnitude near 1g AND yaw rate below 15°/s.
-    // k_acc: fully off when ‖a‖ deviates >0.05 g from 1g (lateral >~0.32 g).
-    // k_gyr: fully off when |gz| >15°/s (0.2618 rad/s), suppressing drift
-    //        during sustained cornering even if ‖a‖ hasn't yet wandered far.
-    // Designed to fully disable accel correction above ~0.3 g lateral or
-    // |yaw rate| >15°/s, preventing the ~7°/s gravity drift seen in roundabouts.
+    // VGPL NORM-GATE (replaces Dual-Gate Adaptive Beta v1.1.1)
+    // Centripetal compensation is applied upstream (filter_task.cpp):
+    // the accelerometer input here should already read ~1G even in cornering.
+    // This gate handles residual unmodelled dynamics (bumps, impacts) by
+    // reducing beta when the compensated norm deviates from 1G.
+    // Unlike the dual-gate, beta is NEVER forced to zero: VGPL_BETA_FLOOR
+    // guarantees slow self-correction, preventing unbounded quaternion drift
+    // from MPU-6886 gx/gy electronic bias (~0.076 °/s/min).
     float dist_from_1g = fabsf(raw_norm - 1.0f);
-    float k_acc = fmaxf(0.0f, 1.0f - (dist_from_1g / 0.05f));
-    float k_gyr = fmaxf(0.0f, 1.0f - (fabsf(gz) / 0.2618f));
-    float beta_eff = beta * fminf(k_acc, k_gyr);
+    float k_norm = fmaxf(0.0f, 1.0f - (dist_from_1g / VGPL_NORM_GATE));
+    float beta_eff = fmaxf(VGPL_BETA_FLOOR, beta * k_norm);
 
     // STEP 3 — Quaternion derivative: q_dot = 0.5 * q ⊗ ω
     float qDot0 = 0.5f * (-q1 * gx - q2 * gy - q3 * gz);

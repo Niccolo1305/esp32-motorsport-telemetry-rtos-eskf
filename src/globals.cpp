@@ -47,8 +47,6 @@ float prev_gx = 0.0f, prev_gy = 0.0f, prev_gz = 0.0f;
 // wifiClient must be defined before mqttClient (constructor dependency).
 WiFiClient wifiClient;
 PubSubClient mqttClient(wifiClient);
-TinyGPSPlus gps;
-HardwareSerial gpsSerial(1);
 
 // ── WiFi / MQTT Configuration ──────────────────────────────────────────────
 WifiCredential wifi_networks[MAX_WIFI_NETWORKS];
@@ -63,7 +61,6 @@ bool mqtt_enabled = false;
 std::atomic<bool> wifi_enabled{true};
 std::atomic<bool> sd_write_error{false};
 std::atomic<uint32_t> sd_records_written{0};
-std::atomic<uint32_t> gps_uart_overflow_count{0};
 std::atomic<bool> gps_stale{false};
 std::atomic<int> system_state{0};
 std::atomic<bool> recalibration_pending{false}; // v1.3.2

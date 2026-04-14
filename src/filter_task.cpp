@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // filter_task.cpp — FreeRTOS Task_Filter (Core 1, priority 2)
 //
-// Math pipeline: calibration → alignment → Madgwick →
-// gravity removal → EMA → Statistical Engine (ema_gz variance) →
+// Math pipeline: calibration → alignment → VGPL centripetal compensation →
+// Madgwick → gravity removal → EMA → Statistical Engine (ema_gz variance) →
 // Adaptive ZARU (thermal bias) → ESKF (raw data + ZUPT) → SD.
 #include "filter_task.h"
 
@@ -41,6 +41,7 @@ void Task_Filter(void *pvParameters) {
   bool has_cog_ref = false;
   float cog_variation = 99.0f;   // default: no straight detected
   bool first_sample_after_recalib = false;
+  float prev_cent_y = 0.0f;      // v1.3.4: VGPL rate limiter state
 
   for (;;) {
     if (xQueueReceive(imuQueue, &data, portMAX_DELAY) == pdTRUE) {
@@ -91,6 +92,7 @@ void Task_Filter(void *pvParameters) {
           last_eskf_epoch = 0;
           last_timestamp_us = 0;
           first_sample_after_recalib = true;
+          prev_cent_y = 0.0f;  // VGPL: reset stale centripetal compensation
           Serial.println("[FILTER] Recalibration reset complete.");
           xSemaphoreGive(telemetry_mutex);
           continue; // discard stale IMU sample, start fresh
@@ -127,11 +129,51 @@ void Task_Filter(void *pvParameters) {
         float gy_rad = gy_r * DEG2RAD;
         float gz_rad = gz_r * DEG2RAD;
 
-        // STEP 5: Madgwick AHRS with real DT
-        ahrs.sampleperiod = dt_real_sec;
-        ahrs.update_imu(gx_rad, gy_rad, gz_rad, ax_r, ay_r, az_r);
+        // STEP 5: Madgwick AHRS with VGPL centripetal compensation (v1.3.4)
+        // ───────────────────────────────────────────────────────────────────
+        // The Dual-Gate Adaptive Beta (v1.1.1) failed: forcing beta=0 during
+        // cornering caused unbounded quaternion drift from MPU-6886 gx/gy bias
+        // (0.076 °/s/min electronic drift), producing -0.5G false deceleration.
+        //
+        // VGPL fix: subtract estimated centripetal acceleration from the accel
+        // vector BEFORE feeding it to Madgwick. After compensation, the accel
+        // reads ~1G (pure gravity) even in cornering → beta stays > 0 always
+        // → accelerometer continuously corrects gyro bias → no drift.
+        //
+        // Centripetal in body frame: a_cent_y = v * ω / g  [G]
+        // Uses ESKF velocity from previous cycle (20 ms delay → <0.005G error).
+        // Rate-limited to suppress gy vibration/spike-induced transients.
+        // Confidence-gated via ESKF P matrix: degrades to uncompensated Madgwick
+        // when GPS is lost and velocity estimate becomes unreliable.
 
-        // STEP 6: Gravity removal
+        float v_eskf = eskf.speed_ms();  // from previous cycle (20 ms old)
+
+        // Confidence gate: ESKF velocity variance → compensation trust
+        // P(2,2)+P(3,3) = velocity uncertainty. Low = GPS-fused, high = dead-reckoning.
+        float v_var = eskf.P(2, 2) + eskf.P(3, 3);
+        float v_confidence = fminf(1.0f, 1.0f / (1.0f + v_var));
+
+        // Centripetal estimate: body-frame lateral [G], gated by confidence
+        float cent_y_raw = (v_eskf * gz_rad) / G_ACCEL;
+        float cent_y = cent_y_raw * v_confidence;
+
+        // Rate limiter: prevents spike on gz noise or sudden ESKF correction
+        if (cent_y > prev_cent_y + VGPL_RATE_LIMIT) cent_y = prev_cent_y + VGPL_RATE_LIMIT;
+        if (cent_y < prev_cent_y - VGPL_RATE_LIMIT) cent_y = prev_cent_y - VGPL_RATE_LIMIT;
+        prev_cent_y = cent_y;
+
+        // Compensated accel for Madgwick (≈ pure gravity reference)
+        float ax_madg = ax_r;            // longitudinal: centripetal is lateral
+        float ay_madg = ay_r - cent_y;   // lateral: subtract centripetal
+        float az_madg = az_r;            // vertical: untouched
+
+        ahrs.sampleperiod = dt_real_sec;
+        ahrs.update_imu(gx_rad, gy_rad, gz_rad, ax_madg, ay_madg, az_madg);
+
+        // STEP 6: Gravity removal (from RAW accel, not compensated)
+        // The gravity vector estimated by Madgwick is now accurate because
+        // the compensated input kept beta > 0. But lin_a must use the RAW
+        // accelerometer (ax_r, ay_r) to preserve real dynamic forces.
         float grav_x, grav_y, grav_z;
         ahrs.get_gravity_vector(grav_x, grav_y, grav_z);
         float lin_ax = ax_r - grav_x;
