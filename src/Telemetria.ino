@@ -39,7 +39,8 @@
 // --- 5. ZARU STATISTICAL ENGINE (telemetria.ino) ---
 // VARIABLE                     VALUE           DESCRIPTION
 // VAR_BUF_SIZE                 50              Variance sliding window size (1 sec at 50Hz).
-// VAR_STILLNESS_THRESHOLD             0.05f           [(deg/s)^2] var_gz threshold below which the vehicle is "stationary".
+// VAR_STILLNESS_GZ_THRESHOLD    0.25f           [(deg/s)^2] gz RAW variance threshold (v1.3.5: was 0.05 on EMA).
+// VAR_STILLNESS_GXY_THRESHOLD   0.35f           [(deg/s)^2] gx/gy RAW variance (higher: chassis vibration on roll/pitch).
 // ZUPT_GPS_MAX_KMH             2.0f            [km/h] Threshold below which GPS agrees vehicle is stationary.
 //
 // --- 6. PHYSICAL AND GEOGRAPHICAL CONSTANTS (eskf.h) ---
@@ -63,106 +64,110 @@
 //
 //
 // ==============================================================================================
-// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.3.4
+// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.3.5
 // ==============================================================================================
 //
-// Raw ImuRawData from xQueueOverwrite queue (Task_I2C, Core 0)
+// Architecture: "End-of-Pipe EMA" + "ZARU-to-Madgwick"
+// - ZARU thermal_bias is subtracted from gyro BEFORE Madgwick (prevents horizon tilt)
+// - Variance buffers feed on RAW gyro (prevents false stationary from EMA decay tail)
+// - EMA is computed at the END of the pipeline, after all ZARU updates
+// - Straight-Line ZARU gz_gate uses RAW corrected data (zero latency)
+//
+//                          PHASE 1: telemetry_mutex
+// ┌──────────────────────────────────────────────────────────────────────────────┐
+// │ Raw ImuRawData from xQueueOverwrite queue (Task_I2C, Core 0)                │
+// │   |                                                                         │
+// │   | STEP 0: Dynamic dt from hardware timestamp                              │
+// │   |   dt_real_sec = delta(timestamp_us) / 1e6                               │
+// │   |   Guard: if dt <= 0 or dt > 1.0 s -> fallback to DT=0.02 s             │
+// │   |                                                                         │
+// │   | STEP 1: Ellipsoidal Calibration (native chip frame)                     │
+// │   |   a_cal = CALIB_W * (a_raw - CALIB_B)                                  │
+// │   |                                                                         │
+// │   | STEP 2: Geometric Alignment (chip frame -> vehicle frame)               │
+// │   |   rotate_3d(a_cal, cos_phi, sin_phi, cos_theta, sin_theta)              │
+// │   |                                                                         │
+// │   | STEP 3: Mounting Bias (residuals post-ellipsoid)                        │
+// │   |   a_r = a_r_raw - bias_a{x,y,z}                                        │
+// │   |                                                                         │
+// │   | STEP 4a: Gyroscope — static bias + vehicle frame rotation               │
+// │   |   g_clean = g_raw - bias_g{x,y,z}    (boot trimmed-mean bias)           │
+// │   |   rotate_3d(g_clean, ...) -> g_r [deg/s]                                │
+// │   |                                                                         │
+// │   | STEP 4b: ZARU->Rad split (v1.3.5)                                      │
+// │   |   g_rad_raw = g_r * DEG2RAD           [uncorrected → ESKF 6D shadow]    │
+// │   |   g_rad     = (g_r - thermal_bias) * DEG2RAD  [corrected → Madgwick]    │
+// │   |   thermal_bias from PREVIOUS cycle's ZARU (20ms delay, negligible)      │
+// │   |                                                                         │
+// │   | STEP 5: VGPL Centripetal Compensation + Madgwick AHRS (v1.3.4/v1.3.5)  │
+// │   |   cent_y = (v_eskf * gz_rad) / G_ACCEL   [uses ZARU-corrected gz_rad]  │
+// │   |   Confidence-gated by ESKF P matrix, rate-limited for spike protection  │
+// │   |   ahrs.update_imu(gx_rad, gy_rad, gz_rad, ax_madg, ay_madg, az_madg)   │
+// │   |   Norm-gate: k_norm = max(0, 1 - |norm-1| / 0.15)                      │
+// │   |   beta_eff = max(0.005, beta * k_norm)  -> never zero, always correcting│
+// │   |                                                                         │
+// │   | STEP 6: Gravity Cancellation via Quaternion                             │
+// │   |   lin_a{x,y,z} = a_r - grav(q)   [g, gravity removed, zero latency]    │
+// │   |                                                                         │
+// │   | Snapshot local_prev_* (EMA globals) + lap_snap                          │
+// └──────────────────────────────────────────────────────────────────────────────┘
 //   |
-//   | STEP 0: Dynamic dt from hardware timestamp
-//   |   dt_real_sec = delta(timestamp_us) / 1e6
-//   |   Guard: if dt <= 0 or dt > 1.0 s -> fallback to DT=0.02 s
-//   |   Compensates FreeRTOS scheduler jitter. Feeds Madgwick + ESKF.
+//   |                          PHASE 2: no mutex
 //   |
-//   | STEP 1: Ellipsoidal Calibration (native chip frame)
-//   |   a_cal = CALIB_W * (a_raw - CALIB_B)
-//   |   Corrects hard-iron (-0.065g on Z) and soft-iron (cross-axis < 0.002).
-//   |   Sigma(||a||) reduced from 0.042g to 0.023g (-45.6%).
+//   | STEP 7: Statistical Engine — RAW variance (3-axis, v1.3.5)
+//   |   Circular buffer 50 samples (1s at 50Hz) of gz_r/gx_r/gy_r [RAW, not EMA]
+//   |   var_gz/gx/gy = E[x^2] - E[x]^2 (clamped >= 0)
+//   |   mean_gz/gx/gy = buffer means (absolute bias, pre-correction)
 //   |
-//   | STEP 2: Geometric Alignment (chip frame -> vehicle frame)
-//   |   rotate_3d(a_cal, cos_phi, sin_phi, cos_theta, sin_theta)
-//   |   phi/theta computed in calibrate_alignment() (2s, 100 samples at boot).
+//   | STEP 8: GPS Snapshot (gps_mutex, 2ms timeout, static cache)
 //   |
-//   | STEP 3: Mounting Bias (residuals post-ellipsoid)
-//   |   a_r = a_r_raw - bias_a{x,y,z}
-//   |   bias_a = trimmed mean of rotated calibration samples minus [0,0,1g].
+//   | STEP 9: Stationary Condition (3-axis variance gate, v1.3.5)
+//   |   is_stationary = var_gz < 0.25 AND var_gx < 0.35 AND var_gy < 0.35
+//   |                   AND GPS < 2 km/h AND |mean_gz| < 2.5 deg/s
 //   |
-//   | STEP 4: Gyroscope — static bias + vehicle frame rotation
-//   |   g_clean = g_raw - bias_g{x,y,z}    (boot trimmed-mean bias)
-//   |   rotate_3d(g_clean, ...) -> g_r [deg/s], g_rad = g_r * DEG2RAD
-//   |   K_gs removed v1.3.0: ZARU handles thermal+electronic drift.
+//   | STEP 10a: Static ZARU
+//   |   If is_stationary: thermal_bias_g{x,y,z} = mean_g{x,y,z} (instant)
 //   |
-//   | STEP 5: VGPL Centripetal Compensation + Madgwick AHRS (v1.3.4)
-//   |   cent_y = (v_eskf * gz_rad) / G_ACCEL (body-frame lateral [G])
-//   |   Confidence-gated by ESKF P matrix, rate-limited for spike protection.
-//   |   ax_madg = ax_r, ay_madg = ay_r - cent_y, az_madg = az_r
-//   |   ahrs.update_imu(gx_rad, gy_rad, gz_rad, ax_madg, ay_madg, az_madg)
-//   |   Norm-gate: k_norm = max(0, 1 - |norm-1| / 0.15)
-//   |   beta_eff = max(0.005, beta * k_norm)  -> never zero, always correcting
-//   |   Output: quaternion q[4] representing 3D orientation.
+//   | STEP 10b: Straight-Line ZARU (v1.3.5)
+//   |   Triple gate, zero latency:
+//   |     gate 1: |lin_ay| < 0.05g                   (no lateral load)
+//   |     gate 2: |gz_r - thermal_bias_gz| < 2.0°/s  (RAW corrected, instant)
+//   |     gate 3: |cog_variation| < 0.10 rad          (COG stable, >15m baseline)
+//   |   thermal_bias += 0.01 * (mean - bias)  [slow EMA learning]
 //   |
-//   | STEP 6: Gravity Cancellation via Quaternion
-//   |   ahrs.get_gravity_vector(grav_x, grav_y, grav_z)
-//   |   lin_a{x,y,z} = a_r - grav  [g, gravity removed, zero latency]
-//   |
-//   +─────────── DATA FORK ──────────────+
-//   |                                    |
-//   | LEFT: RAW path (zero latency)      | RIGHT: EMA path (tau ~313ms)
-//   | -> ESKF navigation                 |
-//   |                                    | STEP 7: EMA alpha=0.06
-//   |                                    | ema_a = alpha*lin_a+(1-a)*prev
-//   |                                    | ema_g = alpha*g_r +(1-a)*prev
-//   |                                    | -> Display 5Hz, MQTT 10Hz, SD 50Hz
-//   |                                    |
-//   |                                    | STEP 8: Statistical Engine (3-axis, v1.2.1)
-//   |                                    | Circular buffer 50 samples (1s at 50Hz)
-//   |                                    | var_gz = E[x^2] - E[x]^2 (clamped >= 0)
-//   |                                    | mean_gz/gx/gy = buffer means
-//   |                                    |
-//   |                                    | STEP 9: Stationary Condition
-//   |                                    | is_stationary = (var_gz >= 0 [warm-up])
-//   |                                    |   AND (var_gz < 0.05)
-//   |                                    |   AND (GPS speed < 2 km/h OR no fix)
-//   |                                    |   AND (|mean_gz| < 2.5 deg/s) [Sanity Gate v0.9.9]
-//   |                                    |
-//   |                                    | STEP 10a: Static ZARU
-//   |                                    | If is_stationary:
-//   |                                    |   thermal_bias_g{x,y,z} = mean_g{x,y,z} (instant)
-//   |                                    |
-//   |                                    | STEP 10b: Straight-Line ZARU (v1.3.1)
-//   |                                    | If !stationary AND speed > 40 km/h AND triple gate:
-//   |                                    |   gate 1: |lin_ay| < 0.05g  (no lateral load)
-//   |                                    |   gate 2: |ema_gz| < 2.0 deg/s (no rotation)
-//   |                                    |   gate 3: |cog_variation| < 0.10 rad (COG stable)
-//   |                                    |   thermal_bias_gz += 0.01*(mean_gz - bias) [slow EMA]
-//   +────────────────────────────────────+
-//   |
-//   | STEP 11: GPS Snapshot (gps_mutex, 2ms timeout, static cache anti-Null-Island)
-//   |   GPS staleness: if valid fix age > 5s -> predict-only, alarm display
-//   |
-//   | STEP 12a: ESKF 5D Predict (50Hz)
-//   |   gz_eskf = gz_rad - thermal_bias_gz * DEG2RAD  [ZARU-corrected]
-//   |   eskf.predict(lin_ax, lin_ay, gz_eskf, dt_real_sec, is_stationary)
-//   |   Body->ENU: a_enu = R(theta)*[ax,ay]*9.80665
+//   | STEP 11a: ESKF 5D Predict (50Hz)
+//   |   eskf.predict(lin_ax, lin_ay, gz_rad, dt, is_stationary) [ZARU-corrected]
 //   |   ZUPT: if is_stationary, vx=vy=0
 //   |
-//   | STEP 12b: ESKF 6D Predict (shadow, v0.9.8)
-//   |   eskf6.predict(lin_ax, lin_ay, gz_rad, dt, is_stationary) [raw gz, no ZARU]
-//   |   Internal X[5]=b_gz bias estimated by Kalman (not ZARU)
-//   |   If is_stationary: eskf6.correct_bias(gz_rad, 0.001) [bias observation]
+//   | STEP 11b: ESKF 6D Predict (shadow, v0.9.8)
+//   |   eskf6.predict(lin_ax, lin_ay, gz_rad_raw, dt, is_stationary) [uncorrected]
+//   |   If is_stationary: eskf6.correct_bias(gz_rad_raw, 0.001)
 //   |
-//   | STEP 13: NHC — Non-Holonomic Constraint (v1.3.1, 50Hz)
-//   |   v_lateral = -vx*sin(theta) + vy*cos(theta) = 0 pseudo-measurement
-//   |   Active: ESKF speed > 1.4 m/s AND |lin_ay| < 0.5g
-//   |   R_nhc = 0.5 (m/s)^2; constrains heading drift between GPS corrections
+//   | STEP 12: NHC — v_lateral=0 pseudo-measurement (v1.3.1, 50Hz)
+//   |   Active: speed > 1.4 m/s AND |lin_ay| < 0.5g; R_nhc = 0.5 (m/s)^2
 //   |
-//   | STEP 14: ESKF Correct (on fresh GPS epoch, ~10Hz)
-//   |   WGS84 -> ENU via wgs84_to_enu() (double precision, float output)
-//   |   UPDATE 1: 2D Position (always) — R_dyn = 0.05 * HDOP^2
-//   |             Innovation Gate: Mahalanobis d^2 > 11.83 -> R * 50
-//   |   UPDATE 2: Scalar speed [if GPS > 5 km/h] — R_v = 1.0 (m/s)^2
-//   |   UPDATE 3: COG heading [if GPS > 5 km/h AND dist > 1m] — R_th adaptive
-//   |   All updates: Joseph-form covariance + symmetrize_P()
-//   |   COG variation computed over >15m baseline -> feeds Straight-Line ZARU gate
+//   | STEP 13: ESKF Correct (on fresh GPS epoch, ~10Hz)
+//   |   WGS84 -> ENU, 3-stage sequential (pos/speed/COG), Joseph form
+//   |   COG variation feeds back into Straight-Line ZARU gate
+//   |
+//   |                          PHASE 3: end-of-pipe EMA
+//   |
+//   | STEP 14: Thermal bias snapshot (post-ZARU)
+//   |   tb_gx/gy/gz = thermal_bias_gx/gy/gz (current cycle's value)
+//   |
+//   | STEP 15: EMA alpha=0.06 (end-of-pipe, v1.3.5)
+//   |   ema_a = alpha * lin_a          + (1-alpha) * prev_a
+//   |   ema_g = alpha * (g_r - tb_g)   + (1-alpha) * prev_g  [ZARU-corrected input]
+//   |   -> Display 5Hz, MQTT 10Hz, SD 50Hz
+//   |
+//   |                          PHASE 4: telemetry_mutex (merged)
+//   |
+//   | prev_* write-back + shared_telemetry (EMA + ESKF) + 2ms timeout
+//   |
+//   |                          PHASE 5: SD record (no mutex)
+//   |
+//   | 127 bytes: EMA + Raw + GPS + ESKF 5D + 6D Shadow + ZARU flags + tbias_gz
+//   | → xQueueSend(sd_queue, depth=200) → Task_SD_Writer
 //   |
 // ==============================================================================================
 //
@@ -875,6 +880,58 @@
 //   - Gravity removal (STEP 6) continues to use RAW ax_r/ay_r (not
 //     compensated) to preserve real dynamic forces in lin_ax/lin_ay.
 //   - Record binary format unchanged (127 bytes). No new fields.
+//
+// v1.3.5 — End-of-Pipe EMA + ZARU-to-Madgwick + Zero-Latency Straight ZARU
+//
+//   Three structural fixes to the data pipeline. Root cause analysis based
+//   on MPU6886_BiasDrift_Report field data and post-v1.3.4 validation.
+//
+//   - [BUG CRITICAL: "Bias Starvation"] Madgwick received uncorrected gyro
+//     (gx_rad = gx_r * DEG2RAD). The ZARU correctly estimated the MPU-6886
+//     electronic drift (-4.7 °/s/hr on gx, non-thermal) but subtracted it
+//     only at the EMA output — Madgwick never saw the correction. With
+//     VGPL_BETA_FLOOR=0.005, the equilibrium horizon tilt reached ~4.7° after
+//     30 min, projecting sin(4.7°)×1g ≈ 0.082g phantom acceleration into
+//     lin_ax/lin_ay. This poisoned the ESKF velocity estimate and permanently
+//     blocked the Straight-Line ZARU lateral gate (|lin_ay| < 0.05g).
+//   - [FIX] ZARU-to-Madgwick: thermal_bias_gx/gy/gz from the previous cycle
+//     is subtracted BEFORE computing g_rad. Madgwick and VGPL receive
+//     corrected gyro; raw values preserved as gz_rad_raw for ESKF 6D shadow.
+//     ESKF 5D now receives gz_rad directly (already corrected, no more
+//     separate gz_eskf subtraction — eliminated double-subtraction risk).
+//
+//   - [BUG: "EMA Decay False Trigger"] The variance buffer (ZARU stationary
+//     detection) was populated with EMA-filtered gyro. On abrupt stop, EMA
+//     decay (τ≈313ms) created artificially low variance for ~1.6s, triggering
+//     false is_stationary and capturing the EMA's mathematical tail as
+//     thermal_bias (spurious bias injection into ESKF).
+//   - [FIX] End-of-Pipe EMA architecture: variance buffers feed on RAW gyro
+//     (gz_r/gx_r/gy_r). EMA moved to after all ZARU/ESKF updates. EMA gyro
+//     input is ZARU-corrected: ema_g = alpha*(g_r - tb_g) + (1-alpha)*prev,
+//     centering the display/MQTT/SD signal on zero. No separate "- tb_*"
+//     subtraction at output. First mutex shrunk to Steps 1-6; prev_* read
+//     into locals; merged second mutex for EMA write-back + shared_telemetry.
+//
+//   - [BUG: "Phase Delay Leakage"] Straight-Line ZARU gz_gate used EMA data
+//     (τ≈313ms delay). On fast corner entry, the gate stayed open for several
+//     hundred ms, allowing the ZARU to capture the initial yaw rate as
+//     kinematic contamination in the thermal bias.
+//   - [FIX] gz_gate = fabsf(gz_r - thermal_bias_gz) < 2.0 — zero latency,
+//     instant closure on corner entry. Spurious noise-induced closure in
+//     straight is harmless: STRAIGHT_ALPHA=0.01, one sample out of 2500/s.
+//
+//   - [IMPL] config.h: VAR_STILLNESS_THRESHOLD (0.05) replaced by
+//     VAR_STILLNESS_GZ_THRESHOLD (0.25) + VAR_STILLNESS_GXY_THRESHOLD (0.35)
+//     for 3-axis raw variance gate. Starting estimates, require empirical
+//     tuning from stationary raw gyro recordings.
+//   - [IMPL] Stationary detection: 3-axis variance gate — is_stationary
+//     requires gz AND gx AND gy below respective thresholds simultaneously.
+//     Prevents false positives from chassis vibration coupling.
+//   - [IMPL] filter_task.cpp rewritten: 5-phase architecture (Phase 1: mutex
+//     Steps 1-6, Phase 2: variance+ZARU+ESKF, Phase 3: end-of-pipe EMA,
+//     Phase 4: merged mutex, Phase 5: SD record).
+//   - Record binary format unchanged (127 bytes). No Python tool changes.
+//   - Firmware version bumped to v1.3.5 in config.h.
 //
 // ==========================================================
 

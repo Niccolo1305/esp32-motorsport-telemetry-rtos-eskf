@@ -5,7 +5,7 @@
 #include <math.h>
 
 // ── Firmware ────────────────────────────────────────────────────────────────
-const char *const FIRMWARE_VERSION = "v1.3.4";
+const char *const FIRMWARE_VERSION = "v1.3.5";
 
 // ── Timing and Sampling ────────────────────────────────────────────────────
 const float FREQ_HZ = 50.0f;           // Core system sampling frequency (IMU + ESKF)
@@ -26,10 +26,14 @@ const float DEG2RAD = (float)M_PI / 180.0f;
 const float alpha = 0.06f;
 
 // ── Statistical ZUPT/ZARU Engine ───────────────────────────────────────────
-static constexpr int VAR_BUF_SIZE = 50;                // 1 s of samples at 50 Hz
-static constexpr float VAR_STILLNESS_THRESHOLD = 0.05f; // [(deg/s)^2] ema_gz variance threshold
-static constexpr float ZUPT_GPS_MAX_KMH = 2.0f;        // [km/h] GPS speed threshold
-static constexpr int SD_FLUSH_EVERY = 50;               // flush interval: 1 s at 50 Hz
+static constexpr int VAR_BUF_SIZE = 50;                      // 1 s of samples at 50 Hz
+// Variance thresholds for raw gyro (post-rotation, pre-EMA).
+// Raw MEMS noise is higher than EMA-smoothed: starting estimates,
+// tune empirically from stationary recordings (raw_gx/gy/gz in SD log).
+static constexpr float VAR_STILLNESS_GZ_THRESHOLD  = 0.25f;  // [(deg/s)^2] gz raw variance at rest
+static constexpr float VAR_STILLNESS_GXY_THRESHOLD = 0.35f;  // [(deg/s)^2] gx/gy raw variance (higher: chassis vibration couples into roll/pitch)
+static constexpr float ZUPT_GPS_MAX_KMH = 2.0f;              // [km/h] GPS speed threshold
+static constexpr int SD_FLUSH_EVERY = 50;                     // flush interval: 1 s at 50 Hz
 
 // ── Non-Holonomic Constraint (NHC) ──────────────────────────────────────
 // Lateral velocity pseudo-measurement v_lat = 0 constrains heading drift
