@@ -410,6 +410,7 @@ def split_menu(lines_gen_factory, base_name, total_lines, est_csv_mb):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    global HEADER_LINE
     banner()
 
     # Determine input
@@ -420,7 +421,6 @@ def main():
         if not os.path.isfile(bin_file):
             print(f"  {RED}File not found: {bin_file}{RESET}")
             sys.exit(1)
-        global HEADER_LINE
         hdr, _ = read_file_header(bin_file)
         if hdr:
             print(f"  Firmware: {hdr['firmware_version']}, record_size={hdr['record_size']}B")
@@ -444,7 +444,6 @@ def main():
 
     if ext == '.bin':
         # Detect FileHeader (v0.9.7+)
-        global HEADER_LINE
         hdr, hdr_offset = read_file_header(input_file)
         if hdr:
             print(f"  {GREEN}FileHeader detected:{RESET} firmware {BOLD}{hdr['firmware_version']}{RESET}, "

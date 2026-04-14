@@ -9,7 +9,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
-#include <TinyGPSPlus.h>
 #include <atomic>
 
 #include "config.h"
@@ -62,8 +61,6 @@ extern float prev_gx, prev_gy, prev_gz;
 // ── Peripheral Objects ─────────────────────────────────────────────────────
 extern WiFiClient wifiClient;
 extern PubSubClient mqttClient;
-extern TinyGPSPlus gps;
-extern HardwareSerial gpsSerial;
 
 // ── WiFi / MQTT Configuration ──────────────────────────────────────────────
 // Loaded from /wifi_config.txt on SD at boot. If absent, WiFi is disabled.
@@ -79,7 +76,6 @@ extern bool mqtt_enabled;
 extern std::atomic<bool> wifi_enabled;      // written by loop() (triple click)
 extern std::atomic<bool> sd_write_error;    // true if SD write fails at runtime
 extern std::atomic<uint32_t> sd_records_written; // records-written counter (MQTT heartbeat)
-extern std::atomic<uint32_t> gps_uart_overflow_count; // GPS UART overflow (ISR callback)
 extern std::atomic<bool> gps_stale;         // true if last GPS fix > 5 s ago
 extern std::atomic<int> system_state;       // 0=idle, 1=countdown, 2=racing
 extern std::atomic<bool> recalibration_pending; // v1.3.2: set by calibrate_alignment(), cleared by Task_Filter
