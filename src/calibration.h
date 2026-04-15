@@ -2,4 +2,6 @@
 // calibration.h — Sensor calibration (geometric alignment at boot)
 #pragma once
 
-void calibrate_alignment();
+class IImuProvider;
+
+void calibrate_alignment(IImuProvider* imu);

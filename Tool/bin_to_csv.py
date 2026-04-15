@@ -19,6 +19,8 @@ CHUNK_SIZE_DEFAULT = 122          # record size v0.9.8 (no header, 122 bytes)
 HEADER_MAGIC = b'TEL'             # FileHeader magic bytes (v0.9.7+)
 HEADER_V1_SIZE = 25               # v1: record_size is uint8_t  (25 bytes)
 HEADER_V2_SIZE = 26               # v2: record_size is uint16_t (26 bytes)
+HEADER_V3_SIZE = 66               # v3: adds 40 bytes of calibration params
+SENTINEL_CALIB = 0xFFFFFFFFFFFFFFFF  # uint64 max — CalibrationRecord marker
 PROGRESS_EVERY = 5000
 
 # ── Format Registry ──────────────────────────────────────────────────────────
@@ -54,6 +56,39 @@ FMT_127 = '<I7fBddffBf4f6f5fBf'
 HEADER_127 = HEADER_122 + ['zaru_flags', 'tbias_gz (°/s)']
 COL_FMT_127 = COL_FMT_122 + ['{:d}', '{:.5f}']
 
+# 155-byte record (v1.4.0+): timestamp upgraded to uint64 µs + sensor-frame raw IMU
+FMT_155 = '<Q7fBddffBf4f6f5fBf6f'  # Q = uint64 (was I = uint32)
+HEADER_155 = [
+    't_us (µs)',  # was t_ms (ms) — microsecond precision for SITL
+    'ax (G)', 'ay (G)', 'az (G)', 'gx (°/s)', 'gy (°/s)', 'gz (°/s)', 'temp_c (°C)',
+    'lap',
+    'gps_lat (°)', 'gps_lon (°)',
+    'gps_speed_kmh (km/h)', 'gps_alt_m (m)',
+    'gps_sats',
+    'gps_hdop',
+    'kf_x (m)', 'kf_y (m)', 'kf_vel (m/s)', 'kf_heading (rad)',
+    'raw_ax (G)', 'raw_ay (G)', 'raw_az (G)', 'raw_gx (°/s)', 'raw_gy (°/s)', 'raw_gz (°/s)',
+    'kf6_x (m)', 'kf6_y (m)', 'kf6_vel (m/s)', 'kf6_heading (rad)', 'kf6_bgz (rad/s)',
+    'zaru_flags', 'tbias_gz (°/s)',
+    'sensor_ax (G)', 'sensor_ay (G)', 'sensor_az (G)',
+    'sensor_gx (°/s)', 'sensor_gy (°/s)', 'sensor_gz (°/s)'
+]
+COL_FMT_155 = [
+    '{:d}',  # t_us (uint64 → int)
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.1f}',
+    '{:d}',
+    '{:.7f}', '{:.7f}',
+    '{:.2f}', '{:.2f}',
+    '{:d}',
+    '{:.2f}',
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}',
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}',
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}',
+    '{:d}', '{:.5f}',
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}'
+]
+assert struct.calcsize(FMT_155) == 155, f"FMT_155 mismatch: {struct.calcsize(FMT_155)}"
+
 # Default aliases (used for legacy files without header)
 FMT_DEFAULT = FMT_122
 HEADER = HEADER_122
@@ -61,6 +96,8 @@ COL_FMT = COL_FMT_122
 
 def get_format(record_size):
     """Return (struct_fmt, header_list, col_fmt_list) for a given record size."""
+    if record_size == 155:
+        return FMT_155, HEADER_155, COL_FMT_155
     if record_size == 127:
         return FMT_127, HEADER_127, COL_FMT_127
     # Default: 122-byte format (also used for legacy files)
@@ -174,7 +211,17 @@ def read_file_header(bin_path):
 
         hdr_ver = preamble[3]
 
-        if hdr_ver >= 2:
+        if hdr_ver >= 3:
+            # v3: 3s B 16s H I 10f = 3+1+16+2+4+40 = 66 bytes
+            hdr_size = HEADER_V3_SIZE
+            f.seek(0)
+            raw = f.read(hdr_size)
+            if len(raw) < hdr_size:
+                return None, 0
+            parts = struct.unpack('<3sB16sHI10f', raw)
+            magic_, hdr_ver_, fw_ver, rec_size, start_ms = parts[:5]
+            cal_params = parts[5:]  # 10 float: sin_phi..bias_gz
+        elif hdr_ver >= 2:
             # v2: 3s B 16s H I = 3+1+16+2+4 = 26 bytes
             hdr_size = HEADER_V2_SIZE
             f.seek(0)
@@ -183,6 +230,7 @@ def read_file_header(bin_path):
                 return None, 0
             magic_, hdr_ver_, fw_ver, rec_size, start_ms = struct.unpack(
                 '<3sB16sHI', raw)
+            cal_params = None
         else:
             # v1: 3s B 16s B I = 3+1+16+1+4 = 25 bytes
             hdr_size = HEADER_V1_SIZE
@@ -192,14 +240,18 @@ def read_file_header(bin_path):
                 return None, 0
             magic_, hdr_ver_, fw_ver, rec_size, start_ms = struct.unpack(
                 '<3sB16sBI', raw)
+            cal_params = None
 
         fw_str = fw_ver.split(b'\x00')[0].decode('ascii', errors='replace')
-        return {
+        result = {
             'header_version': hdr_ver_,
             'firmware_version': fw_str,
             'record_size': rec_size,
             'start_time_ms': start_ms,
-        }, hdr_size
+        }
+        if cal_params is not None:
+            result['calibration'] = cal_params
+        return result, hdr_size
 
 
 # ── Binary → CSV row conversion ───────────────────────────────────────────────
@@ -225,6 +277,8 @@ def bin_to_csv_lines(bin_path, total=None):
             if len(chunk) < chunk_size:
                 break
             vals = struct.unpack(fmt, chunk)
+            if vals[0] == SENTINEL_CALIB:   # CalibrationRecord sentinel (uint64 max)
+                continue
             line = ','.join(f.format(v) for f, v in zip(col_fmt, vals))
             yield line
             count += 1

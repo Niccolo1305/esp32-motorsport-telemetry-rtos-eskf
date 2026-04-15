@@ -6,12 +6,11 @@
 // into the global calibration state under telemetry_mutex.
 #include "calibration.h"
 
-#include <M5Unified.h>
-
+#include "IImuProvider.h"
 #include "globals.h"
 #include "math_utils.h"
 
-void calibrate_alignment() {
+void calibrate_alignment(IImuProvider* imu) {
   // Array size and loop tied to the same constant.
   // If FREQ_HZ changes, both resize without stack buffer overflow.
   static constexpr int CALIB_SAMPLES = (int)(50.0f * 2.0f); // 2 s at 50 Hz
@@ -27,9 +26,10 @@ void calibrate_alignment() {
   if (TaskI2CHandle != NULL) vTaskSuspend(TaskI2CHandle);
 
   for (int i = 0; i < CALIB_SAMPLES; i++) {
-    float ax, ay, az, gx, gy, gz;
-    M5.Imu.getAccelData(&ax, &ay, &az);
-    M5.Imu.getGyroData(&gx, &gy, &gz);
+    ImuRawData raw;
+    imu->update(raw);
+    float ax = raw.ax, ay = raw.ay, az = raw.az;
+    float gx = raw.gx, gy = raw.gy, gz = raw.gz;
     // Ellipsoidal calibration applied to raw samples before computing
     // mounting angles. Without this correction the AZ = -0.065 g bias
     // would be absorbed into bias_az instead of being removed.
@@ -98,6 +98,26 @@ void calibrate_alignment() {
     recalibration_pending = true;
 
     xSemaphoreGive(telemetry_mutex);
+
+    // v1.4.0: inject CalibrationRecord into SD stream for SITL.
+    // Sentinel UINT64_MAX in timestamp_us (~584,942 years) is impossible in real data.
+    // Python parser detects it and updates calibration params for subsequent samples.
+    // sd_queue is NULL during boot calibration (created later) — only mid-session fires.
+    if (sd_queue != NULL) {
+      TelemetryRecord crec = {};
+      crec.timestamp_us = UINT64_MAX;   // sentinel: 0xFFFFFFFFFFFFFFFF
+      crec.ax = sin_phi;                // reuse float fields with known semantics
+      crec.ay = cos_phi;
+      crec.az = sin_theta;
+      crec.gx = cos_theta;
+      crec.gy = bias_ax;
+      crec.gz = bias_ay;
+      crec.temp_c = bias_az;
+      crec.gps_speed_kmh = bias_gx;
+      crec.gps_alt_m = bias_gy;
+      crec.gps_hdop = bias_gz;
+      xQueueSend(sd_queue, &crec, 0);
+    }
   } else {
     Serial.println("[CALIB] Mutex timeout 2s: calibration aborted!");
   }

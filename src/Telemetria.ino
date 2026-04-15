@@ -64,7 +64,7 @@
 //
 //
 // ==============================================================================================
-// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.3.5
+// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.4.0
 // ==============================================================================================
 //
 // Architecture: "End-of-Pipe EMA" + "ZARU-to-Madgwick"
@@ -166,7 +166,8 @@
 //   |
 //   |                          PHASE 5: SD record (no mutex)
 //   |
-//   | 127 bytes: EMA + Raw + GPS + ESKF 5D + 6D Shadow + ZARU flags + tbias_gz
+//   | 155 bytes (v1.4.0): EMA + Raw + GPS + ESKF 5D + 6D Shadow
+//   |   + ZARU flags (bit 3: recalib) + tbias_gz + sensor-frame raw IMU (SITL)
 //   | → xQueueSend(sd_queue, depth=200) → Task_SD_Writer
 //   |
 // ==============================================================================================
@@ -933,6 +934,60 @@
 //   - Record binary format unchanged (127 bytes). No Python tool changes.
 //   - Firmware version bumped to v1.3.5 in config.h.
 //
+// v1.4.0 — IMU HAL + SITL Raw Data Logging
+//
+//   Two architectural additions: hardware abstraction for the IMU sensor
+//   (mirrors v1.3.3 GPS HAL) and sensor-frame raw data logging for offline
+//   SITL pipeline reconstruction.
+//
+//   - [ARCH] IMU Hardware Abstraction Layer:
+//     IImuProvider pure virtual interface (IImuProvider.h) with begin(),
+//     update(ImuRawData&), verifyConfig(). Concrete Mpu6886Provider
+//     (Mpu6886Provider.h, header-only, static lifetime) encapsulates:
+//     Wire.begin(38,39), FSR register verification (0x1B/0x1C), DLPF 20 Hz
+//     config (0x1A=0x04, 0x1D=0x04), M5.Imu readout + esp_timer timestamp.
+//   - [REFACTOR] imu_task.cpp: Task_I2C receives IImuProvider* via
+//     pvParameters. Zero direct references to M5.Imu or Wire.
+//   - [REFACTOR] calibration.cpp: calibrate_alignment() accepts IImuProvider*
+//     parameter. M5.Imu.getAccelData/getGyroData replaced by imu->update().
+//   - [REFACTOR] Telemetria.ino setup(): Wire.begin + FSR + DLPF block
+//     (~60 lines) replaced by imuProvider.begin() + verifyConfig().
+//     Task_I2C creation passes &imuProvider. Both calibrate_alignment() calls
+//     (boot + button handler) pass &imuProvider.
+//
+//   - [FEATURE] SITL Raw Data Logging:
+//     6 new sensor-frame float fields (sensor_ax/ay/az/gx/gy/gz) appended to
+//     TelemetryRecord. These are chip-native, pre-calibration, pre-rotation
+//     values from ImuRawData — the earliest point in the pipeline. Combined
+//     with FileHeader v3 calibration parameters, SITL can reconstruct the
+//     entire pipeline offline for Madgwick/ZARU/ESKF tuning.
+//   - [FEATURE] Timestamp upgrade: uint32_t timestamp_ms → uint64_t
+//     timestamp_us. Eliminates ±5% quantisation jitter in dt at 50 Hz.
+//     Microsecond precision critical for SITL ESKF replay fidelity.
+//   - TelemetryRecord: 127 → 155 bytes/sample (+4 timestamp, +24 sensor raw).
+//   - FileHeader v3 (66 bytes): adds 10 boot calibration floats
+//     (sin_phi, cos_phi, sin_theta, cos_theta, bias_ax/ay/az, bias_gx/gy/gz).
+//     Session-specific outputs of calibrate_alignment(). B/W matrices are
+//     constants in config.h and do not vary per-session.
+//   - [FEATURE] CalibrationRecord sentinel: on mid-session recalibration
+//     (long button press), a TelemetryRecord with timestamp_us = UINT64_MAX
+//     (0xFFFFFFFFFFFFFFFF) is injected into sd_queue. The EMA float fields
+//     carry the new calibration parameters. Python tools detect and skip it;
+//     SITL can parse it to update calibration mid-file. sd_queue NULL check
+//     prevents injection during boot calibration (queue not yet created).
+//   - [FEATURE] zaru_flags bit 3 (0x08): Recalibration marker. Set on the
+//     first sample after mid-session recalibration. Captured before EMA
+//     seeding (which clears first_sample_after_recalib) to survive Phase 3.
+//   - [PYTHON] bin_to_csv.py: FMT_155 ('Q' uint64 timestamp), HEADER_155
+//     (full, not inherited — first field changed name t_ms→t_us),
+//     COL_FMT_155, v3 header parsing (66 bytes, 10 calibration floats),
+//     CalibrationRecord sentinel skip. Backward-compatible with 122/127B.
+//   - [PYTHON] motec_exporter.py: RECORD_FMT_155, FIELD_NAMES_155, v3
+//     header parsing, CalibrationRecord skip. sensor_* not exported to
+//     MoTeC (SITL-only). Backward-compatible with 78/122/127B.
+//   - [PYTHON] dashboard.py: t_us→t_ms backward-compat alias,
+//     microsecond-precision t_s computation, sensor_* COL_MAP entries.
+//
 // ==========================================================
 
 #include <M5Unified.h>
@@ -948,11 +1003,16 @@
 #include "filter_task.h"
 #include "gps_task.h"
 #include "SerialGpsWrapper.h"
+#include "Mpu6886Provider.h"
 #include "sd_writer.h"
 
 // GPS hardware wrapper — static lifetime required (onReceiveError lambda captures this).
 // Instantiated here so begin() can be called in setup() and &gpsWrapper passed to Task_GPS.
 static SerialGpsWrapper gpsWrapper(1, GPS_BAUD, GPS_RX_PIN, GPS_TX_PIN);
+
+// IMU hardware wrapper — static lifetime (same pattern as gpsWrapper).
+// Encapsulates Wire.begin, FSR verification, DLPF config, and M5.Imu readout.
+static Mpu6886Provider imuProvider;
 
 // ==========================================================
 // --- SETUP ---
@@ -981,66 +1041,13 @@ void setup() {
   setLabel(10, "System Init...");
   setLabel(30, "");
 
-  // ── 2. HARDWARE DLPF AT 20 Hz ────────────────────────────────────────────
-  // M5Unified uses a protected internal I2C bus and leaves Wire uninitialised.
-  // Wire.begin(38, 39) explicitly initialises the bus on the AtomS3 internal
-  // pins (SDA=38, SCL=39) before any transmission.
-  // Without this line Wire.beginTransmission() causes an immediate crash.
-  //
-  // MPU-6886 registers:
-  //   0x1A CONFIG        → DLPF_CFG = 4 → gyro BW  ~20 Hz
-  //   0x1D ACCEL_CONFIG2 → A_DLPF_CFG = 4 → accel BW ~21 Hz
-  Wire.begin(38, 39);
-
-  // ── FSR VERIFICATION (v1.3.2) ──────────────────────────────────────────────
-  // M5Unified sets ±8g / ±2000 dps during M5.begin(). Verify the registers
-  // actually reflect this before the calibration pipeline uses the scale factors.
-  // GYRO_CONFIG  (0x1B): bits 4:3 = 0b11 → ±2000 dps
-  // ACCEL_CONFIG (0x1C): bits 4:3 = 0b10 → ±8 g
-  {
-    Wire.beginTransmission(0x68);
-    Wire.write(0x1B);
-    Wire.endTransmission(false);
-    Wire.requestFrom(0x68, 1);
-    uint8_t gyro_cfg = Wire.available() ? Wire.read() : 0xFF;
-
-    Wire.beginTransmission(0x68);
-    Wire.write(0x1C);
-    Wire.endTransmission(false);
-    Wire.requestFrom(0x68, 1);
-    uint8_t accel_cfg = Wire.available() ? Wire.read() : 0xFF;
-
-    bool gyro_ok  = ((gyro_cfg  & 0x18) == 0x18); // bits 4:3 = 11 = ±2000 dps
-    bool accel_ok = ((accel_cfg & 0x18) == 0x10); // bits 4:3 = 10 = ±8 g
-    if (gyro_ok && accel_ok) {
-      Serial.printf("[IMU] FSR OK: GYRO=0x%02X (+/-2000dps) ACCEL=0x%02X (+/-8g)\n",
-                    gyro_cfg, accel_cfg);
-    } else {
-      Serial.printf("[IMU] FSR MISMATCH! GYRO=0x%02X (want 0x18) ACCEL=0x%02X (want 0x10)\n",
-                    gyro_cfg, accel_cfg);
-      setLabel(30, "FSR: ERROR!", RED, BLACK);
-      vTaskDelay(pdMS_TO_TICKS(2000));
-      setLabel(30, "");
-    }
-  }
-
-  Wire.beginTransmission(0x68);
-  Wire.write(0x1A);
-  Wire.write(0x04);
-  uint8_t dlpf_gyro_err = Wire.endTransmission();
-
-  Wire.beginTransmission(0x68);
-  Wire.write(0x1D);
-  Wire.write(0x04);
-  uint8_t dlpf_accel_err = Wire.endTransmission();
-
-  if (dlpf_gyro_err == 0 && dlpf_accel_err == 0) {
-    Serial.println("[IMU] Hardware DLPF forced to 20Hz (ACK OK).");
-    setLabel(30, "DLPF: 20Hz OK");
-  } else {
-    Serial.printf("[IMU] DLPF WARN: gyro_err=%d accel_err=%d\n", dlpf_gyro_err,
-                  dlpf_accel_err);
-    setLabel(30, "DLPF: ERROR!", RED, BLACK);
+  // ── 2. IMU INIT (Wire + FSR verify + DLPF 20 Hz) ─────────────────────────
+  // Delegated to Mpu6886Provider::begin() — encapsulates Wire.begin(38,39),
+  // FSR register readback (0x1B/0x1C), and DLPF configuration (0x1A/0x1D).
+  imuProvider.begin();
+  if (!imuProvider.verifyConfig()) {
+    setLabel(30, "IMU: ERROR!", RED, BLACK);
+    vTaskDelay(pdMS_TO_TICKS(2000));
   }
   vTaskDelay(pdMS_TO_TICKS(1000));
   setLabel(30, "");
@@ -1078,7 +1085,7 @@ void setup() {
 
   setLabel(10, "Calibrating...");
   setLabel(30, "Hold still...");
-  calibrate_alignment();
+  calibrate_alignment(&imuProvider);
 
   if (mqtt_enabled) {
     mqttClient.setServer(cfg_mqtt_broker, cfg_mqtt_port);
@@ -1204,15 +1211,20 @@ void setup() {
 
     File newFile = SD.open(current_log_filename, FILE_WRITE);
     if (newFile) {
-      // Write FileHeader (26 bytes) as the first block of the .bin file.
+      // Write FileHeader (66 bytes, v3) as the first block of the .bin file.
       // The Python converter detects the "TEL" magic and uses record_size
       // from the header to parse subsequent records.
       FileHeader hdr = {};
       hdr.magic[0] = 0x54; hdr.magic[1] = 0x45; hdr.magic[2] = 0x4C; // "TEL"
-      hdr.header_version = 2; // v2: record_size is uint16_t (was uint8_t in v1)
+      hdr.header_version = 3; // v3: adds boot calibration params for SITL
       strncpy(hdr.firmware_version, FIRMWARE_VERSION, sizeof(hdr.firmware_version) - 1);
       hdr.record_size = sizeof(TelemetryRecord);
       hdr.start_time_ms = millis();
+      // v3: boot calibration for SITL reconstruction
+      hdr.cal_sin_phi = sin_phi;       hdr.cal_cos_phi = cos_phi;
+      hdr.cal_sin_theta = sin_theta;   hdr.cal_cos_theta = cos_theta;
+      hdr.cal_bias_ax = bias_ax;       hdr.cal_bias_ay = bias_ay;       hdr.cal_bias_az = bias_az;
+      hdr.cal_bias_gx = bias_gx;       hdr.cal_bias_gy = bias_gy;       hdr.cal_bias_gz = bias_gz;
       newFile.write((const uint8_t *)&hdr, sizeof(FileHeader));
       newFile.close();
       Serial.printf("[OK] SD binary file: %s (header %dB + %d bytes/record)\n",
@@ -1239,7 +1251,7 @@ void setup() {
   setLabel(30, "");
   // ─────────────────────────────────────────────────────────────────────────
 
-  xTaskCreatePinnedToCore(Task_I2C, "I2C", 4096, NULL, 3, &TaskI2CHandle, 0);
+  xTaskCreatePinnedToCore(Task_I2C, "I2C", 4096, &imuProvider, 3, &TaskI2CHandle, 0);
   // Stack 16 KB: ESKF 6D uses temporary 6×6 matrices (~2.5 KB per full correct())
   // + ESKF 5D (~1.5 KB) + 12-step IMU pipeline + static variables.
   // Increased from 12288 to 16384 to prevent stack overflow at ~570 s (v0.9.12).
@@ -1273,7 +1285,7 @@ void loop() {
           setLabel(30, "", BLACK, (uint16_t)0xFFFF00);
           vTaskDelay(pdMS_TO_TICKS(100));
         }
-        calibrate_alignment();
+        calibrate_alignment(&imuProvider);
         prev_system_state = -1;
         btn_locked = true;
         btn_press_cycles = 0;

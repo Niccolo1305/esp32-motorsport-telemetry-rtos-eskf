@@ -47,13 +47,30 @@ from datetime import datetime
 #                            ────
 #                            122 B  total
 
-HEADER_MAGIC  = b'TEL'                   
+HEADER_MAGIC  = b'TEL'
+RECORD_FMT_155 = '<Q7fBddffBf4f6f5fBf6f'  # 155-byte record (v1.4.0+, uint64 ts + sensor raw)
 RECORD_FMT_127 = '<I7fBddffBf4f6f5fBf'  # 127-byte record (v1.3.1+, + zaru_flags + tbias_gz)
 RECORD_FMT_122 = '<I7fBddffBf4f6f5f'  # 122-byte record (v0.9.8+, raw IMU + 6D)
 RECORD_FMT_78  = '<I7fBddffBf4f'       # 78-byte record (v0.8.0–v0.9.7, EMA only)
+RECORD_SIZE_155 = struct.calcsize(RECORD_FMT_155)
 RECORD_SIZE_127 = struct.calcsize(RECORD_FMT_127)
 RECORD_SIZE_122 = struct.calcsize(RECORD_FMT_122)
 RECORD_SIZE_78  = struct.calcsize(RECORD_FMT_78)
+SENTINEL_CALIB = 0xFFFFFFFFFFFFFFFF  # uint64 max — CalibrationRecord marker
+
+FIELD_NAMES_155 = [
+    't_us',  # was t_ms — microsecond precision
+    'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp_c',
+    'lap',
+    'gps_lat', 'gps_lon', 'gps_speed_kmh', 'gps_alt_m',
+    'gps_sats', 'gps_hdop',
+    'kf_x', 'kf_y', 'kf_vel', 'kf_heading',
+    'raw_ax', 'raw_ay', 'raw_az', 'raw_gx', 'raw_gy', 'raw_gz',
+    'kf6_x', 'kf6_y', 'kf6_vel', 'kf6_heading', 'kf6_bgz',
+    'zaru_flags', 'tbias_gz',
+    'sensor_ax', 'sensor_ay', 'sensor_az',
+    'sensor_gx', 'sensor_gy', 'sensor_gz'
+]
 
 FIELD_NAMES_122 = [
     't_ms',
@@ -115,7 +132,13 @@ def _read_bin_file_header(path):
             return None, 0
         hdr_ver = struct.unpack('<B', hdr_ver_byte)[0]
         
-        if hdr_ver >= 2:
+        if hdr_ver >= 3:
+            # Header v3 (v1.4.0+): 66 bytes (adds 40 bytes of calibration params)
+            rest = f.read(62)  # 66 - 4 already read
+            fw_ver_b, rec_size, start_ms = struct.unpack('<16sHI', rest[:22])
+            # 40 bytes of calibration params skipped (not needed for MoTeC)
+            data_offset = 66
+        elif hdr_ver >= 2:
             # Header v2 (v1.0.0+): 26 bytes (record_size is uint16_t -> 'H')
             rest = f.read(22)
             fw_ver_b, rec_size, start_ms = struct.unpack('<16sHI', rest)
@@ -147,7 +170,11 @@ def read_bin(path):
         fw_version  = 'unknown'
         print(f'        No FileHeader (legacy file) — assuming {record_size}B record size')
 
-    if record_size == RECORD_SIZE_127:
+    if record_size == RECORD_SIZE_155:
+        fmt        = RECORD_FMT_155
+        fields     = FIELD_NAMES_155
+        has_raw    = True
+    elif record_size == RECORD_SIZE_127:
         fmt        = RECORD_FMT_127
         fields     = FIELD_NAMES_127
         has_raw    = True
@@ -175,6 +202,8 @@ def read_bin(path):
             if len(chunk) < record_size:
                 break
             vals = struct.unpack(fmt, chunk)
+            if vals[0] == SENTINEL_CALIB:
+                continue  # CalibrationRecord sentinel (uint64 max)
             records.append(dict(zip(fields, vals)))
 
     return records, fw_version, has_raw
@@ -428,6 +457,8 @@ def main():
 
     if not has_raw:
         fmt_label = '78B (EMA only)'
+    elif records and 'sensor_ax' in records[0]:
+        fmt_label = '155B (raw+6D+ZARU+SITL)'
     elif records and 'zaru_flags' in records[0]:
         fmt_label = '127B (raw+6D+ZARU)'
     else:

@@ -28,8 +28,6 @@
 //    (gz_r - thermal_bias_gz) instead of EMA, closing instantly on corner entry.
 #include "filter_task.h"
 
-#include <M5Unified.h>
-
 #include "globals.h"
 #include "math_utils.h"
 
@@ -511,6 +509,9 @@ void Task_Filter(void *pvParameters) {
       float ema_gy = alpha * (gy_r - tb_gy) + (1.0f - alpha) * local_prev_gy;
       float ema_gz = alpha * (gz_r - tb_gz) + (1.0f - alpha) * local_prev_gz;
 
+      // Capture before EMA seeding clears it (Phase 5 needs it for zaru_flags bit 3)
+      const bool recalib_marker = first_sample_after_recalib;
+
       // v1.3.2: seed EMA from first raw sample after recalibration to prevent
       // 313 ms decay transient. After recalib, thermal_bias_* = 0.0f so
       // (gx_r - tb_gx) = gx_r — same seeding value as before.
@@ -559,7 +560,7 @@ void Task_Filter(void *pvParameters) {
       // GPS: snapshot already acquired above for the ESKF.
       if (sd_queue != NULL) {
         TelemetryRecord rec;
-        rec.timestamp_ms = (uint32_t)(data.timestamp_us / 1000ULL);
+        rec.timestamp_us = data.timestamp_us;
         // EMA accel/gyro: already ZARU-corrected (no "- tb_*" subtraction needed)
         rec.ax = ema_ax;
         rec.ay = ema_ay;
@@ -597,8 +598,12 @@ void Task_Filter(void *pvParameters) {
         if (is_stationary)       flags |= 0x01; // bit 0: Static ZARU
         if (straight_zaru_active) flags |= 0x02; // bit 1: Straight ZARU
         if (nhc_active)          flags |= 0x04; // bit 2: NHC
+        if (recalib_marker)      flags |= 0x08; // bit 3: Recalibration
         rec.zaru_flags = flags;
         rec.tbias_gz = tb_gz; // post-ZARU snapshot (consistent with EMA correction)
+        // Sensor-frame raw (SITL, v1.4.0): chip-native, pre-calibration
+        rec.sensor_ax = data.ax;  rec.sensor_ay = data.ay;  rec.sensor_az = data.az;
+        rec.sensor_gx = data.gx;  rec.sensor_gy = data.gy;  rec.sensor_gz = data.gz;
         xQueueSend(sd_queue, &rec, 0); // timeout=0: discard if queue full
       }
     }
