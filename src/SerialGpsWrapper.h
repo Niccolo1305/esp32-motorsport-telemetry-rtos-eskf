@@ -26,6 +26,7 @@
 #include <HardwareSerial.h>
 #include <TinyGPSPlus.h>
 #include <atomic>
+#include <esp_timer.h>
 
 #include "IGpsProvider.h"
 #include "types.h"   // GpsData
@@ -89,7 +90,7 @@ public:
             outData.speed_kmh = _gps.speed.isValid()    ? (float)_gps.speed.kmph()     : 0.0f;
             outData.alt_m     = _gps.altitude.isValid() ? (float)_gps.altitude.meters() : 0.0f;
             outData.hdop      = _gps.hdop.isValid()     ? (float)_gps.hdop.hdop()       : 99.9f;
-            outData.fix_ms    = millis();
+            outData.fix_us    = esp_timer_get_time();  // µs, same timebase as IMU
             outData.epoch++;  // signals fresh fix to Task_Filter
         }
 

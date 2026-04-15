@@ -3,7 +3,7 @@ Dual-core FreeRTOS telemetry firmware for ESP32-S3 with 50Hz ESKF sensor fusion 
 
 # ESP32 Telemetria
 
-![Firmware](https://img.shields.io/badge/firmware-v1.1.0-blue)
+![Firmware](https://img.shields.io/badge/firmware-v1.4.2-blue)
 ![Platform](https://img.shields.io/badge/platform-ESP32--S3-informational)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 
@@ -20,7 +20,9 @@ ESP32 Telemetria is a self-contained data-acquisition unit that fits in your han
 
 Recorded sessions are stored in a compact binary format on a micro-SD card and can be post-processed through a Python toolchain that outputs interactive dashboards or native **MoTeC i2 Pro** log files — the same format used by professional motorsport engineers.
 
-**Current firmware:** v1.1.0
+As of v1.4.x the IMU and GPS stacks are abstracted behind `IImuProvider` / `IGpsProvider` interfaces, decoupling the pipeline from hardware. Every session now logs sensor-frame raw data alongside the processed output, enabling full offline pipeline replay via `sitl_replay.py` — including deterministic GPS staleness gating using the same µs clock as the IMU.
+
+**Current firmware:** v1.4.2
 
 ---
 
@@ -51,16 +53,21 @@ The entire project is designed to be affordable, modular, and extremely compact.
 
 ## Features
 
-- **50 Hz IMU pipeline** — Madgwick AHRS → gravity removal → ENU linear acceleration
-- **Ellipsoid hard/soft-iron calibration** for the accelerometer (derived from tumble-test dataset)
-- **Error-State Kalman Filter (ESKF2D)** — 5-state `[px, py, vx, vy, θ]` fused with GPS at ~10 Hz
-- **Shadow ESKF_6D** — 6-state filter with online gyro-bias estimation, running in parallel for validation
-- **GPS outlier rejection** via Mahalanobis innovation gate (χ² threshold 11.83, 3-DOF)
-- **ZARU stationarity detection** — variance of ωz over a 50-sample window triggers zero-angular-rate updates for thermal bias correction
-- **Async SD logging** via FreeRTOS queue — 122 bytes/record at 50 Hz
+- **50 Hz IMU pipeline** — 5-phase signal chain: ellipsoid calibration → geometric alignment → VGPL-compensated Madgwick AHRS → gravity removal → ESKF navigation → end-of-pipe EMA
+- **Ellipsoid hard/soft-iron calibration** for the accelerometer (tumble-test derived, `W·(a−B)` applied pre-rotation)
+- **VGPL kinematic compensation** (v1.4.1) — subtracts both centripetal (`v×ωz/g`) and longitudinal (`dv/dt/g`) acceleration before Madgwick, keeping beta > 0 at all times and eliminating horizon tilt from gyro drift
+- **ZARU-to-Madgwick bias correction** — thermal bias learned by ZARU is fed back into the gyro before Madgwick each cycle, preventing ~4.7 °/s/hr electronic drift from projecting phantom acceleration into the navigation output
+- **3-axis ZARU** (static + straight-line) — statistical gyro bias estimator on a 50-sample variance window; straight-line mode uses a triple gate (lateral-G · yaw rate · COG variation over 15 m baseline)
+- **Error-State Kalman Filter (ESKF2D)** — 5-state `[px, py, vx, vy, θ]` fused with GPS at ~10 Hz; sequential 3-stage correction (position → speed → COG); Mahalanobis innovation gate
+- **Non-Holonomic Constraint (NHC)** — `v_lateral = 0` pseudo-measurement continuously corrects heading drift while in motion (> 5 km/h, disabled above 0.5 g lateral)
+- **Shadow ESKF_6D** — 6-state filter with independent online gyro-bias estimation, running in parallel for validation; logged as `kf6_*`
+- **GPS staleness detection** via monotonic IMU clock (`timestamp_us − fix_us > 5 s`), same timebase as IMU for deterministic SITL replay
+- **Dependency-injection IMU/GPS providers** — `IImuProvider` / `IGpsProvider` virtual interfaces decouple hardware from the pipeline (v1.1.0+)
+- **Async SD logging** via FreeRTOS queue — 164 bytes/record at 50 Hz (v1.4.2 format)
 - **MQTT publishing** at 10 Hz over Wi-Fi for live telemetry monitoring
 - **MoTeC i2 Pro export** — native `.ld` format, 12 channels (8 @ 50 Hz + 4 @ 10 Hz)
 - **Interactive dashboard** built with Plotly/Dash for post-session analysis
+- **Offline SITL replay** (`sitl_hal/sitl_replay.py`) — re-runs the full firmware pipeline offline from logged sensor-frame data (v1.4.2+)
 
 ---
 
@@ -233,7 +240,20 @@ All tools are in `Tool/` and accept `.bin` files directly or `.csv` files from `
 python Tool/bin_to_csv.py <file.bin>
 ```
 
-### 2 — Interactive Dashboard
+Detects the record format automatically from the file header (supports 122 / 127 / 155 / 164-byte formats across all firmware versions). Launches an interactive lap-split menu for multi-lap sessions.
+
+### 2 — Offline SITL Replay
+
+```bash
+python Tool/sitl_hal/sitl_replay.py <file.csv>
+python Tool/sitl_hal/sitl_replay.py <file.bin> --output <out_sitl.csv>
+```
+
+Replays the exact firmware pipeline (`filter_task.cpp`) offline using the sensor-frame channels logged since v1.4.0 (`sensor_ax/ay/az`, `sensor_gx/gy/gz`). Produces a new CSV with re-computed EMA, ZARU, ESKF, and VGPL outputs — useful for tuning constants without reflashing.
+
+With v1.4.2 logs the GPS staleness gate is reproduced deterministically (`gps_fix_us` / `gps_valid` fields), meaning `eskf.correct()` is called on the exact same samples as the firmware.
+
+### 3 — Interactive Dashboard
 
 ```bash
 python Tool/dashboard.py
@@ -294,31 +314,54 @@ Produces a native `.ld` file openable in **i2 Pro** or **i2 Standard**:
 
 | Task | Core | Priority | Responsibility |
 |------|------|----------|----------------|
-| `Task_I2C` | 0 | 3 | Reads MPU-6886 every 20 ms, pushes to `imuQueue` (overwrite) |
-| `Task_GPS` | 0 | 2 | Polls UART1, parses NMEA, writes to `gpsDatiCondivisi` (mutex) |
-| `Task_Filter` | 1 | 2 | Consumes IMU queue, runs full signal chain, drives ESKF |
-| `Task_SD_Writer` | 1 | 1 | Async SD logging via queue, flushes every 50 samples |
-| `loop()` | 1 | — | Display refresh (5 Hz) · MQTT publish (10 Hz) |
+| `Task_I2C` | 0 | 3 | Reads MPU-6886 via `IImuProvider*` every 20 ms; pushes to `imuQueue` (overwrite, depth 1) |
+| `Task_GPS` | 0 | 2 | Polls UART1 via `IGpsProvider*`, parses NMEA, writes to `shared_gps_data` under `gps_mutex` |
+| `Task_Filter` | 1 | 2 | Consumes IMU queue, runs 5-phase signal chain, drives ESKF |
+| `Task_SD_Writer` | 1 | 1 | Async SD logging from `sd_queue` (depth 200), flushes every 50 samples |
+| `loop()` | 1 | — | Display refresh (5 Hz) · MQTT publish (10 Hz) · button handling |
+
+**IPC primitives:** `imuQueue` (overwrite), `sd_queue` (FIFO depth 200), `telemetry_mutex` (Filter↔loop), `gps_mutex` (GPS task↔Filter/loop).
 
 ### Signal Processing Pipeline
 
-Each 20 ms cycle inside `Task_Filter`:
+Each 20 ms cycle inside `Task_Filter` runs 5 phases. The key architectural principle is **"End-of-Pipe EMA + ZARU-to-Madgwick"**: the EMA filter is purely aesthetic (display/MQTT/SD) and sits after all navigation updates, while the ZARU thermal bias is fed back into the gyro *before* Madgwick each cycle.
 
+> Full reference: [`Pipeline/IMU and GPS Data Processing pipeline v1.4.2.pdf`](Pipeline/IMU%20and%20GPS%20Data%20Processing%20pipeline%20v1.4.2.pdf)
+
+```mermaid
+flowchart LR
+    classDef hw    fill:#1a5276,stroke:#2e86c1,color:#fff,stroke-width:2px
+    classDef phase fill:#145a32,stroke:#27ae60,color:#fff,stroke-width:2px
+    classDef ctrl  fill:#7d3c98,stroke:#a569bd,color:#fff,stroke-width:2px
+    classDef ema   fill:#1f618d,stroke:#3498db,color:#fff,stroke-width:2px
+    classDef out   fill:#b03a2e,stroke:#e74c3c,color:#fff,stroke-width:2px
+
+    IMU["MPU-6886\n50 Hz\nIImuProvider"]:::hw
+    GPS["AT6668 GNSS\n10 Hz\nIGpsProvider"]:::hw
+
+    P1["Phase 1\ntelemetry_mutex\n─────────────\nEllipsoid cal\nGeometric align\nVGPL cent+long\nMadgwick AHRS\nGravity removal"]:::phase
+    P2["Phase 2\nno mutex\n─────────────\nVariance engine\nZARU 3-axis\nESKF 5D + 6D\nNHC · GPS correct"]:::ctrl
+    P3["Phase 3\nEnd-of-pipe EMA\n─────────────\nα=0.06 τ≈313ms\nZARU-corrected\ninput"]:::ema
+    P4["Phase 4\ntelemetry_mutex\n─────────────\nEMA write-back\nshared_telemetry"]:::ctrl
+
+    MQTT["MQTT\n10 Hz"]:::out
+    DISP["LCD\n5 Hz"]:::out
+    SD["Task_SD_Writer\n164B · 50 Hz"]:::out
+
+    IMU --> P1
+    GPS --> P2
+    P1 --> P2 --> P3 --> P4
+    P4 --> MQTT
+    P4 --> DISP
+    P3 --> SD
 ```
-IMU raw
-  └─ 1. Ellipsoid calibration (hard/soft-iron)
-  └─ 2. Geometric alignment (frame rotation → vehicle axes)
-  └─ 3. Madgwick AHRS (quaternion, adaptive β)
-  └─ 4. Gravity removal → linear acceleration (ENU)
-  └─ 5. Bivio (data split)
-        ├─ Raw path → ESKF predict/correct
-        └─ EMA path (α=0.06, τ≈313ms) → display · MQTT · SD
-  └─ 6. Stationarity detection (var(ωz), 50-sample window) → ZARU
-  └─ 7. ESKF predict @ 50 Hz
-  └─ 8. ESKF correct on GPS fix @ ~10 Hz
-        (sequential: position → speed → course-over-ground)
-  └─ 9. Shadow ESKF_6D predict/correct (parallel validation)
-```
+
+<details>
+<summary>Detailed pipeline diagram — all nodes, all data paths (click to expand)</summary>
+
+![IMU and GPS Data Processing Pipeline v1.4.2](img/IMU%20and%20GPS%20Data%20Processing-v1.4.2.png)
+
+</details>
 
 ### Kalman Filter (`src/eskf.h`)
 
@@ -368,21 +411,50 @@ To recalibrate:
 
 ## Binary Log Format
 
-`RecordTelemetria` — 122 bytes per record at 50 Hz (`__attribute__((packed))`):
+### File Header (66 bytes, v3)
+
+Written once at the start of every `.bin` file:
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `t_ms` | uint32 | IMU hardware timestamp (ms) |
-| `ax..temp_c` | 7 × float | EMA-filtered accel (G) + gyro (deg/s) + temperature (°C) |
-| `lap` | uint8 | Lap counter |
-| `gps_lat`, `gps_lon` | 2 × double | GPS coordinates (WGS84) |
-| `gps_speed_kmh`, `gps_alt_m` | 2 × float | GPS ground speed and altitude |
-| `gps_sats`, `gps_hdop` | uint8 + float | Satellite count and HDOP |
-| `kf_x..kf_heading` | 4 × float | ESKF2D output: position (m), speed (m/s), heading (rad) |
-| `raw_ax..raw_gz` | 6 × float | Post-Madgwick IMU (zero latency, bypasses EMA) |
-| `kf6_x..kf6_bgz` | 5 × float | ESKF_6D shadow output + estimated gyro bias |
+| `magic` | 3 × uint8 | `"TEL"` — identifies this as a telemetry file |
+| `header_version` | uint8 | `3` (v1→v2: record_size widened to uint16; v2→v3: calibration params added) |
+| `firmware_version` | char[16] | e.g. `"v1.4.2"` |
+| `record_size` | uint16 | Bytes per record (164 for v1.4.2) |
+| `start_time_ms` | uint32 | `millis()` at file open |
+| `cal_sin_phi..cal_cos_theta` | 4 × float | Boot mounting rotation (φ, θ) |
+| `cal_bias_ax..cal_bias_gz` | 6 × float | Boot accel/gyro residual biases |
 
-Legacy 78-byte format (firmware < v0.9.8) is supported by all post-processing tools.
+### Data Record (164 bytes, v1.4.2, `__attribute__((packed))`)
+
+`struct.unpack('<Q7fBddffBf4f6f5fBf6fQB', chunk_164_byte)`
+
+| Field | Type | Bytes | Description |
+|-------|------|-------|-------------|
+| `timestamp_us` | uint64 | 8 | IMU hardware clock (µs, `esp_timer_get_time()`) |
+| `ax`, `ay`, `az` | 3 × float | 12 | EMA linear acceleration [G], ZARU-corrected |
+| `gx`, `gy`, `gz` | 3 × float | 12 | EMA angular rate [°/s], ZARU-corrected |
+| `temp_c` | float | 4 | MPU-6886 temperature [°C] |
+| `lap` | uint8 | 1 | Session flag (1 = recording, 0 = idle) |
+| `gps_lat`, `gps_lon` | 2 × double | 16 | GPS coordinates (WGS84) |
+| `gps_speed_kmh`, `gps_alt_m` | 2 × float | 8 | GPS ground speed and altitude |
+| `gps_sats` | uint8 | 1 | Satellites locked |
+| `gps_hdop` | float | 4 | Horizontal dilution of precision |
+| `kf_x..kf_heading` | 4 × float | 16 | ESKF 5D: ENU position [m], speed [m/s], heading [rad] |
+| `raw_ax..raw_gz` | 6 × float | 24 | Post-Madgwick IMU, zero latency, bypasses EMA |
+| `kf6_x..kf6_bgz` | 5 × float | 20 | ESKF 6D shadow output + estimated gz bias |
+| `zaru_flags` | uint8 | 1 | Bitmask: bit0=Static ZARU, bit1=Straight ZARU, bit2=NHC, bit3=Recalibration |
+| `tbias_gz` | float | 4 | Current learned thermal bias gz [°/s] |
+| `sensor_ax..sensor_gz` | 6 × float | 24 | Sensor-frame raw IMU pre-calibration (SITL input) |
+| `gps_fix_us` | uint64 | 8 | `esp_timer_get_time()` of last valid GPS fix (SITL, v1.4.2) |
+| `gps_valid` | uint8 | 1 | Mirror of `GpsData.valid` for this sample (SITL, v1.4.2) |
+| **Total** | | **164** | |
+
+`bin_to_csv.py` supports all legacy formats (78 / 122 / 127 / 155 / 164 bytes) with automatic detection from the file header.
+
+### CalibrationRecord (sentinel)
+
+On mid-session recalibration (long press ≥ 1.5 s), a sentinel record is injected with `timestamp_us = 0xFFFFFFFFFFFFFFFF`. The EMA float fields carry the new calibration parameters. Post-processing tools detect and skip it automatically.
 
 ---
 
@@ -443,37 +515,40 @@ Default: `telemetry/<unit_id>/data` where `<unit_id>` is derived from the last 3
 ## Repository Structure
 
 ```
-ESP32-Telemetria/
+esp32-telemetry-clean/
 │
 ├── src/
-│   ├── Telemetria.ino          # Entry point: setup() + loop() (~1 230 lines)
-│   ├── config.h                # Constants, pins, calibration matrices
-│   ├── types.h                 # Struct definitions (TelemetryRecord, ImuRawData, …)
-│   ├── globals.h / globals.cpp # Shared state (extern declarations + definitions)
-│   ├── eskf.h                  # Header-only ESKF library (ESKF2D + ESKF_6D)
-│   ├── madgwick.h              # Header-only Madgwick AHRS with adaptive β
-│   ├── math_utils.h            # Inline math (fast_inv_sqrt, ellipsoid calibration, …)
-│   ├── filter_task.h / .cpp    # 12-step signal processing pipeline (Task_Filter)
-│   ├── imu_task.h / .cpp       # IMU polling task (Task_I2C)
-│   ├── gps_task.h / .cpp       # GPS parsing task (Task_GPS)
-│   ├── sd_writer.h / .cpp      # Async SD logging task (Task_SD_Writer)
-│   ├── wifi_manager.h / .cpp   # Wi-Fi connection, reconnect, radio on/off
-│   ├── calibration.h / .cpp    # Boot & manual IMU calibration
-│   └── display.h / .cpp        # LCD helper functions
+│   ├── Telemetria.ino           # Entry point: setup() + loop()
+│   ├── config.h                 # Constants, pins, calibration matrices (primary tuning file)
+│   ├── types.h                  # Struct definitions (TelemetryRecord 164B, FileHeader, GpsData, …)
+│   ├── globals.h / globals.cpp  # Shared state (extern declarations + definitions)
+│   ├── eskf.h                   # Header-only ESKF library (ESKF2D + ESKF_6D)
+│   ├── madgwick.h               # Header-only Madgwick AHRS — single norm-gate adaptive β
+│   ├── math_utils.h             # Inline math (fast_inv_sqrt, ellipsoid calibration, rotate_3d, …)
+│   ├── filter_task.h / .cpp     # 5-phase signal processing pipeline (Task_Filter)
+│   ├── imu_task.h / .cpp        # IMU polling task (Task_I2C) — uses IImuProvider DI
+│   ├── gps_task.h / .cpp        # GPS parsing task (Task_GPS) — uses IGpsProvider DI
+│   ├── IImuProvider.h           # Pure virtual IMU provider interface
+│   ├── Mpu6886Provider.h        # Concrete IImuProvider for MPU-6886 (header-only)
+│   ├── IGpsProvider.h           # Pure virtual GPS provider interface
+│   ├── SerialGpsWrapper.h       # Concrete IGpsProvider (HardwareSerial + TinyGPSPlus, header-only)
+│   ├── sd_writer.h / .cpp       # Async SD logging task (Task_SD_Writer)
+│   ├── wifi_manager.h / .cpp    # Wi-Fi connection, reconnect, radio on/off
+│   ├── calibration.h / .cpp     # Boot & manual IMU calibration
+│   └── display.h / .cpp         # LCD helper functions
 │
 ├── Tool/
-│   ├── bin_to_csv.py           # Binary → CSV converter with interactive lap split
-│   ├── dashboard.py            # Plotly/Dash interactive telemetry viewer
-│   ├── motec_exporter.py       # MoTeC i2 Pro .ld exporter
-│   └── requirements.txt        # Python dependencies
+│   ├── bin_to_csv.py            # Binary → CSV converter (all formats: 122/127/155/164B)
+│   ├── sitl_hal/
+│   │   ├── sitl_replay.py       # Offline SITL pipeline replay from sensor-frame data (v1.4.2+)
+│   │   └── static_bench_validator.py
+│   ├── dashboard.py             # Plotly/Dash interactive telemetry viewer
+│   ├── motec_exporter.py        # MoTeC i2 Pro .ld exporter
+│   └── requirements.txt         # Python dependencies
 │
-├── CSV/                        # Sample recorded sessions (ready to use with the tools)
-│   ├── tel_47.bin / .csv / .ld
-│   └── tel_48.bin / .csv / .ld
-│
-├── Reports/                    # Technical documentation (PDF)
-├── img/                        # Screenshots used in this README
-├── Datasheet Sensori/          # MPU-6886, ATGM336H-6N, MAX2659 datasheets
+├── Pipeline/                    # Mermaid pipeline diagrams
+├── Reports/                     # Technical documentation (PDF)
+├── img/                         # Screenshots used in this README
 │
 ├── platformio.ini
 ├── wifi_config.example.txt
@@ -557,8 +632,10 @@ If the device was moved during the 2-second boot tare, gyro bias will be off —
 
 | Item | Status | Notes |
 |------|--------|-------|
-| ESKF_6D validation | In progress | A/B comparison on recorded track sessions; 6D becomes primary if it outperforms |
-| Binary session header | Planned | Store GPS origin fix + HDOP + firmware version at file start; fixes AEQD offset |
+| Binary session header | **Done** (v1.4.0) | FileHeader v3: firmware string, record size, 10 boot calibration params |
+| SITL offline replay | **Done** (v1.4.2) | `sitl_hal/sitl_replay.py` re-runs the full pipeline from sensor-frame logs; GPS staleness deterministic |
+| VGPL longitudinal compensation | **Done** (v1.4.1) | `dv/dt / g` subtracted from ay before Madgwick alongside centripetal |
+| ESKF_6D validation | In progress | A/B comparison on recorded track sessions; 6D becomes primary if it outperforms 5D |
 | Hardware interrupt for BtnA | Planned | `attachInterrupt()` on GPIO 41 — captures clicks during blocking SD calls |
 | Shake detection at boot | Planned | Detect motion during tare window and warn or auto-repeat |
 | Dashboard multi-lap support | Under evaluation | Requires downsampling or virtualised rendering above 150k rows |
@@ -567,26 +644,49 @@ If the device was moved during the 2-second boot tare, gyro bias will be off —
 
 ## Changelog
 
+### v1.4.2 — GPS Timing Metadata + SITL Deterministic Replay
+
+- **`TelemetryRecord` grows to 164 bytes** — appends `gps_fix_us` (uint64, same timebase as `timestamp_us`) and `gps_valid` (uint8).
+- **GPS staleness** now computed via `timestamp_us − fix_us > 5 000 000 µs` (monotonic, deterministic) instead of `millis()`.
+- **`GpsData.fix_us`** populated by `SerialGpsWrapper` on every valid fix (`esp_timer_get_time()`).
+- **`sitl_hal/sitl_replay.py`** — Python tool that re-runs the full firmware pipeline offline from sensor-frame logs. GPS staleness gating is reproduced exactly from the logged timestamps.
+- `bin_to_csv.py` updated to support the 164-byte format.
+
+### v1.4.1 — VGPL Longitudinal Compensation
+
+- VGPL now subtracts two kinematic channels from the accelerometer before Madgwick: centripetal lateral (`−v×ωz/g` → ax) **and** longitudinal (`dv/dt / g` → ay). Both are confidence-gated via ESKF velocity variance and rate-limited at 0.15 G/sample.
+- New `Task_Filter` state variables: `prev_cent_x`, `prev_long_y`, `prev_v_eskf` (reset on recalibration).
+
+### v1.4.0 — Dual Provider Interfaces + SITL Sensor-Frame Logging
+
+- **`IImuProvider` / `IGpsProvider`** — pure virtual interfaces decouple `Task_I2C` / `Task_GPS` from hardware. Concrete implementations: `Mpu6886Provider.h`, `SerialGpsWrapper.h`.
+- **`timestamp_us` upgraded to `uint64_t`** (µs precision, from `uint32_t` ms). Record size: 127 B → 155 B.
+- **Sensor-frame raw IMU** (`sensor_ax/ay/az`, `sensor_gx/gy/gz`) added to every record — the Level 1 input for SITL replay.
+- **FileHeader v3** (66 bytes): adds 10 boot calibration floats (`sin_phi`, `cos_phi`, `sin_theta`, `cos_theta`, `bias_ax/ay/az`, `bias_gx/gy/gz`) for SITL pipeline reconstruction.
+- SD flush interval extracted to `SD_FLUSH_EVERY` constant.
+
+### v1.3.5 — End-of-Pipe EMA + ZARU-to-Madgwick
+
+Three architectural fixes to decouple the EMA from the navigation core:
+
+1. **End-of-Pipe EMA** — moved to after all ZARU updates; variance buffers now consume RAW `g_r` (not EMA) to eliminate the ~313 ms decay tail from stationary detection.
+2. **ZARU-to-Madgwick** — thermal bias subtracted from gyro *before* `g_rad` is computed; Madgwick and VGPL always receive a zero-mean gyro, preventing -4.7 °/s/hr MPU-6886 drift from tilting the horizon.
+3. **Straight-line ZARU zero-latency gate** — `gz_gate` now uses `gz_r − thermal_bias_gz` (raw corrected) instead of EMA, closing instantly on corner entry.
+
+### v1.3.1–v1.3.4 — NHC, Straight-Line ZARU, VGPL, Recalibration
+
+- **v1.3.1** — Non-Holonomic Constraint (`v_lateral = 0`, > 5 km/h, gated at 0.5 g); Enhanced Straight-Line ZARU with COG-variation gate (15 m baseline); CalibrationRecord sentinel in SD stream; ZARU/NHC diagnostic flags (`zaru_flags` bitmask) + `tbias_gz` logged.
+- **v1.3.2** — Mid-session recalibration (long press): full Task_Filter state reset, sentinel record injected, `recalibration_pending` atomic flag; function-scope navigation state for clean reset.
+- **v1.3.3** — GPS HAL abstraction (`IGpsProvider`); VGPL centripetal pre-compensation for Madgwick.
+- **v1.3.4** — VGPL replaces Dual-Gate Adaptive Beta; single `k_norm` gate; beta floor 0.005.
+
+### v1.2.1 — 3-Axis ZARU
+
+ZARU extended to all three gyro axes (`gx`, `gy`, `gz`). Chassis vibration coupling into roll/pitch axes was causing false stationary detections with gz-only variance. Separate thresholds: `VAR_STILLNESS_GZ=0.25`, `VAR_STILLNESS_GXY=0.35`.
+
 ### v1.1.0 — Modular Refactoring
 
-The monolithic `Telemetria.ino` (~2 200 lines) has been split into 13 focused modules while keeping runtime behaviour identical (zero logic changes, same RAM/Flash footprint).
-
-| Module | Responsibility |
-|--------|----------------|
-| `config.h` | All constants, pin definitions, calibration matrices |
-| `types.h` | Struct definitions (`TelemetryRecord`, `ImuRawData`, `GpsData`, …) |
-| `globals.h` / `.cpp` | Shared state via `extern` declarations |
-| `math_utils.h` | Inline math utilities (fast inverse sqrt, ellipsoid calibration, trimmed mean) |
-| `madgwick.h` | Madgwick AHRS with adaptive β |
-| `filter_task.h` / `.cpp` | Complete 12-step signal processing pipeline |
-| `imu_task.h` / `.cpp` | IMU polling at 50 Hz with `vTaskDelayUntil` |
-| `gps_task.h` / `.cpp` | GPS NMEA parsing with mutex-protected shared data |
-| `sd_writer.h` / `.cpp` | Async SD logging with retry logic |
-| `wifi_manager.h` / `.cpp` | Wi-Fi connect/reconnect/shutdown/startup |
-| `calibration.h` / `.cpp` | Boot and manual IMU calibration |
-| `display.h` / `.cpp` | LCD helper functions |
-
-`Telemetria.ino` now contains only `setup()` and `loop()` (~1 230 lines).
+The monolithic `Telemetria.ino` (~2 200 lines) split into 13 focused modules with zero logic changes. `Telemetria.ino` now contains only `setup()` and `loop()`.
 
 ### v1.0.0 — Initial Release
 

@@ -12,7 +12,7 @@ struct WifiCredential {
 };
 
 // ── Binary SD Record ───────────────────────────────────────────────────────
-// Compact binary struct (155 bytes/sample, zero padding).
+// Compact binary struct (164 bytes/sample, zero padding).
 // __attribute__((packed)): no alignment padding bytes.
 //
 // Memory layout:
@@ -42,10 +42,12 @@ struct WifiCredential {
 //   float tbias_gz         4 bytes  — learned thermal bias gz [deg/s] (v1.3.1)
 //   float sensor_ax/ay/az 12 bytes  — sensor-frame raw accel [G] (SITL, v1.4.0)
 //   float sensor_gx/gy/gz 12 bytes  — sensor-frame raw gyro [deg/s] (SITL, v1.4.0)
+//   uint64_t gps_fix_us    8 bytes  — esp_timer timestamp of last GPS fix [µs] (SITL, v1.4.2)
+//   uint8_t gps_valid      1 byte   — mirror of GpsData.valid for this sample (SITL, v1.4.2)
 //                         ────────
-//   TOTAL:                155 bytes/sample
+//   TOTAL:                164 bytes/sample
 //
-// Python read: struct.unpack('<Q7fBddffBf4f6f5fBf6f', chunk_155_byte)
+// Python read: struct.unpack('<Q7fBddffBf4f6f5fBf6fQB', chunk_164_byte)
 //
 // 16 GB SD at 50 Hz: ~109 million samples ≈ 24 h of continuous logging
 
@@ -98,8 +100,18 @@ struct __attribute__((packed)) TelemetryRecord {
   // ── SITL Raw Sensor-Frame (v1.4.0) ──
   float sensor_ax, sensor_ay, sensor_az; // 12 — sensor-frame raw accel [G]
   float sensor_gx, sensor_gy, sensor_gz; // 12 — sensor-frame raw gyro [deg/s]
+  // ── SITL GPS Timing Metadata (v1.4.2) ──
+  // Enables deterministic SITL replay of GPS staleness detection and
+  // eskf.correct() gating without relying on millis() or wall-clock time.
+  //   gps_fix_us: esp_timer_get_time() when last valid fix was decoded.
+  //               Same timebase as timestamp_us → offline staleness:
+  //               (timestamp_us - gps_fix_us) > 5_000_000 µs.
+  //   gps_valid:  mirrors GpsData.valid — needed to reproduce the
+  //               gps_slow = (!valid || speed < 2 km/h) gate in is_stationary.
+  uint64_t gps_fix_us;  // 8 — esp_timer timestamp of last GPS fix [µs]
+  uint8_t  gps_valid;   // 1 — 1 if last_gps.valid was true this sample
 };
-static_assert(sizeof(TelemetryRecord) == 155, "TelemetryRecord must be 155 bytes");
+static_assert(sizeof(TelemetryRecord) == 164, "TelemetryRecord must be 164 bytes");
 
 // ── Binary File Header ─────────────────────────────────────────────────────
 // Written at the start of every .bin file on the SD (v0.9.7).
@@ -156,5 +168,6 @@ struct GpsData {
   bool valid = false;   // true only after first valid fix
   uint32_t epoch = 0;   // monotonic fix counter (v0.8.0): Task_Filter
                         // compares with last_epoch to detect a fresh fix
-  uint32_t fix_ms = 0;  // millis() of last valid fix (v0.9.11: staleness)
+  uint64_t fix_us = 0;  // esp_timer_get_time() of last valid fix [µs] (v1.4.2: same
+                        // timebase as ImuRawData.timestamp_us → SITL staleness replay)
 };
