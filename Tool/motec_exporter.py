@@ -48,15 +48,32 @@ from datetime import datetime
 #                            122 B  total
 
 HEADER_MAGIC  = b'TEL'
-RECORD_FMT_155 = '<Q7fBddffBf4f6f5fBf6f'  # 155-byte record (v1.4.0+, uint64 ts + sensor raw)
+RECORD_FMT_164 = '<Q7fBddffBf4f6f5fBf6fQB'  # 164-byte record (v1.4.2+, + GPS timing metadata)
+RECORD_FMT_155 = '<Q7fBddffBf4f6f5fBf6f'  # 155-byte record (v1.4.0, uint64 ts + sensor raw)
 RECORD_FMT_127 = '<I7fBddffBf4f6f5fBf'  # 127-byte record (v1.3.1+, + zaru_flags + tbias_gz)
 RECORD_FMT_122 = '<I7fBddffBf4f6f5f'  # 122-byte record (v0.9.8+, raw IMU + 6D)
 RECORD_FMT_78  = '<I7fBddffBf4f'       # 78-byte record (v0.8.0–v0.9.7, EMA only)
+RECORD_SIZE_164 = struct.calcsize(RECORD_FMT_164)
 RECORD_SIZE_155 = struct.calcsize(RECORD_FMT_155)
 RECORD_SIZE_127 = struct.calcsize(RECORD_FMT_127)
 RECORD_SIZE_122 = struct.calcsize(RECORD_FMT_122)
 RECORD_SIZE_78  = struct.calcsize(RECORD_FMT_78)
 SENTINEL_CALIB = 0xFFFFFFFFFFFFFFFF  # uint64 max — CalibrationRecord marker
+
+FIELD_NAMES_164 = [
+    't_us',  # uint64 µs — IMU hardware clock
+    'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp_c',
+    'lap',
+    'gps_lat', 'gps_lon', 'gps_speed_kmh', 'gps_alt_m',
+    'gps_sats', 'gps_hdop',
+    'kf_x', 'kf_y', 'kf_vel', 'kf_heading',
+    'raw_ax', 'raw_ay', 'raw_az', 'raw_gx', 'raw_gy', 'raw_gz',
+    'kf6_x', 'kf6_y', 'kf6_vel', 'kf6_heading', 'kf6_bgz',
+    'zaru_flags', 'tbias_gz',
+    'sensor_ax', 'sensor_ay', 'sensor_az',
+    'sensor_gx', 'sensor_gy', 'sensor_gz',
+    'gps_fix_us', 'gps_valid'  # SITL timing metadata — not exported as MoTeC channels
+]
 
 FIELD_NAMES_155 = [
     't_us',  # was t_ms — microsecond precision
@@ -170,7 +187,11 @@ def read_bin(path):
         fw_version  = 'unknown'
         print(f'        No FileHeader (legacy file) — assuming {record_size}B record size')
 
-    if record_size == RECORD_SIZE_155:
+    if record_size == RECORD_SIZE_164:
+        fmt        = RECORD_FMT_164
+        fields     = FIELD_NAMES_164
+        has_raw    = True
+    elif record_size == RECORD_SIZE_155:
         fmt        = RECORD_FMT_155
         fields     = FIELD_NAMES_155
         has_raw    = True
@@ -457,6 +478,8 @@ def main():
 
     if not has_raw:
         fmt_label = '78B (EMA only)'
+    elif records and 'gps_fix_us' in records[0]:
+        fmt_label = '164B (raw+6D+ZARU+SITL+GPS timing)'
     elif records and 'sensor_ax' in records[0]:
         fmt_label = '155B (raw+6D+ZARU+SITL)'
     elif records and 'zaru_flags' in records[0]:

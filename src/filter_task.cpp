@@ -61,7 +61,9 @@ void Task_Filter(void *pvParameters) {
   bool has_cog_ref = false;
   float cog_variation = 99.0f;   // default: no straight detected
   bool first_sample_after_recalib = false;
-  float prev_cent_y = 0.0f;      // v1.3.4: VGPL rate limiter state
+  float prev_cent_x = 0.0f;      // v1.4.1: VGPL lateral rate limiter state
+  float prev_long_y = 0.0f;      // v1.4.1: VGPL longitudinal rate limiter state
+  float prev_v_eskf = 0.0f;      // v1.4.1: previous velocity for dv/dt
 
   for (;;) {
     if (xQueueReceive(imuQueue, &data, portMAX_DELAY) == pdTRUE) {
@@ -131,7 +133,9 @@ void Task_Filter(void *pvParameters) {
           last_eskf_epoch = 0;
           last_timestamp_us = 0;
           first_sample_after_recalib = true;
-          prev_cent_y = 0.0f;  // VGPL: reset stale centripetal compensation
+          prev_cent_x = 0.0f;  // VGPL: reset stale centripetal compensation
+          prev_long_y = 0.0f;  // VGPL: reset stale longitudinal compensation
+          prev_v_eskf = 0.0f;
           Serial.println("[FILTER] Recalibration reset complete.");
           xSemaphoreGive(telemetry_mutex);
           continue; // discard stale IMU sample, start fresh
@@ -203,23 +207,38 @@ void Task_Filter(void *pvParameters) {
 
         float v_eskf = eskf.speed_ms();  // from previous cycle (20 ms old)
 
+        // Longitudinal derivative before updating prev_v_eskf
+        float dv_dt = (v_eskf - prev_v_eskf) / dt_real_sec;
+        prev_v_eskf = v_eskf;
+
         // Confidence gate: ESKF velocity variance → compensation trust
         // P(2,2)+P(3,3) = velocity uncertainty. Low = GPS-fused, high = dead-reckoning.
         float v_var = eskf.P(2, 2) + eskf.P(3, 3);
         float v_confidence = fminf(1.0f, 1.0f / (1.0f + v_var));
 
-        // Centripetal estimate: body-frame lateral [G], gated by confidence
-        float cent_y_raw = (v_eskf * gz_rad) / G_ACCEL;
-        float cent_y = cent_y_raw * v_confidence;
+        // 1. Centripetal estimate: body-frame lateral (X axis) [G]
+        // In a left turn (v > 0, gz > 0), acceleration is to the left (-X).
+        float cent_x_raw = -(v_eskf * gz_rad) / G_ACCEL;
+        float cent_x = cent_x_raw * v_confidence;
 
         // Rate limiter: prevents spike on gz noise or sudden ESKF correction
-        if (cent_y > prev_cent_y + VGPL_RATE_LIMIT) cent_y = prev_cent_y + VGPL_RATE_LIMIT;
-        if (cent_y < prev_cent_y - VGPL_RATE_LIMIT) cent_y = prev_cent_y - VGPL_RATE_LIMIT;
-        prev_cent_y = cent_y;
+        if (cent_x > prev_cent_x + VGPL_RATE_LIMIT) cent_x = prev_cent_x + VGPL_RATE_LIMIT;
+        if (cent_x < prev_cent_x - VGPL_RATE_LIMIT) cent_x = prev_cent_x - VGPL_RATE_LIMIT;
+        prev_cent_x = cent_x;
+
+        // 2. Longitudinal estimate: body-frame forward (Y axis) [G]
+        // Forward acceleration (dv/dt > 0) -> +Y.
+        float long_y_raw = dv_dt / G_ACCEL;
+        float long_y = long_y_raw * v_confidence;
+
+        if (long_y > prev_long_y + VGPL_RATE_LIMIT) long_y = prev_long_y + VGPL_RATE_LIMIT;
+        if (long_y < prev_long_y - VGPL_RATE_LIMIT) long_y = prev_long_y - VGPL_RATE_LIMIT;
+        prev_long_y = long_y;
 
         // Compensated accel for Madgwick (≈ pure gravity reference)
-        float ax_madg = ax_r;            // longitudinal: centripetal is lateral
-        float ay_madg = ay_r - cent_y;   // lateral: subtract centripetal
+        // Subtract kinematic accelerations so Madgwick only sees gravity
+        float ax_madg = ax_r - cent_x;   // lateral: subtract centripetal
+        float ay_madg = ay_r - long_y;   // longitudinal: subtract dv/dt
         float az_madg = az_r;            // vertical: untouched
 
         ahrs.sampleperiod = dt_real_sec;
@@ -433,7 +452,7 @@ void Task_Filter(void *pvParameters) {
       // correct is disabled to avoid anchoring position to a fossil fix.
       // The gps_stale flag triggers the visual alarm in loop() (flashing red).
       bool gps_is_stale = last_gps.valid &&
-                          (millis() - last_gps.fix_ms > 5000);
+                          (data.timestamp_us - last_gps.fix_us > 5000000ULL);
       // Pre-fix: GPS is not yet "stale" — it simply has never fixed
       if (!last_gps.valid) gps_is_stale = false;
       gps_stale = gps_is_stale;
@@ -604,6 +623,11 @@ void Task_Filter(void *pvParameters) {
         // Sensor-frame raw (SITL, v1.4.0): chip-native, pre-calibration
         rec.sensor_ax = data.ax;  rec.sensor_ay = data.ay;  rec.sensor_az = data.az;
         rec.sensor_gx = data.gx;  rec.sensor_gy = data.gy;  rec.sensor_gz = data.gz;
+        // GPS timing metadata (SITL, v1.4.2): enables deterministic offline replay of
+        // staleness detection and eskf.correct() gating.
+        // fix_us uses same timebase as timestamp_us → (timestamp_us - gps_fix_us) > 5s.
+        rec.gps_fix_us = last_gps.fix_us;
+        rec.gps_valid  = last_gps.valid ? 1 : 0;
         xQueueSend(sd_queue, &rec, 0); // timeout=0: discard if queue full
       }
     }

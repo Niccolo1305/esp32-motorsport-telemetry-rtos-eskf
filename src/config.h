@@ -5,7 +5,7 @@
 #include <math.h>
 
 // ── Firmware ────────────────────────────────────────────────────────────────
-const char *const FIRMWARE_VERSION = "v1.4.0";
+const char *const FIRMWARE_VERSION = "v1.4.2";
 
 // ── Timing and Sampling ────────────────────────────────────────────────────
 const float FREQ_HZ = 50.0f;           // Core system sampling frequency (IMU + ESKF)
@@ -61,7 +61,7 @@ static constexpr float COG_MIN_BASELINE_M = 15.0f;      // [m] min displacement 
 // Replaces the Dual-Gate Adaptive Beta (v1.1.1) which failed in practice
 // due to MPU-6886 gx/gy electronic bias drift (~0.076 °/s/min).
 static constexpr float VGPL_NORM_GATE = 0.15f;          // [g] residual norm deviation that fully disables beta
-static constexpr float VGPL_RATE_LIMIT = 0.15f;         // [g/sample] max centripetal change per 20 ms cycle
+static constexpr float VGPL_RATE_LIMIT = 0.15f;         // [g/sample] max per-cycle change for each compensation channel
 static constexpr float VGPL_BETA_FLOOR = 0.005f;        // minimum beta (never fully zero, slow self-correction)
 
 // ── WiFi ───────────────────────────────────────────────────────────────────

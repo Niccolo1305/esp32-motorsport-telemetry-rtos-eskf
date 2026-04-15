@@ -186,16 +186,16 @@ def load_and_prepare(path: str) -> pd.DataFrame:
     if existing_old:
         df.rename(columns=existing_old, inplace=True)
 
+    # Normalize timestamp column: v1.4.0 uses t_us, older uses t_ms
+    if "t_us (µs)" in df.columns and "t_ms (ms)" not in df.columns:
+        df["t_ms (ms)"] = df["t_us (µs)"] / 1000.0  # backwards-compat alias
+
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
         raise KeyError(
             f"Missing columns — wrong CSV format or firmware version < v0.9?\n"
             f"  Missing: {missing}"
         )
-
-    # Normalize timestamp column: v1.4.0 uses t_us, older uses t_ms
-    if "t_us (µs)" in df.columns and "t_ms (ms)" not in df.columns:
-        df["t_ms (ms)"] = df["t_us (µs)"] / 1000.0  # backwards-compat alias
 
     # Elapsed time in seconds (origin-normalized)
     if "t_us (µs)" in df.columns:

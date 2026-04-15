@@ -64,7 +64,7 @@
 //
 //
 // ==============================================================================================
-// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.4.0
+// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.4.2
 // ==============================================================================================
 //
 // Architecture: "End-of-Pipe EMA" + "ZARU-to-Madgwick"
@@ -99,9 +99,12 @@
 // │   |   g_rad     = (g_r - thermal_bias) * DEG2RAD  [corrected → Madgwick]    │
 // │   |   thermal_bias from PREVIOUS cycle's ZARU (20ms delay, negligible)      │
 // │   |                                                                         │
-// │   | STEP 5: VGPL Centripetal Compensation + Madgwick AHRS (v1.3.4/v1.3.5)  │
-// │   |   cent_y = (v_eskf * gz_rad) / G_ACCEL   [uses ZARU-corrected gz_rad]  │
-// │   |   Confidence-gated by ESKF P matrix, rate-limited for spike protection  │
+// │   | STEP 5: VGPL Kinematic Compensation (Centripetal + Longitudinal)       │
+// │   |   cent_x = -(v_eskf * gz_rad) / G_ACCEL  [lateral, body X axis]        │
+// │   |   long_y = dv_dt / G_ACCEL              [longitudinal, body Y axis]    │
+// │   |   ax_madg = ax_r - cent_x                                              │
+// │   |   ay_madg = ay_r - long_y                                              │
+// │   |   Confidence-gated by ESKF P matrix, rate-limited on both channels     │
 // │   |   ahrs.update_imu(gx_rad, gy_rad, gz_rad, ax_madg, ay_madg, az_madg)   │
 // │   |   Norm-gate: k_norm = max(0, 1 - |norm-1| / 0.15)                      │
 // │   |   beta_eff = max(0.005, beta * k_norm)  -> never zero, always correcting│
@@ -166,8 +169,9 @@
 //   |
 //   |                          PHASE 5: SD record (no mutex)
 //   |
-//   | 155 bytes (v1.4.0): EMA + Raw + GPS + ESKF 5D + 6D Shadow
-//   |   + ZARU flags (bit 3: recalib) + tbias_gz + sensor-frame raw IMU (SITL)
+//   | 164 bytes (v1.4.2): EMA + Raw + GPS + ESKF 5D + 6D Shadow
+//   |   + ZARU flags (bit 3: recalib) + tbias_gz + sensor-frame raw IMU
+//   |   + gps_fix_us + gps_valid for deterministic SITL replay
 //   | → xQueueSend(sd_queue, depth=200) → Task_SD_Writer
 //   |
 // ==============================================================================================
@@ -987,6 +991,37 @@
 //     MoTeC (SITL-only). Backward-compatible with 78/122/127B.
 //   - [PYTHON] dashboard.py: t_us→t_ms backward-compat alias,
 //     microsecond-precision t_s computation, sensor_* COL_MAP entries.
+//
+// v1.4.1 — VGPL Axis Fix & Longitudinal Compensation
+//   - [FIX CRITICAL] VGPL axes were physically inverted: ax is lateral (right),
+//     ay is longitudinal (forward). The previous centripetal compensation wrongly
+//     acted on ay_r, leaving ax_r uncompensated. In curves, this artificially
+//     spiked the total magnitude |a| to ~1.22G, forcing the Madgwick beta gate
+//     toward 0. This inadvertently protected the quaternion from drifting but
+//     severely poisoned the longitudinal channel during acceleration/braking.
+//   - Expanded VGPL to mathematically correct BOTH kinematic components:
+//     * Lateral (centripetal): cent_x = -(v_eskf * gz_rad) / G_ACCEL, subtracted
+//       from ax_r before Madgwick.
+//     * Longitudinal: long_y = (dv/dt) / G_ACCEL, subtracted from ay_r before
+//       Madgwick.
+//   - Rate limiters and ESKF velocity confidence gates now apply to both
+//     compensation channels, preserving graceful degradation when GPS quality
+//     drops and the velocity estimate becomes unreliable.
+//   - Result: restores true longitudinal acceleration logging (raw_ay) for G-G
+//     diagrams while maintaining robust zero-drift horizon tracking in cornering.
+//
+// v1.4.2 — Deterministic GPS Timing Metadata for SITL
+//   - [FEATURE] GpsData.fix_ms replaced by uint64_t fix_us from esp_timer_get_time(),
+//     aligning GPS timing with the IMU timestamp_us timebase.
+//   - [FEATURE] TelemetryRecord extended from 155 → 164 bytes/sample with:
+//       * gps_fix_us (uint64_t): timestamp of the last valid GPS fix
+//       * gps_valid  (uint8_t):  mirror of GpsData.valid for this sample
+//   - [FIX] GPS staleness detection in Task_Filter now uses:
+//       (data.timestamp_us - last_gps.fix_us) > 5_000_000 µs
+//     instead of millis()-based wall-clock logic, enabling deterministic offline replay.
+//   - [PYTHON] bin_to_csv.py and motec_exporter.py updated with 164-byte format support.
+//   - [SITL] Offline replay tools can now reproduce gps_stale, gps_slow and
+//     fresh-fix ESKF correct gating without heuristic GPS timing inference.
 //
 // ==========================================================
 

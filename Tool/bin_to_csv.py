@@ -14,6 +14,13 @@ import os
 import time
 import math
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except ValueError:
+        pass
+
 # ── Configuration ─────────────────────────────────────────────────────────────
 CHUNK_SIZE_DEFAULT = 122          # record size v0.9.8 (no header, 122 bytes)
 HEADER_MAGIC = b'TEL'             # FileHeader magic bytes (v0.9.7+)
@@ -56,7 +63,7 @@ FMT_127 = '<I7fBddffBf4f6f5fBf'
 HEADER_127 = HEADER_122 + ['zaru_flags', 'tbias_gz (°/s)']
 COL_FMT_127 = COL_FMT_122 + ['{:d}', '{:.5f}']
 
-# 155-byte record (v1.4.0+): timestamp upgraded to uint64 µs + sensor-frame raw IMU
+# 155-byte record (v1.4.0): timestamp upgraded to uint64 µs + sensor-frame raw IMU
 FMT_155 = '<Q7fBddffBf4f6f5fBf6f'  # Q = uint64 (was I = uint32)
 HEADER_155 = [
     't_us (µs)',  # was t_ms (ms) — microsecond precision for SITL
@@ -89,6 +96,14 @@ COL_FMT_155 = [
 ]
 assert struct.calcsize(FMT_155) == 155, f"FMT_155 mismatch: {struct.calcsize(FMT_155)}"
 
+# 164-byte record (v1.4.2+): adds GPS timing metadata for deterministic SITL replay
+# gps_fix_us: esp_timer timestamp of last GPS fix — same timebase as t_us.
+# gps_valid:  mirrors GpsData.valid — needed for is_stationary gps_slow gate.
+FMT_164 = '<Q7fBddffBf4f6f5fBf6fQB'  # appends Q (uint64) + B (uint8)
+HEADER_164 = HEADER_155 + ['gps_fix_us (µs)', 'gps_valid']
+COL_FMT_164 = COL_FMT_155 + ['{:d}', '{:d}']
+assert struct.calcsize(FMT_164) == 164, f"FMT_164 mismatch: {struct.calcsize(FMT_164)}"
+
 # Default aliases (used for legacy files without header)
 FMT_DEFAULT = FMT_122
 HEADER = HEADER_122
@@ -96,6 +111,8 @@ COL_FMT = COL_FMT_122
 
 def get_format(record_size):
     """Return (struct_fmt, header_list, col_fmt_list) for a given record size."""
+    if record_size == 164:
+        return FMT_164, HEADER_164, COL_FMT_164
     if record_size == 155:
         return FMT_155, HEADER_155, COL_FMT_155
     if record_size == 127:
@@ -268,6 +285,11 @@ def bin_to_csv_lines(bin_path, total=None):
     hdr, offset = read_file_header(bin_path)
     chunk_size = hdr['record_size'] if hdr else CHUNK_SIZE_DEFAULT
     fmt, _, col_fmt = get_format(chunk_size)
+    
+    if hdr and 'calibration' in hdr:
+        c = hdr['calibration']
+        yield f"# CALIB_BOOT: sin_phi={c[0]:.5f} cos_phi={c[1]:.5f} sin_theta={c[2]:.5f} cos_theta={c[3]:.5f} bias_ax={c[4]:.5f} bias_ay={c[5]:.5f} bias_az={c[6]:.5f} bias_gx={c[7]:.5f} bias_gy={c[8]:.5f} bias_gz={c[9]:.5f}"
+
     with open(bin_path, 'rb') as f:
         if offset > 0:
             f.seek(offset)
@@ -278,6 +300,7 @@ def bin_to_csv_lines(bin_path, total=None):
                 break
             vals = struct.unpack(fmt, chunk)
             if vals[0] == SENTINEL_CALIB:   # CalibrationRecord sentinel (uint64 max)
+                yield f"# CALIB_UPDATE: sin_phi={vals[1]:.5f} cos_phi={vals[2]:.5f} sin_theta={vals[3]:.5f} cos_theta={vals[4]:.5f} bias_ax={vals[5]:.5f} bias_ay={vals[6]:.5f} bias_az={vals[7]:.5f} bias_gx={vals[11]:.5f} bias_gy={vals[12]:.5f} bias_gz={vals[14]:.5f}"
                 continue
             line = ','.join(f.format(v) for f, v in zip(col_fmt, vals))
             yield line
