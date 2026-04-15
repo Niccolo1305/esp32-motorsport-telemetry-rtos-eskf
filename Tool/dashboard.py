@@ -105,6 +105,7 @@ def _select_csv() -> str:
 # they are transparently renamed to the canonical format on load.  If the
 # headers already match the canonical names, the rename is a no-op.
 COL_MAP = {
+    "t_us":          "t_us (µs)",
     "t_ms":          "t_ms (ms)",
     "ax":            "ax (G)",
     "ay":            "ay (G)",
@@ -135,6 +136,12 @@ COL_MAP = {
     "kf6_vel":       "kf6_vel (m/s)",
     "kf6_heading":   "kf6_heading (rad)",
     "kf6_bgz":       "kf6_bgz (rad/s)",
+    "sensor_ax":     "sensor_ax (G)",
+    "sensor_ay":     "sensor_ay (G)",
+    "sensor_az":     "sensor_az (G)",
+    "sensor_gx":     "sensor_gx (°/s)",
+    "sensor_gy":     "sensor_gy (°/s)",
+    "sensor_gz":     "sensor_gz (°/s)",
 }
 
 REQUIRED_COLS = [
@@ -186,8 +193,15 @@ def load_and_prepare(path: str) -> pd.DataFrame:
             f"  Missing: {missing}"
         )
 
+    # Normalize timestamp column: v1.4.0 uses t_us, older uses t_ms
+    if "t_us (µs)" in df.columns and "t_ms (ms)" not in df.columns:
+        df["t_ms (ms)"] = df["t_us (µs)"] / 1000.0  # backwards-compat alias
+
     # Elapsed time in seconds (origin-normalized)
-    df["t_s"] = (df["t_ms (ms)"] - df["t_ms (ms)"].iloc[0]) / 1000.0
+    if "t_us (µs)" in df.columns:
+        df["t_s"] = (df["t_us (µs)"] - df["t_us (µs)"].iloc[0]) / 1_000_000.0
+    else:
+        df["t_s"] = (df["t_ms (ms)"] - df["t_ms (ms)"].iloc[0]) / 1000.0
 
     # Cumulative distance via abs(velocity) integration (gap-free)
     dt = np.diff(df["t_s"].values, prepend=df["t_s"].values[0])

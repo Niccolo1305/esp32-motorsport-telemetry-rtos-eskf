@@ -1,0 +1,191 @@
+
+MPU-6886 Bias Drift Analysis
+
+@page { size: A4; margin: 20mm 18mm; }
+body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11pt;
+       line-height: 1.5; color: #222; max-width: 180mm; margin: auto; }
+h1 { font-size: 22pt; color: #111; margin-bottom: 2px; }
+h2 { font-size: 14pt; border-left: 4px solid #8b0000; padding-left: 10px;
+     margin-top: 36px; page-break-before: always; }
+h2:first-of-type { page-break-before: avoid; }
+h3 { font-size: 12pt; color: #333; margin-top: 18px; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 10pt; }
+th { background: #f0f0f0; border: 1px solid #ccc; padding: 6px 10px; text-align: left; }
+td { border: 1px solid #ccc; padding: 5px 10px; }
+tr:nth-child(even) { background: #fafafa; }
+.highlight { background: #8b0000; color: white; padding: 10px 14px; margin: 14px 0;
+             font-weight: bold; font-size: 10.5pt; line-height: 1.5; }
+.caption { font-size: 9pt; color: #555; font-style: italic; margin-top: 4px; margin-bottom: 16px; }
+.metadata { color: gray; font-size: 10pt; }
+img { max-width: 100%; height: auto; }
+.face-section { page-break-inside: avoid; }
+.pre { font-family: 'Consolas', 'Courier New', monospace; font-size: 9.5pt;
+       background: #f8f8f0; padding: 10px; border: 1px solid #ddd; white-space: pre-wrap; }
+
+MPU-6886 GyroscopeBias Drift Analysis
+Internal R&D Report — Addendum to MPU6886_ThermalDrift_Report.pdf
+
+SensorMPU6886 (6-axis MEMS IMU, no on-chip temp compensation)
+PlatformM5Stack AtomS3 (ESP32-S3 + 0.85" IPS display)
+Test IDtel_94
+Firmwarev1.2.2-diag-kgs
+Data frameChip-frame (K_gs disabled, rotate_3d disabled for gyro)
+Duration (lap=1)2100s (35.0 min)
+Total samples104,984 at 50 Hz
+Temperature range37.6 – 39.6°C
+Date2026-04-11
+
+This report characterizes non-thermal bias drift in the MPU-6886 MEMS gyroscope. A 6-face static test was performed with K_gs G-sensitivity correction and geometric rotation (rotate_3d) disabled in the firmware, so that raw chip-frame gyro and accelerometer data are recorded directly. The sensor was physically rotated to 6 different orientations and held stationary on each face for approximately 5 minutes, taped to a flat surface. These physical rotations appear as brief high-amplitude spikes in the gyroscope plots (clipped at ±2 °/s) and are excluded from the analysis.
+Table of Contents
+
+Experimental Setup & Methodology
+Warm-up Phase
+6-Face Test Overview
+Per-Face Analysis (Faces 1–6)
+Global Drift Regression
+K_gs Validation
+Comparison with Thermal Drift Report
+Conclusions
+
+1. Experimental Setup & Methodology
+The test was performed with firmware v1.2.2-diag-kgs, a diagnostic build with three modifications:
+
+K_gs G-sensitivity correction disabled — the 3×3 matrix that compensates gyroscope sensitivity to gravitational orientation was commented out.
+Gyro rotate_3d bypassed — gyroscope output remains in chip-native frame (not rotated to vehicle frame). This ensures raw_gx/gy/gz in the CSV are true chip-frame values.
+raw_ax/ay/az = chip-frame accel — instead of linear acceleration (gravity removed), the raw accel fields contain ellipsoid-calibrated chip-frame accelerometer data with gravity.
+
+The sensor was placed on 6 different faces in sequence, each taped to a flat surface for ~5 minutes. The physical rotations between faces were performed manually and take a few seconds each. These transitions produce large gyroscope spikes (tens of °/s) that are clipped in all plots at ±2 °/s to preserve the scale of the much smaller bias drift signal (~0.1–2 °/s).
+A warm-up phase (lap=0, ~48 minutes) preceded the test to allow the sensor to reach thermal equilibrium. The 6-face test data is recorded as lap=1.
+Face detection: rolling std of |a| over a 2s window, threshold 0.015 g. The 6 longest static segments are selected. First and last 30s of each face are trimmed. Statistics use 5% trimmed means.
+2. Warm-up Phase
+The sensor was powered on and left stationary for 48 minutes before starting the 6-face test. Temperature rose from 38.8°C to 39.1°C during this phase, after which it stabilized.
+
+Figure 1 — Warm-up phase: gyroscope and temperature vs time. The sensor was stationary throughout. Gyro drift during warm-up reflects both thermal settling and electronic bias instability.
+3. 6-Face Test Overview
+The test consists of 6 static windows separated by brief physical rotations. The gyroscope plot reveals a clear monotonic downward trend on gx (red) across the entire test, despite the temperature remaining nearly flat (37.6–39.6°C).
+
+Figure 2 — Full timeline of the 6-face test (lap=1). Colored bands mark detected static faces. Gyro scale clipped to ±2 °/s; rotation transitions between faces exceed this range and appear clipped.
+Per-face summary
+FaceOrientationN (trimmed)gx (°/s)gy (°/s)gz (°/s)TiniTfinΔT
+Face 1Y-chip up (+0.997 g)13750+0.4253-0.0619+0.015237.9°C37.9°C+0.00°C
+Face 2Y-chip down (-1.005 g)15019+0.2732-0.1353-0.018737.9°C37.9°C+0.00°C
+Face 3Z-chip up (+1.015 g)12313+0.1090-0.3259+0.033638.1°C37.7°C-0.40°C
+Face 4Z-chip down (-0.987 g)14596-0.0353-0.2218-0.019737.8°C38.6°C+0.80°C
+Face 5X-chip down (-0.992 g)13769-0.8220-0.3615+0.047139.2°C39.4°C+0.20°C
+Face 6X-chip up (+1.002 g)13049-2.1196-1.2260+0.067839.4°C39.0°C-0.40°C
+
+The inter-face spread on gx is 2.54 °/s and on gy is 1.16 °/s, while gz spread is only 0.09 °/s. The spread on gx/gy is dominated by a monotonic temporal trend, not by G-sensitivity.
+4. Per-Face Analysis
+Each face is shown with gyroscope axes and temperature vs time. Dashed horizontal lines indicate the trimmed mean for each axis. Vertical dotted lines mark the 30s time-trim boundaries; the dash-dot line marks the midpoint used for the half-split drift estimate.
+
+Face 1: Y-chip up (+0.997 g)
+
+Metricgxgygz
+Trimmed mean (°/s)+0.4253-0.0619+0.0152
+Std (°/s)0.04830.03920.0327
+Intra-face drift Δ (°/s)+0.0269-0.0263-0.0081
+Temperature37.9 → 37.9°C (ΔT = +0.00°C)
+Duration / N275s / 13750 samples
+
+
+Face 2: Y-chip down (-1.005 g)
+
+Metricgxgygz
+Trimmed mean (°/s)+0.2732-0.1353-0.0187
+Std (°/s)0.04170.09120.0262
+Intra-face drift Δ (°/s)+0.0133-0.0008-0.0064
+Temperature37.9 → 37.9°C (ΔT = +0.00°C)
+Duration / N300s / 15019 samples
+
+
+Face 3: Z-chip up (+1.015 g)
+
+Metricgxgygz
+Trimmed mean (°/s)+0.1090-0.3259+0.0336
+Std (°/s)0.03700.05550.0327
+Intra-face drift Δ (°/s)-0.0062-0.0257-0.0144
+Temperature38.1 → 37.7°C (ΔT = -0.40°C)
+Duration / N246s / 12313 samples
+
+
+Face 4: Z-chip down (-0.987 g)
+
+Metricgxgygz
+Trimmed mean (°/s)-0.0353-0.2218-0.0197
+Std (°/s)0.04290.07000.0275
+Intra-face drift Δ (°/s)+0.0307+0.0650-0.0136
+Temperature37.8 → 38.6°C (ΔT = +0.80°C)
+Duration / N292s / 14596 samples
+
+
+Face 5: X-chip down (-0.992 g)
+
+Metricgxgygz
+Trimmed mean (°/s)-0.8220-0.3615+0.0471
+Std (°/s)0.07850.11490.0254
+Intra-face drift Δ (°/s)+0.1023+0.1668-0.0021
+Temperature39.2 → 39.4°C (ΔT = +0.20°C)
+Duration / N275s / 13769 samples
+
+
+Face 6: X-chip up (+1.002 g)
+
+Metricgxgygz
+Trimmed mean (°/s)-2.1196-1.2260+0.0678
+Std (°/s)0.12930.08990.0306
+Intra-face drift Δ (°/s)+0.2002+0.1326-0.0028
+Temperature39.4 → 39.0°C (ΔT = -0.40°C)
+Duration / N261s / 13049 samples
+
+5. Global Drift Regression
+A linear regression is fitted to the 6 per-face trimmed means at their midpoint times. Each face provides one independent measurement of the bias at a known time, isolating the temporal drift from orientation-dependent offsets.
+
+Figure 9 — Per-face trimmed means plotted against elapsed time. Dashed lines show linear regression fitted through the 6 per-face means.
+AxisDrift rate (°/s/min)R²Total drift (°/s)Duration (s)
+GX-0.07890.8076-2.49821900
+GY-0.03120.6483-0.98701900
+GZ+0.00200.3852+0.06351900
+
+GX drifts at -0.076 °/s/min (4.6 °/s/hour) and GY at -0.030 °/s/min (1.8 °/s/hour), both at near-constant temperature. GZ is stable at +0.002 °/s/min. The drift is electronic (non-thermal), consistent with MEMS stress relaxation.
+6. K_gs Validation
+The K_gs G-sensitivity matrix (computed from earlier tests tel_gsen4 + tel_82) was applied offline to the tel_94 chip-frame data. If K_gs correctly removes gravity dependence, the corrected inter-face spread should decrease.
+
+AxisRaw spread (°/s)Corrected spread (°/s)ChangeVerdict
+GX2.54493.4455+35.4%WORSE
+GY1.16411.6050+37.9%WORSE
+GZ0.08750.3629+314.8%WORSE
+
+K_gs correction increases spread on all three axes. This happens because the dominant source of inter-face variation is temporal bias drift, not G-sensitivity. Since the faces were tested sequentially, time and orientation are confounded — K_gs subtracts a gravity-dependent correction that partially correlates with the time trend, making the result worse.
+K_gs was removed from firmware in v1.3.0. The non-thermal drift dominates the G-sensitivity signal, making any static gravity correction unreliable.
+7. Comparison with Thermal Drift Report
+Previous finding (MPU6886_ThermalDrift_Report.pdf)
+
+Gyroscope bias drift was attributed primarily to thermal sensitivity.
+The thermal sensitivity dG/dT was found non-repeatable between sessions on GX and GY (inter-run σ ~ 0.10 °/s/°C).
+LUT and Poly-3 compensation both failed: 44% of GX samples fell in the "unusable" category even after correction.
+Conclusion: no fixed compensation model can capture the non-deterministic drift shape. ZARU is required at every power-on.
+
+New finding (this report)
+
+Temperature was nearly flat during the test (37.6 – 39.6°C, ΔT < 2°C).
+Despite flat temperature, significant bias drift was observed:GX: -0.0789 °/s/min (total -2.50 °/s over 1900s)GY: -0.0312 °/s/min (total -0.99 °/s)GZ: +0.0020 °/s/min (stable)
+The drift is monotonic over 35 minutes, consistent with electronic bias instability (stress relaxation, charge trapping), not thermal.
+
+Reconciliation
+Both effects coexist in the MPU-6886:
+
+Thermal sensitivity — real, observed in the heating tests. The bias changes when temperature changes.
+Electronic drift — newly quantified in this test. The bias changes over time even at constant temperature.
+
+The thermal drift report could not separate these two effects because temperature and time were monotonically correlated in all 7 test runs (continuous heating). The "inter-run shape variability" attributed to non-repeatable thermal sensitivity was likely contaminated by the electronic drift component.
+ZARU addresses both: it periodically resets the bias estimate at stationarity, regardless of whether the drift source is thermal or electronic.
+8. Conclusions
+
+GX has the largest non-thermal drift at -0.0789 °/s/min (4.7 °/s/hour). Over a 10-minute driving stint without stationarity, this accumulates ~0.79 °/s of uncorrected bias error.
+GY drift is moderate at -0.0312 °/s/min (1.9 °/s/hour). Less critical: gy (pitch rate) does not directly feed the 2D ESKF heading.
+GZ is stable at +0.0020 °/s/min (0.12 °/s/hour). This is excellent for the ESKF, which uses gz for heading estimation.
+K_gs correction is counterproductive. Spread after correction: GX +35%, GY +38%, GZ +315% (all worse). K_gs was removed from firmware in v1.3.0.
+ZARU remains the primary defense against both thermal and electronic drift. The 3-axis ZARU (v1.2.1) resets bias at stationarity and during straight-line driving, handling both sources transparently.
+Recommendation for future calibration: if K_gs is ever revisited, randomize face order (not sequential) to decorrelate temporal drift from gravity orientation.
+
+The MPU-6886 gyroscope exhibits significant non-thermal electronic drift on GX and GY. This drift was previously conflated with thermal sensitivity. ZARU is confirmed as the correct approach — it compensates both drift sources without requiring a temperature model.

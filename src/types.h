@@ -12,15 +12,15 @@ struct WifiCredential {
 };
 
 // ── Binary SD Record ───────────────────────────────────────────────────────
-// Compact binary struct (122 bytes/sample, zero padding).
+// Compact binary struct (155 bytes/sample, zero padding).
 // __attribute__((packed)): no alignment padding bytes.
 //
 // Memory layout:
-//   uint32_t timestamp_ms  4 bytes
+//   uint64_t timestamp_us  8 bytes  — IMU hardware clock [µs] (v1.4.0, was uint32 ms)
 //   float ax,ay,az        12 bytes  — EMA-filtered
 //   float gx,gy,gz        12 bytes  — EMA-filtered
 //   float temp_c           4 bytes
-//   uint8_t lap            1 byte   → IMU EMA subtotal: 33 bytes
+//   uint8_t lap            1 byte   → IMU EMA subtotal: 37 bytes
 //   double gps_lat         8 bytes
 //   double gps_lon         8 bytes
 //   float gps_speed_kmh    4 bytes
@@ -40,15 +40,17 @@ struct WifiCredential {
 //   float kf6_bgz          4 bytes  — estimated gz bias [rad/s]
 //   uint8_t zaru_flags     1 byte   — ZARU/NHC activation flags (v1.3.1)
 //   float tbias_gz         4 bytes  — learned thermal bias gz [deg/s] (v1.3.1)
+//   float sensor_ax/ay/az 12 bytes  — sensor-frame raw accel [G] (SITL, v1.4.0)
+//   float sensor_gx/gy/gz 12 bytes  — sensor-frame raw gyro [deg/s] (SITL, v1.4.0)
 //                         ────────
-//   TOTAL:                127 bytes/sample
+//   TOTAL:                155 bytes/sample
 //
-// Python read: struct.unpack('<I7fBddffBf4f6f5fBf', chunk_127_byte)
+// Python read: struct.unpack('<Q7fBddffBf4f6f5fBf6f', chunk_155_byte)
 //
-// 16 GB SD at 50 Hz: ~133 million samples ≈ 30 h of continuous logging
+// 16 GB SD at 50 Hz: ~109 million samples ≈ 24 h of continuous logging
 
 struct __attribute__((packed)) TelemetryRecord {
-  uint32_t timestamp_ms; // 4  — IMU hardware clock (us/1000)
+  uint64_t timestamp_us; // 8  — IMU hardware clock [µs] (v1.4.0)
   float ax, ay, az;      // 12 — EMA linear acceleration [g]
   float gx, gy, gz;      // 12 — EMA angular rate [deg/s]
   float temp_c;          // 4  — MPU-6886 temperature [°C]
@@ -81,6 +83,8 @@ struct __attribute__((packed)) TelemetryRecord {
   //                                     → thermal_bias_gz updated via slow EMA
   //   bit 2 (0x04): NHC              — Non-Holonomic Constraint (v_lat = 0)
   //                                     → ESKF heading correction, always in motion
+  //   bit 3 (0x08): Recalibration   — first sample after mid-session recalibration
+  //                                     → calibration params changed, see CalibrationRecord
   //
   // Typical combinations in the CSV:
   //   0 = nessun sistema attivo (curva lenta, < 5 km/h senza stazionarietà)
@@ -91,8 +95,11 @@ struct __attribute__((packed)) TelemetryRecord {
   //
   uint8_t zaru_flags;
   float tbias_gz;     // 4  — thermal_bias_gz [deg/s] (learned bias value)
+  // ── SITL Raw Sensor-Frame (v1.4.0) ──
+  float sensor_ax, sensor_ay, sensor_az; // 12 — sensor-frame raw accel [G]
+  float sensor_gx, sensor_gy, sensor_gz; // 12 — sensor-frame raw gyro [deg/s]
 };
-static_assert(sizeof(TelemetryRecord) == 127, "TelemetryRecord must be 127 bytes");
+static_assert(sizeof(TelemetryRecord) == 155, "TelemetryRecord must be 155 bytes");
 
 // ── Binary File Header ─────────────────────────────────────────────────────
 // Written at the start of every .bin file on the SD (v0.9.7).
@@ -101,12 +108,19 @@ static_assert(sizeof(TelemetryRecord) == 127, "TelemetryRecord must be 127 bytes
 
 struct __attribute__((packed)) FileHeader {
   uint8_t magic[3];          // "TEL" = {0x54, 0x45, 0x4C}
-  uint8_t header_version;    // 2 (v1→v2: record_size widened to uint16_t)
-  char firmware_version[16]; // e.g. "v1.0.0\0" + padding
+  uint8_t header_version;    // 3 (v1→v2: record_size uint16; v2→v3: calib params)
+  char firmware_version[16]; // e.g. "v1.4.0\0" + padding
   uint16_t record_size;      // BUG-8 fix: was uint8_t, overflows if record > 255 B
   uint32_t start_time_ms;    // millis() at file open
+  // ── v3: boot calibration parameters (SITL pipeline reconstruction) ──
+  // Session-specific outputs of calibrate_alignment(), stored so SITL can
+  // reconstruct sensor→vehicle frame offline. B/W matrices are in config.h.
+  float cal_sin_phi, cal_cos_phi;              // 8  — mounting rotation
+  float cal_sin_theta, cal_cos_theta;          // 8  — mounting rotation
+  float cal_bias_ax, cal_bias_ay, cal_bias_az; // 12 — accel residual bias [G]
+  float cal_bias_gx, cal_bias_gy, cal_bias_gz; // 12 — gyro boot bias [deg/s]
 };
-static_assert(sizeof(FileHeader) == 26, "FileHeader must be 26 bytes");
+static_assert(sizeof(FileHeader) == 66, "FileHeader must be 66 bytes");
 
 // ── IMU Raw Data (from Task_I2C queue) ─────────────────────────────────────
 // ImuRawData includes temp_c: temperature is read in Task_I2C where the I2C

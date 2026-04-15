@@ -42,7 +42,15 @@ Tool/analyze_tbias_deep.py
 Tool/analyze_zaru.py
 Tool/simulate_vgpl.py
 Tool/verify_vgpl_theory.py
+Tool/script/analyze_roundabout_deep.py
+Tool/script/analyze_roundabout_fix.py
+Tool/script/analyze_tbias_deep.py
+Tool/script/analyze_zaru.py
+Tool/script/simulate_vgpl.py
+Tool/script/verify_vgpl_theory.py
+Tool/testdrive_fix_madgwick_2gate.csv
 claude.exe
 cross_domain_audit_report.md
 data_pipeline_audit.md
 CLAUDE.md
+
