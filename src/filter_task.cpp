@@ -342,18 +342,35 @@ void Task_Filter(void *pvParameters) {
         xSemaphoreGive(gps_mutex);
       }
 
+      // ── GPS Velocity Source Selection (v1.5.0) ────────────────────────────
+      // Per-sample freshness check: prefer CASIC NAV-PV over NMEA SOG when:
+      //   1. nav_vel_valid >= 6  (2D or 3D velocity fix)
+      //   2. nav_fix_us > 0     (at least one NAV-PV frame received)
+      //   3. staleness < 1.5 GPS cycles (150 ms at 10 Hz)
+      //
+      // Fallback: NMEA SOG (last_gps.sog_kmh) — no accuracy estimate.
+      // gps_speed_source is logged per-sample so post-processing tools can
+      // answer "which source did the filter actually use this cycle?".
+      bool nav_fresh = (last_gps.nav_vel_valid >= 6)
+                    && (last_gps.nav_fix_us > 0)
+                    && ((data.timestamp_us - last_gps.nav_fix_us) < 150000ULL);  // 150 ms = 1.5 × 100ms GPS cycle
+      float gps_speed_kmh_used = nav_fresh
+                                 ? (last_gps.nav_speed2d * 3.6f)
+                                 : last_gps.sog_kmh;
+      uint8_t gps_speed_source = nav_fresh ? GPS_SPD_NAV_PV : GPS_SPD_NMEA_SOG;
+
       // ── Stationary Condition (Statistical Engine + GPS) ───────────────────
       // is_stationary = true ONLY IF:
       //   1. Buffer warm-up is complete (50 samples collected)
       //   2. gz, gx AND gy raw variance are all below their respective noise floors
       //      (3-axis gate: prevents false positives from chassis vibration coupling
       //      into roll/pitch even when gz happens to be quiet)
-      //   3. GPS speed (if available) is < 2 km/h
+      //   3. GPS speed (if available) is < 2 km/h (uses best available source)
       //   4. |mean_gz| < 2.5°/s (Sanity Gate v0.9.9)
       bool is_stationary = false;
       if (var_gz >= 0.0f) { // warm-up complete
         bool gps_slow = !last_gps.valid ||
-                        (last_gps.speed_kmh < ZUPT_GPS_MAX_KMH);
+                        (gps_speed_kmh_used < ZUPT_GPS_MAX_KMH);
         // Sanity Gate: mean_gz < 2.5°/s excludes slow rotational manoeuvres.
         // Real thermal bias does not exceed ~1.5°/s
         // (30°C swing × 0.032°/s/°C ≈ 1°/s for MPU-6886).
@@ -401,7 +418,7 @@ void Task_Filter(void *pvParameters) {
 
       bool straight_zaru_active = false;
       if (!is_stationary && last_gps.valid &&
-          last_gps.speed_kmh > STRAIGHT_MIN_SPEED_KMH) {
+          gps_speed_kmh_used > STRAIGHT_MIN_SPEED_KMH) {
         bool lat_gate = fabsf(lin_ay) < STRAIGHT_MAX_LAT_G;
         bool gz_gate  = fabsf(gz_r - thermal_bias_gz) < 2.0f;  // RAW corrected, zero latency
         bool cog_gate = fabsf(cog_variation) < STRAIGHT_COG_MAX_RAD;
@@ -473,15 +490,15 @@ void Task_Filter(void *pvParameters) {
         wgs84_to_enu(last_gps.lat, last_gps.lon,
                      gps_origin_lat, gps_origin_lon,
                      east_m, north_m);
-        eskf.correct(east_m, north_m, last_gps.speed_kmh, last_gps.hdop);
-        eskf6.correct(east_m, north_m, last_gps.speed_kmh, last_gps.hdop);
+        eskf.correct(east_m, north_m, gps_speed_kmh_used, last_gps.hdop);
+        eskf6.correct(east_m, north_m, gps_speed_kmh_used, last_gps.hdop);
         last_eskf_epoch = last_gps.epoch;
 
         // ── COG variation for Enhanced Straight-Line ZARU (v1.3.1) ──────────
         // Long-baseline approach: COG computed only after >15 m displacement
         // from the reference position. Suppresses GPS position noise
         // (σ_COG ≈ σ_pos/baseline ≈ 1.5m/15m ≈ 0.1 rad).
-        if (last_gps.speed_kmh > 20.0f) {
+        if (gps_speed_kmh_used > 20.0f) {
           if (!has_cog_ref) {
             cog_ref_east = east_m;
             cog_ref_north = north_m;
@@ -592,7 +609,7 @@ void Task_Filter(void *pvParameters) {
         // GPS: use the static cache last_gps (already updated above)
         rec.gps_lat = last_gps.lat;
         rec.gps_lon = last_gps.lon;
-        rec.gps_speed_kmh = last_gps.speed_kmh;
+        rec.gps_sog_kmh = last_gps.sog_kmh;
         rec.gps_alt_m = last_gps.alt_m;
         rec.gps_sats = last_gps.sats;
         rec.gps_hdop = last_gps.hdop;
@@ -628,6 +645,14 @@ void Task_Filter(void *pvParameters) {
         // fix_us uses same timebase as timestamp_us → (timestamp_us - gps_fix_us) > 5s.
         rec.gps_fix_us = last_gps.fix_us;
         rec.gps_valid  = last_gps.valid ? 1 : 0;
+        // NAV-PV velocity (v1.5.0): CASIC binary primary speed source
+        rec.nav_speed2d     = last_gps.nav_speed2d;
+        rec.nav_s_acc       = last_gps.nav_s_acc;
+        rec.nav_vel_n       = last_gps.nav_vel_n;
+        rec.nav_vel_e       = last_gps.nav_vel_e;
+        rec.nav_vel_valid   = last_gps.nav_vel_valid;
+        rec.gps_speed_source = gps_speed_source;
+        rec.nav_fix_us      = last_gps.nav_fix_us;
         xQueueSend(sd_queue, &rec, 0); // timeout=0: discard if queue full
       }
     }

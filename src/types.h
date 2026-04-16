@@ -11,8 +11,17 @@ struct WifiCredential {
   char password[65]; // max 64 chars + null terminator
 };
 
+// ── GPS Speed Source (v1.5.0) ──────────────────────────────────────────────
+// Per-sample flag: which velocity source was actually used in Task_Filter.
+// GPS_SPD_NMEA_SOG: NMEA RMC/VTG scalar speed via TinyGPSPlus (fallback).
+// GPS_SPD_NAV_PV:   CASIC binary NAV-PV ground speed (primary, when fresh).
+enum GpsSpeedSource : uint8_t {
+  GPS_SPD_NMEA_SOG = 0,  // fallback: NMEA SOG (no accuracy estimate)
+  GPS_SPD_NAV_PV   = 1,  // primary: CASIC NAV-PV speed2D + sAcc
+};
+
 // ── Binary SD Record ───────────────────────────────────────────────────────
-// Compact binary struct (164 bytes/sample, zero padding).
+// Compact binary struct (190 bytes/sample, zero padding).
 // __attribute__((packed)): no alignment padding bytes.
 //
 // Memory layout:
@@ -23,7 +32,7 @@ struct WifiCredential {
 //   uint8_t lap            1 byte   → IMU EMA subtotal: 37 bytes
 //   double gps_lat         8 bytes
 //   double gps_lon         8 bytes
-//   float gps_speed_kmh    4 bytes
+//   float gps_sog_kmh      4 bytes  — NMEA SOG [km/h] (was gps_speed_kmh, v1.5.0)
 //   float gps_alt_m        4 bytes
 //   uint8_t gps_sats       1 byte
 //   float gps_hdop         4 bytes  → GPS subtotal: 29 bytes (v0.9.5)
@@ -44,10 +53,17 @@ struct WifiCredential {
 //   float sensor_gx/gy/gz 12 bytes  — sensor-frame raw gyro [deg/s] (SITL, v1.4.0)
 //   uint64_t gps_fix_us    8 bytes  — esp_timer timestamp of last GPS fix [µs] (SITL, v1.4.2)
 //   uint8_t gps_valid      1 byte   — mirror of GpsData.valid for this sample (SITL, v1.4.2)
+//   float nav_speed2d      4 bytes  — NAV-PV ground speed [m/s] (v1.5.0)
+//   float nav_s_acc        4 bytes  — speed accuracy estimate [m/s] (v1.5.0)
+//   float nav_vel_n        4 bytes  — North velocity [m/s] (v1.5.0)
+//   float nav_vel_e        4 bytes  — East velocity [m/s] (v1.5.0)
+//   uint8_t nav_vel_valid  1 byte   — 0=invalid, 6=2D, 7=3D (v1.5.0)
+//   uint8_t gps_speed_src  1 byte   — GpsSpeedSource: 0=NMEA_SOG, 1=NAV_PV (v1.5.0)
+//   uint64_t nav_fix_us    8 bytes  — esp_timer when NAV-PV was parsed [µs] (v1.5.0)
 //                         ────────
-//   TOTAL:                164 bytes/sample
+//   TOTAL:                190 bytes/sample
 //
-// Python read: struct.unpack('<Q7fBddffBf4f6f5fBf6fQB', chunk_164_byte)
+// Python read: struct.unpack('<Q7fBddffBf4f6f5fBf6fQB4fBBQ', chunk_190_byte)
 //
 // 16 GB SD at 50 Hz: ~109 million samples ≈ 24 h of continuous logging
 
@@ -59,7 +75,7 @@ struct __attribute__((packed)) TelemetryRecord {
   uint8_t lap;           // 1  — session flag (0=pit, 1=on track)
   double gps_lat;        // 8  — WGS84 latitude [deg]
   double gps_lon;        // 8  — WGS84 longitude [deg]
-  float gps_speed_kmh;   // 4  — speed [km/h]
+  float gps_sog_kmh;     // 4  — NMEA SOG speed [km/h] (was gps_speed_kmh, v1.5.0)
   float gps_alt_m;       // 4  — altitude [m]
   uint8_t gps_sats;      // 1  — satellites locked
   float gps_hdop;        // 4  — GPS geometric precision (HDOP)
@@ -110,8 +126,22 @@ struct __attribute__((packed)) TelemetryRecord {
   //               gps_slow = (!valid || speed < 2 km/h) gate in is_stationary.
   uint64_t gps_fix_us;  // 8 — esp_timer timestamp of last GPS fix [µs]
   uint8_t  gps_valid;   // 1 — 1 if last_gps.valid was true this sample
+  // ── NAV-PV Velocity (v1.5.0) ──
+  // CASIC binary NAV-PV message: ENU velocity components + speed accuracy.
+  // nav_fix_us enables offline staleness check (same policy as firmware):
+  //   nav_fresh = (nav_vel_valid >= 6) && (nav_fix_us > 0)
+  //            && ((timestamp_us - nav_fix_us) < 150_000 µs)
+  // gps_speed_source = GPS_SPD_NAV_PV (1) when nav_fresh was true this cycle,
+  //                    GPS_SPD_NMEA_SOG (0) otherwise.
+  float    nav_speed2d;      // 4 — NAV-PV ground speed [m/s]
+  float    nav_s_acc;        // 4 — speed accuracy estimate [m/s]
+  float    nav_vel_n;        // 4 — North velocity [m/s]
+  float    nav_vel_e;        // 4 — East velocity [m/s]
+  uint8_t  nav_vel_valid;    // 1 — 0=invalid, 6=2D vel valid, 7=3D vel valid
+  uint8_t  gps_speed_source; // 1 — GpsSpeedSource: 0=NMEA_SOG, 1=NAV_PV
+  uint64_t nav_fix_us;       // 8 — esp_timer when last NAV-PV was parsed [µs]
 };
-static_assert(sizeof(TelemetryRecord) == 164, "TelemetryRecord must be 164 bytes");
+static_assert(sizeof(TelemetryRecord) == 190, "TelemetryRecord must be 190 bytes");
 
 // ── Binary File Header ─────────────────────────────────────────────────────
 // Written at the start of every .bin file on the SD (v0.9.7).
@@ -121,7 +151,7 @@ static_assert(sizeof(TelemetryRecord) == 164, "TelemetryRecord must be 164 bytes
 struct __attribute__((packed)) FileHeader {
   uint8_t magic[3];          // "TEL" = {0x54, 0x45, 0x4C}
   uint8_t header_version;    // 3 (v1→v2: record_size uint16; v2→v3: calib params)
-  char firmware_version[16]; // e.g. "v1.4.0\0" + padding
+  char firmware_version[16]; // e.g. "v1.5.0\0" + padding
   uint16_t record_size;      // BUG-8 fix: was uint8_t, overflows if record > 255 B
   uint32_t start_time_ms;    // millis() at file open
   // ── v3: boot calibration parameters (SITL pipeline reconstruction) ──
@@ -161,13 +191,24 @@ struct FilteredTelemetry {
 struct GpsData {
   double lat = 0.0;
   double lon = 0.0;
-  float speed_kmh = 0.0f;
-  float alt_m = 0.0f;  // altitude [m] (v0.7.3)
-  float hdop = 99.9f;  // geometric precision HDOP (v0.9.5)
+  float sog_kmh = 0.0f;    // NMEA SOG [km/h] — always populated (was speed_kmh, v1.5.0)
+  float alt_m = 0.0f;      // altitude [m] (v0.7.3)
+  float hdop = 99.9f;      // geometric precision HDOP (v0.9.5)
   uint8_t sats = 0;
-  bool valid = false;   // true only after first valid fix
-  uint32_t epoch = 0;   // monotonic fix counter (v0.8.0): Task_Filter
-                        // compares with last_epoch to detect a fresh fix
-  uint64_t fix_us = 0;  // esp_timer_get_time() of last valid fix [µs] (v1.4.2: same
-                        // timebase as ImuRawData.timestamp_us → SITL staleness replay)
+  bool valid = false;       // true only after first valid fix
+  uint32_t epoch = 0;       // monotonic fix counter (v0.8.0): Task_Filter
+                            // compares with last_epoch to detect a fresh fix
+  uint64_t fix_us = 0;     // esp_timer_get_time() of last valid NMEA fix [µs] (v1.4.2)
+
+  // ── NAV-PV velocity (v1.5.0) ──
+  // Populated by SerialGpsWrapper when a valid CASIC binary NAV-PV frame
+  // is received. nav_fix_us enables per-sample freshness check in Task_Filter:
+  //   nav_fresh = (nav_vel_valid >= 6) && (nav_fix_us > 0)
+  //            && ((timestamp_us - nav_fix_us) < 150_000 µs)
+  float    nav_speed2d = 0.0f;   // ground speed [m/s]
+  float    nav_s_acc   = 0.0f;   // speed accuracy estimate [m/s]
+  float    nav_vel_n   = 0.0f;   // North velocity [m/s]
+  float    nav_vel_e   = 0.0f;   // East velocity [m/s]
+  uint8_t  nav_vel_valid = 0;    // 0=invalid, 6=2D vel valid, 7=3D vel valid
+  uint64_t nav_fix_us    = 0;    // esp_timer when last NAV-PV was parsed [µs]
 };

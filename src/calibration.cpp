@@ -113,7 +113,7 @@ void calibrate_alignment(IImuProvider* imu) {
       crec.gy = bias_ax;
       crec.gz = bias_ay;
       crec.temp_c = bias_az;
-      crec.gps_speed_kmh = bias_gx;
+      crec.gps_sog_kmh = bias_gx;
       crec.gps_alt_m = bias_gy;
       crec.gps_hdop = bias_gz;
       xQueueSend(sd_queue, &crec, 0);

@@ -48,11 +48,13 @@ from datetime import datetime
 #                            122 B  total
 
 HEADER_MAGIC  = b'TEL'
+RECORD_FMT_190 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQ'  # 190-byte record (v1.5.0+, + NAV-PV velocity)
 RECORD_FMT_164 = '<Q7fBddffBf4f6f5fBf6fQB'  # 164-byte record (v1.4.2+, + GPS timing metadata)
 RECORD_FMT_155 = '<Q7fBddffBf4f6f5fBf6f'  # 155-byte record (v1.4.0, uint64 ts + sensor raw)
 RECORD_FMT_127 = '<I7fBddffBf4f6f5fBf'  # 127-byte record (v1.3.1+, + zaru_flags + tbias_gz)
 RECORD_FMT_122 = '<I7fBddffBf4f6f5f'  # 122-byte record (v0.9.8+, raw IMU + 6D)
 RECORD_FMT_78  = '<I7fBddffBf4f'       # 78-byte record (v0.8.0–v0.9.7, EMA only)
+RECORD_SIZE_190 = struct.calcsize(RECORD_FMT_190)
 RECORD_SIZE_164 = struct.calcsize(RECORD_FMT_164)
 RECORD_SIZE_155 = struct.calcsize(RECORD_FMT_155)
 RECORD_SIZE_127 = struct.calcsize(RECORD_FMT_127)
@@ -60,11 +62,28 @@ RECORD_SIZE_122 = struct.calcsize(RECORD_FMT_122)
 RECORD_SIZE_78  = struct.calcsize(RECORD_FMT_78)
 SENTINEL_CALIB = 0xFFFFFFFFFFFFFFFF  # uint64 max — CalibrationRecord marker
 
+FIELD_NAMES_190 = [
+    't_us',
+    'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp_c',
+    'lap',
+    'gps_lat', 'gps_lon', 'gps_sog_kmh', 'gps_alt_m',
+    'gps_sats', 'gps_hdop',
+    'kf_x', 'kf_y', 'kf_vel', 'kf_heading',
+    'raw_ax', 'raw_ay', 'raw_az', 'raw_gx', 'raw_gy', 'raw_gz',
+    'kf6_x', 'kf6_y', 'kf6_vel', 'kf6_heading', 'kf6_bgz',
+    'zaru_flags', 'tbias_gz',
+    'sensor_ax', 'sensor_ay', 'sensor_az',
+    'sensor_gx', 'sensor_gy', 'sensor_gz',
+    'gps_fix_us', 'gps_valid',  # SITL timing metadata
+    'nav_speed2d', 'nav_s_acc', 'nav_vel_n', 'nav_vel_e',
+    'nav_vel_valid', 'gps_speed_source', 'nav_fix_us',  # NAV-PV velocity (v1.5.0)
+]
+
 FIELD_NAMES_164 = [
     't_us',  # uint64 µs — IMU hardware clock
     'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp_c',
     'lap',
-    'gps_lat', 'gps_lon', 'gps_speed_kmh', 'gps_alt_m',
+    'gps_lat', 'gps_lon', 'gps_sog_kmh', 'gps_alt_m',
     'gps_sats', 'gps_hdop',
     'kf_x', 'kf_y', 'kf_vel', 'kf_heading',
     'raw_ax', 'raw_ay', 'raw_az', 'raw_gx', 'raw_gy', 'raw_gz',
@@ -79,7 +98,7 @@ FIELD_NAMES_155 = [
     't_us',  # was t_ms — microsecond precision
     'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp_c',
     'lap',
-    'gps_lat', 'gps_lon', 'gps_speed_kmh', 'gps_alt_m',
+    'gps_lat', 'gps_lon', 'gps_sog_kmh', 'gps_alt_m',
     'gps_sats', 'gps_hdop',
     'kf_x', 'kf_y', 'kf_vel', 'kf_heading',
     'raw_ax', 'raw_ay', 'raw_az', 'raw_gx', 'raw_gy', 'raw_gz',
@@ -93,7 +112,7 @@ FIELD_NAMES_122 = [
     't_ms',
     'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp_c',
     'lap',
-    'gps_lat', 'gps_lon', 'gps_speed_kmh', 'gps_alt_m',
+    'gps_lat', 'gps_lon', 'gps_sog_kmh', 'gps_alt_m',
     'gps_sats', 'gps_hdop',
     'kf_x', 'kf_y', 'kf_vel', 'kf_heading',
     'raw_ax', 'raw_ay', 'raw_az', 'raw_gx', 'raw_gy', 'raw_gz',
@@ -106,7 +125,7 @@ FIELD_NAMES_78 = [
     't_ms',
     'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp_c',
     'lap',
-    'gps_lat', 'gps_lon', 'gps_speed_kmh', 'gps_alt_m',
+    'gps_lat', 'gps_lon', 'gps_sog_kmh', 'gps_alt_m',
     'gps_sats', 'gps_hdop',
     'kf_x', 'kf_y', 'kf_vel', 'kf_heading',
 ]
@@ -187,7 +206,11 @@ def read_bin(path):
         fw_version  = 'unknown'
         print(f'        No FileHeader (legacy file) — assuming {record_size}B record size')
 
-    if record_size == RECORD_SIZE_164:
+    if record_size == RECORD_SIZE_190:
+        fmt        = RECORD_FMT_190
+        fields     = FIELD_NAMES_190
+        has_raw    = True
+    elif record_size == RECORD_SIZE_164:
         fmt        = RECORD_FMT_164
         fields     = FIELD_NAMES_164
         has_raw    = True
@@ -416,7 +439,9 @@ def export_motec_ld(records, has_raw, output_path, venue, fw_version, input_name
         ('GPS Longitude',  'GPSLon',  'deg',   10,  lambda r: float(r.get('gps_lon', 0.0))),
         ('GPS Altitude',   'GPSAlt',  'm',     10,  lambda r: float(r.get('gps_alt_m',
                                                         r.get('gps_alt', 0.0)))),
-        ('GPS Speed',      'GPSSpd',  'km/h',  10,  lambda r: float(r.get('gps_speed_kmh', 0.0))),
+        ('GPS Speed (SOG)', 'GPSSpd',  'km/h',  10,  lambda r: float(r.get('gps_sog_kmh', r.get('gps_speed_kmh', 0.0)))),
+        ('GPS Speed (nav)', 'NavSpd',  'm/s',   10,  lambda r: float(r.get('nav_speed2d', 0.0))),
+        ('GPS Speed Acc',  'SpdAcc',  'm/s',  10, lambda r: float(r.get('nav_s_acc', 0.0))),
         ('Sensor Temp',    'Temp',    'C',     50,  lambda r: r.get('temp_c', 0.0)),
     ]
     # Index reference for summary (GPS Latitude is at index 7)

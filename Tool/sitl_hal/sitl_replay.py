@@ -78,7 +78,14 @@ VGPL_BETA = 0.1
 VGPL_BETA_FLOOR = 0.005
 LEGACY_GPS_FIX_PERIOD_US = 90_000
 
-INT_COLUMNS = {"t_us", "lap", "gps_sats", "zaru_flags", "gps_fix_us", "gps_valid"}
+INT_COLUMNS = {"t_us", "lap", "gps_sats", "zaru_flags", "gps_fix_us", "gps_valid",
+               "nav_vel_valid", "gps_speed_source", "nav_fix_us"}
+# Optional NAV-PV columns present only in v1.5.0+ logs
+NAV_PV_COLUMNS = {"nav_speed2d", "nav_s_acc", "nav_vel_n", "nav_vel_e",
+                  "nav_vel_valid", "gps_speed_source", "nav_fix_us"}
+# Freshness threshold: 1.5 × GPS cycle at 10 Hz = 150 ms = 150 000 µs
+NAV_FRESH_THRESHOLD_US = 150_000
+
 REQUIRED_COLUMNS = {
     "t_us",
     "ax",
@@ -89,7 +96,6 @@ REQUIRED_COLUMNS = {
     "gz",
     "gps_lat",
     "gps_lon",
-    "gps_speed_kmh",
     "gps_sats",
     "gps_hdop",
     "kf_x",
@@ -141,13 +147,20 @@ class CalibrationState:
 class GpsState:
     lat: float = 0.0
     lon: float = 0.0
-    speed_kmh: float = 0.0
+    sog_kmh: float = 0.0      # NMEA SOG [km/h] (was speed_kmh)
     alt_m: float = 0.0
     sats: int = 0
     hdop: float = 99.9
     valid: bool = False
     epoch: int = 0
     fix_us: int = 0
+    # NAV-PV fields (v1.5.0); zero-default for pre-v1.5.0 logs
+    nav_speed2d: float = 0.0
+    nav_s_acc: float = 0.0
+    nav_vel_n: float = 0.0
+    nav_vel_e: float = 0.0
+    nav_vel_valid: int = 0
+    nav_fix_us: int = 0
 
 
 @dataclass
@@ -603,9 +616,22 @@ class SITLReplayer:
         self._update_variance_buffers(gx_r, gy_r, gz_r)
         var_gx, var_gy, var_gz, mean_gx, mean_gy, mean_gz = self._variance_snapshot()
 
+        # ── GPS velocity source selection (mirrors firmware v1.5.0) ──────────
+        # Identical freshness policy as filter_task.cpp Step 9:
+        #   nav_fresh = (nav_vel_valid >= 6) && (nav_fix_us > 0)
+        #            && ((t_us - nav_fix_us) < NAV_FRESH_THRESHOLD_US)
+        nav_fresh = (
+            self.last_gps.nav_vel_valid >= 6
+            and self.last_gps.nav_fix_us > 0
+            and (t_us - self.last_gps.nav_fix_us) < NAV_FRESH_THRESHOLD_US
+        )
+        gps_speed_kmh_used = (
+            self.last_gps.nav_speed2d * 3.6 if nav_fresh else self.last_gps.sog_kmh
+        )
+
         is_stationary = False
         if var_gz >= 0.0:
-            gps_slow = (not self.last_gps.valid) or (self.last_gps.speed_kmh < ZUPT_GPS_MAX_KMH)
+            gps_slow = (not self.last_gps.valid) or (gps_speed_kmh_used < ZUPT_GPS_MAX_KMH)
             is_stationary = (
                 var_gz < VAR_STILLNESS_GZ_THRESHOLD
                 and var_gx < VAR_STILLNESS_GXY_THRESHOLD
@@ -620,7 +646,7 @@ class SITLReplayer:
             self.thermal_bias_gy = mean_gy
 
         straight_zaru_active = False
-        if (not is_stationary) and self.last_gps.valid and self.last_gps.speed_kmh > STRAIGHT_MIN_SPEED_KMH:
+        if (not is_stationary) and self.last_gps.valid and gps_speed_kmh_used > STRAIGHT_MIN_SPEED_KMH:
             lat_gate = abs(lin_ay) < STRAIGHT_MAX_LAT_G
             gz_gate = abs(gz_r - self.thermal_bias_gz) < 2.0
             cog_gate = abs(self.cog_variation) < STRAIGHT_COG_MAX_RAD
@@ -662,13 +688,13 @@ class SITLReplayer:
                 self.gps_origin_lat,
                 self.gps_origin_lon,
             )
-            self.eskf.correct(east_m, north_m, self.last_gps.speed_kmh, self.last_gps.hdop)
+            self.eskf.correct(east_m, north_m, gps_speed_kmh_used, self.last_gps.hdop)
             if self.using_logged_gps_timing:
                 self.last_processed_fix_us = self.last_gps.fix_us
             else:
                 self.last_eskf_epoch = self.last_gps.epoch
 
-            if self.last_gps.speed_kmh > 20.0:
+            if gps_speed_kmh_used > 20.0:
                 if not self.has_cog_ref:
                     self.cog_ref_east = east_m
                     self.cog_ref_north = north_m
@@ -765,7 +791,8 @@ class SITLReplayer:
     def _ingest_gps_row(self, row: Dict[str, float], t_us: int) -> None:
         lat = row["gps_lat"]
         lon = row["gps_lon"]
-        speed_kmh = row["gps_speed_kmh"]
+        # gps_sog_kmh (v1.5.0+) or legacy gps_speed_kmh — same NMEA SOG value
+        sog_kmh = row.get("gps_sog_kmh", row.get("gps_speed_kmh", 0.0))
         alt_m = row.get("gps_alt_m", 0.0)
         sats = int(row["gps_sats"])
         hdop = row["gps_hdop"]
@@ -794,7 +821,7 @@ class SITLReplayer:
             valid = sats > 0 and not (abs(lat) < 1e-12 and abs(lon) < 1e-12)
             epoch = self.last_gps.epoch
             fix_us = self.last_gps.fix_us
-            key = (lat, lon, speed_kmh, alt_m, sats, hdop)
+            key = (lat, lon, sog_kmh, alt_m, sats, hdop)
 
             if valid:
                 if (
@@ -809,16 +836,31 @@ class SITLReplayer:
                     fix_us = t_us
                 self.last_gps_key = key
 
+        # NAV-PV fields: read from log if present, else preserve previous values
+        # (nav_fix_us stays valid until replaced by a newer NAV-PV frame)
+        nav_speed2d  = float(row.get("nav_speed2d",  self.last_gps.nav_speed2d))
+        nav_s_acc    = float(row.get("nav_s_acc",    self.last_gps.nav_s_acc))
+        nav_vel_n    = float(row.get("nav_vel_n",    self.last_gps.nav_vel_n))
+        nav_vel_e    = float(row.get("nav_vel_e",    self.last_gps.nav_vel_e))
+        nav_vel_valid = int(row.get("nav_vel_valid", self.last_gps.nav_vel_valid))
+        nav_fix_us   = int(row.get("nav_fix_us",     self.last_gps.nav_fix_us))
+
         self.last_gps = GpsState(
             lat=lat,
             lon=lon,
-            speed_kmh=speed_kmh,
+            sog_kmh=sog_kmh,
             alt_m=alt_m,
             sats=sats,
             hdop=hdop,
             valid=valid,
             epoch=epoch,
             fix_us=fix_us,
+            nav_speed2d=nav_speed2d,
+            nav_s_acc=nav_s_acc,
+            nav_vel_n=nav_vel_n,
+            nav_vel_e=nav_vel_e,
+            nav_vel_valid=nav_vel_valid,
+            nav_fix_us=nav_fix_us,
         )
 
     def _update_variance_buffers(self, gx_r: float, gy_r: float, gz_r: float) -> None:
@@ -939,9 +981,20 @@ def iter_input_events(path: Path) -> Iterator[Tuple[str, object]]:
     suffix = path.suffix.lower()
     if suffix == ".csv":
         with open_csv_with_fallback(path) as handle:
-            header_line = handle.readline().strip()
+            header_line = ""
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                if line.startswith("#"):
+                    parsed = parse_calibration_comment(line)
+                    if parsed is not None:
+                        yield ("calibration", parsed)
+                    continue
+                header_line = line
+                break
             if not header_line:
-                raise ValueError(f"Empty CSV: {path}")
+                raise ValueError(f"Empty CSV or missing header row: {path}")
             yield from iter_csv_payload(header_line, handle)
         return
 

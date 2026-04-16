@@ -64,7 +64,7 @@
 //
 //
 // ==============================================================================================
-// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.4.2
+// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.5.0
 // ==============================================================================================
 //
 // Architecture: "End-of-Pipe EMA" + "ZARU-to-Madgwick"
@@ -123,10 +123,17 @@
 //   |   mean_gz/gx/gy = buffer means (absolute bias, pre-correction)
 //   |
 //   | STEP 8: GPS Snapshot (gps_mutex, 2ms timeout, static cache)
+//   |   last_gps = shared_gps_data copy
+//   |   NMEA path: lat/lon/sog_kmh/alt/sats/hdop + valid/epoch/fix_us
+//   |   CASIC NAV-PV path: nav_speed2d/nav_s_acc/nav_vel_n/nav_vel_e
+//   |                    + nav_vel_valid/nav_fix_us
 //   |
-//   | STEP 9: Stationary Condition (3-axis variance gate, v1.3.5)
+//   | STEP 9: GPS Velocity Selection + Stationary Condition (v1.5.0)
+//   |   nav_fresh = (nav_vel_valid >= 6) AND (nav_fix_us > 0)
+//   |            AND ((timestamp_us - nav_fix_us) < 150000 us)
+//   |   gps_speed_used = nav_speed2d * 3.6 if nav_fresh else sog_kmh
 //   |   is_stationary = var_gz < 0.25 AND var_gx < 0.35 AND var_gy < 0.35
-//   |                   AND GPS < 2 km/h AND |mean_gz| < 2.5 deg/s
+//   |                   AND gps_speed_used < 2 km/h AND |mean_gz| < 2.5 deg/s
 //   |
 //   | STEP 10a: Static ZARU
 //   |   If is_stationary: thermal_bias_g{x,y,z} = mean_g{x,y,z} (instant)
@@ -151,6 +158,8 @@
 //   |
 //   | STEP 13: ESKF Correct (on fresh GPS epoch, ~10Hz)
 //   |   WGS84 -> ENU, 3-stage sequential (pos/speed/COG), Joseph form
+//   |   Speed stage and COG baseline use gps_speed_used (NAV-PV when fresh,
+//   |   otherwise NMEA SOG fallback)
 //   |   COG variation feeds back into Straight-Line ZARU gate
 //   |
 //   |                          PHASE 3: end-of-pipe EMA
@@ -169,9 +178,11 @@
 //   |
 //   |                          PHASE 5: SD record (no mutex)
 //   |
-//   | 164 bytes (v1.4.2): EMA + Raw + GPS + ESKF 5D + 6D Shadow
+//   | 190 bytes (v1.5.0): EMA + Raw + GPS + ESKF 5D + 6D Shadow
 //   |   + ZARU flags (bit 3: recalib) + tbias_gz + sensor-frame raw IMU
-//   |   + gps_fix_us + gps_valid for deterministic SITL replay
+//   |   + gps_fix_us + gps_valid + gps_sog_kmh
+//   |   + nav_speed2d/nav_s_acc/nav_vel_n/nav_vel_e/nav_vel_valid
+//   |   + gps_speed_source + nav_fix_us for deterministic SITL replay
 //   | → xQueueSend(sd_queue, depth=200) → Task_SD_Writer
 //   |
 // ==============================================================================================
@@ -1023,6 +1034,26 @@
 //   - [SITL] Offline replay tools can now reproduce gps_stale, gps_slow and
 //     fresh-fix ESKF correct gating without heuristic GPS timing inference.
 //
+// v1.5.0 — CASIC NAV-PV Velocity Channel + Explicit GPS Speed Source
+//   - [FEATURE] SerialGpsWrapper now parses CASIC binary NAV-PV frames in
+//     parallel with NMEA and enables periodic NAV-PV output at boot via CFG-MSG.
+//   - [FEATURE] GPS velocity path is now explicit:
+//       * gps_sog_kmh        = legacy NMEA Speed Over Ground [km/h]
+//       * nav_speed2d        = NAV-PV ground speed [m/s]
+//       * nav_s_acc          = NAV-PV speed accuracy estimate [m/s]
+//       * nav_vel_n / nav_vel_e
+//       * nav_vel_valid / nav_fix_us
+//       * gps_speed_source   = source actually used this sample
+//   - [FEATURE] Task_Filter now selects per sample:
+//       gps_speed_used = NAV-PV speed2D when nav_fresh, otherwise NMEA SOG
+//     The same source feeds stationary detection, straight-ZARU speed gates,
+//     ESKF speed update and COG baseline logic.
+//   - [FEATURE] TelemetryRecord extended 164 → 190 bytes/sample. Python tools
+//     updated for 190-byte logs while preserving backward compatibility with
+//     78/122/127/155/164-byte records.
+//   - [SITL] sitl_replay.py mirrors the same NAV-PV freshness / NMEA fallback
+//     policy, preserving deterministic replay of GPS speed-source selection.
+//
 // ==========================================================
 
 #include <M5Unified.h>
@@ -1494,13 +1525,15 @@ void loop() {
                "\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,"
                "\"lap\":%d,\"lat\":%.6f,\"lon\":%.6f,"
                "\"spd\":%.1f,\"alt\":%.1f,\"sats\":%d,\"hdop\":%.1f,"
-               "\"kfx\":%.2f,\"kfy\":%.2f,\"kfv\":%.2f,\"kfh\":%.3f}",
+               "\"kfx\":%.2f,\"kfy\":%.2f,\"kfv\":%.2f,\"kfh\":%.3f,"
+               "\"nav_spd2d\":%.4f,\"nav_s_acc\":%.5f}",
                local_data.ema_ax, local_data.ema_ay, local_data.ema_az,
                local_data.ema_gx, local_data.ema_gy, local_data.ema_gz, lap_flag,
-               gps_snap.lat, gps_snap.lon, gps_snap.speed_kmh, gps_snap.alt_m,
+               gps_snap.lat, gps_snap.lon, gps_snap.sog_kmh, gps_snap.alt_m,
                (int)gps_snap.sats, gps_snap.hdop,
                local_data.kf_x, local_data.kf_y,
-               local_data.kf_vel, local_data.kf_heading);
+               local_data.kf_vel, local_data.kf_heading,
+               gps_snap.nav_speed2d, gps_snap.nav_s_acc);
       if (!mqttClient.publish(cfg_mqtt_topic, buf)) {
         reconnect_network();
       }
@@ -1599,7 +1632,7 @@ void loop() {
       }
       if (gps_disp.valid) {
         snprintf(buf, sizeof(buf), "Sats:%d Spd:%.0f", (int)gps_disp.sats,
-                 gps_disp.speed_kmh);
+                 gps_disp.sog_kmh);
       } else {
         snprintf(buf, sizeof(buf), "Sats:%d NO FIX", (int)gps_disp.sats);
       }
