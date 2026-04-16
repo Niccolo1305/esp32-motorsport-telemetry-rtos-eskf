@@ -3,7 +3,7 @@ Dual-core FreeRTOS telemetry firmware for ESP32-S3 with 50Hz ESKF sensor fusion 
 
 # ESP32 Telemetria
 
-![Firmware](https://img.shields.io/badge/firmware-v1.4.2-blue)
+![Firmware](https://img.shields.io/badge/firmware-v1.5.0-blue)
 ![Platform](https://img.shields.io/badge/platform-ESP32--S3-informational)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 
@@ -20,9 +20,9 @@ ESP32 Telemetria is a self-contained data-acquisition unit that fits in your han
 
 Recorded sessions are stored in a compact binary format on a micro-SD card and can be post-processed through a Python toolchain that outputs interactive dashboards or native **MoTeC i2 Pro** log files — the same format used by professional motorsport engineers.
 
-As of v1.4.x the IMU and GPS stacks are abstracted behind `IImuProvider` / `IGpsProvider` interfaces, decoupling the pipeline from hardware. Every session now logs sensor-frame raw data alongside the processed output, enabling full offline pipeline replay via `sitl_replay.py` — including deterministic GPS staleness gating using the same µs clock as the IMU.
+As of v1.5.0 the IMU and GPS stacks are abstracted behind `IImuProvider` / `IGpsProvider` interfaces, decoupling the pipeline from hardware. Every session logs sensor-frame raw IMU plus explicit GPS timing metadata and, when available, CASIC `NAV-PV` velocity fields (`nav_speed2d`, `nav_s_acc`, `nav_vel_n/e`, `gps_speed_source`). This enables offline SITL replay of the same GPS speed-source selection logic used by the firmware.
 
-**Current firmware:** v1.4.2
+**Current firmware:** v1.5.0
 
 ---
 
@@ -62,12 +62,13 @@ The entire project is designed to be affordable, modular, and extremely compact.
 - **Non-Holonomic Constraint (NHC)** — `v_lateral = 0` pseudo-measurement continuously corrects heading drift while in motion (> 5 km/h, disabled above 0.5 g lateral)
 - **Shadow ESKF_6D** — 6-state filter with independent online gyro-bias estimation, running in parallel for validation; logged as `kf6_*`
 - **GPS staleness detection** via monotonic IMU clock (`timestamp_us − fix_us > 5 s`), same timebase as IMU for deterministic SITL replay
+- **CASIC NAV-PV binary velocity channel** (v1.5.0) — parses explicit ground speed, speed accuracy estimate, ENU velocity components and validity flags alongside legacy NMEA SOG; firmware prefers NAV-PV when fresh and falls back to NMEA automatically
 - **Dependency-injection IMU/GPS providers** — `IImuProvider` / `IGpsProvider` virtual interfaces decouple hardware from the pipeline (v1.1.0+)
-- **Async SD logging** via FreeRTOS queue — 164 bytes/record at 50 Hz (v1.4.2 format)
+- **Async SD logging** via FreeRTOS queue — 190 bytes/record at 50 Hz (v1.5.0 format)
 - **MQTT publishing** at 10 Hz over Wi-Fi for live telemetry monitoring
 - **MoTeC i2 Pro export** — native `.ld` format, 12 channels (8 @ 50 Hz + 4 @ 10 Hz)
 - **Interactive dashboard** built with Plotly/Dash for post-session analysis
-- **Offline SITL replay** (`sitl_hal/sitl_replay.py`) — re-runs the full firmware pipeline offline from logged sensor-frame data (v1.4.2+)
+- **Offline SITL replay** (`sitl_hal/sitl_replay.py`) — re-runs the full firmware pipeline offline from logged sensor-frame data and mirrors the same NAV-PV freshness / NMEA fallback policy used on-device (v1.5.0+, with fallback for legacy logs)
 
 ---
 
@@ -251,7 +252,7 @@ python Tool/sitl_hal/sitl_replay.py <file.bin> --output <out_sitl.csv>
 
 Replays the exact firmware pipeline (`filter_task.cpp`) offline using the sensor-frame channels logged since v1.4.0 (`sensor_ax/ay/az`, `sensor_gx/gy/gz`). Produces a new CSV with re-computed EMA, ZARU, ESKF, and VGPL outputs — useful for tuning constants without reflashing.
 
-With v1.4.2 logs the GPS staleness gate is reproduced deterministically (`gps_fix_us` / `gps_valid` fields), meaning `eskf.correct()` is called on the exact same samples as the firmware.
+With v1.5.0 logs the replay also mirrors the on-device GPS speed-source selection (`NAV-PV` when fresh, otherwise `gps_sog_kmh`). Legacy v1.4.2 logs still reproduce GPS staleness deterministically via `gps_fix_us` / `gps_valid`.
 
 ### 3 — Interactive Dashboard
 
@@ -326,7 +327,7 @@ Produces a native `.ld` file openable in **i2 Pro** or **i2 Standard**:
 
 Each 20 ms cycle inside `Task_Filter` runs 5 phases. The key architectural principle is **"End-of-Pipe EMA + ZARU-to-Madgwick"**: the EMA filter is purely aesthetic (display/MQTT/SD) and sits after all navigation updates, while the ZARU thermal bias is fed back into the gyro *before* Madgwick each cycle.
 
-> Full reference: [`Pipeline/IMU and GPS Data Processing pipeline v1.4.2.pdf`](Pipeline/IMU%20and%20GPS%20Data%20Processing%20pipeline%20v1.4.2.pdf)
+> Authoritative reference: in-source pipeline comment block in [`src/Telemetria.ino`](src/Telemetria.ino). The image below still reflects the v1.4.2 graph and is pending a visual refresh for the v1.5.0 GPS binary path.
 
 ```mermaid
 flowchart LR
@@ -337,16 +338,16 @@ flowchart LR
     classDef out   fill:#b03a2e,stroke:#e74c3c,color:#fff,stroke-width:2px
 
     IMU["MPU-6886\n50 Hz\nIImuProvider"]:::hw
-    GPS["AT6668 GNSS\n10 Hz\nIGpsProvider"]:::hw
+    GPS["AT6668 GNSS\n10 Hz\nNMEA + CASIC NAV-PV"]:::hw
 
     P1["Phase 1\ntelemetry_mutex\n─────────────\nEllipsoid cal\nGeometric align\nVGPL cent+long\nMadgwick AHRS\nGravity removal"]:::phase
-    P2["Phase 2\nno mutex\n─────────────\nVariance engine\nZARU 3-axis\nESKF 5D + 6D\nNHC · GPS correct"]:::ctrl
+    P2["Phase 2\nno mutex\n─────────────\nVariance engine\nGPS snapshot + speed source select\nZARU 3-axis\nESKF 5D + 6D\nNHC · GPS correct"]:::ctrl
     P3["Phase 3\nEnd-of-pipe EMA\n─────────────\nα=0.06 τ≈313ms\nZARU-corrected\ninput"]:::ema
     P4["Phase 4\ntelemetry_mutex\n─────────────\nEMA write-back\nshared_telemetry"]:::ctrl
 
     MQTT["MQTT\n10 Hz"]:::out
     DISP["LCD\n5 Hz"]:::out
-    SD["Task_SD_Writer\n164B · 50 Hz"]:::out
+    SD["Task_SD_Writer\n190B · 50 Hz"]:::out
 
     IMU --> P1
     GPS --> P2
@@ -419,15 +420,15 @@ Written once at the start of every `.bin` file:
 |-------|------|-------------|
 | `magic` | 3 × uint8 | `"TEL"` — identifies this as a telemetry file |
 | `header_version` | uint8 | `3` (v1→v2: record_size widened to uint16; v2→v3: calibration params added) |
-| `firmware_version` | char[16] | e.g. `"v1.4.2"` |
-| `record_size` | uint16 | Bytes per record (164 for v1.4.2) |
+| `firmware_version` | char[16] | e.g. `"v1.5.0"` |
+| `record_size` | uint16 | Bytes per record (190 for v1.5.0) |
 | `start_time_ms` | uint32 | `millis()` at file open |
 | `cal_sin_phi..cal_cos_theta` | 4 × float | Boot mounting rotation (φ, θ) |
 | `cal_bias_ax..cal_bias_gz` | 6 × float | Boot accel/gyro residual biases |
 
-### Data Record (164 bytes, v1.4.2, `__attribute__((packed))`)
+### Data Record (190 bytes, v1.5.0, `__attribute__((packed))`)
 
-`struct.unpack('<Q7fBddffBf4f6f5fBf6fQB', chunk_164_byte)`
+`struct.unpack('<Q7fBddffBf4f6f5fBf6fQB4fBBQ', chunk_190_byte)`
 
 | Field | Type | Bytes | Description |
 |-------|------|-------|-------------|
@@ -437,7 +438,7 @@ Written once at the start of every `.bin` file:
 | `temp_c` | float | 4 | MPU-6886 temperature [°C] |
 | `lap` | uint8 | 1 | Session flag (1 = recording, 0 = idle) |
 | `gps_lat`, `gps_lon` | 2 × double | 16 | GPS coordinates (WGS84) |
-| `gps_speed_kmh`, `gps_alt_m` | 2 × float | 8 | GPS ground speed and altitude |
+| `gps_sog_kmh`, `gps_alt_m` | 2 × float | 8 | Legacy NMEA speed-over-ground [km/h] and altitude |
 | `gps_sats` | uint8 | 1 | Satellites locked |
 | `gps_hdop` | float | 4 | Horizontal dilution of precision |
 | `kf_x..kf_heading` | 4 × float | 16 | ESKF 5D: ENU position [m], speed [m/s], heading [rad] |
@@ -446,11 +447,14 @@ Written once at the start of every `.bin` file:
 | `zaru_flags` | uint8 | 1 | Bitmask: bit0=Static ZARU, bit1=Straight ZARU, bit2=NHC, bit3=Recalibration |
 | `tbias_gz` | float | 4 | Current learned thermal bias gz [°/s] |
 | `sensor_ax..sensor_gz` | 6 × float | 24 | Sensor-frame raw IMU pre-calibration (SITL input) |
-| `gps_fix_us` | uint64 | 8 | `esp_timer_get_time()` of last valid GPS fix (SITL, v1.4.2) |
-| `gps_valid` | uint8 | 1 | Mirror of `GpsData.valid` for this sample (SITL, v1.4.2) |
-| **Total** | | **164** | |
+| `gps_fix_us` | uint64 | 8 | `esp_timer_get_time()` of last valid GPS fix (retained from v1.4.2 for deterministic SITL timing) |
+| `gps_valid` | uint8 | 1 | Mirror of `GpsData.valid` for this sample (retained from v1.4.2 for deterministic SITL timing) |
+| `nav_speed2d`, `nav_s_acc`, `nav_vel_n`, `nav_vel_e` | 4 × float | 16 | CASIC NAV-PV ground speed [m/s], speed accuracy estimate [m/s], North/East velocity [m/s] |
+| `nav_vel_valid`, `gps_speed_source` | 2 × uint8 | 2 | NAV-PV validity and per-sample source actually used by the filter |
+| `nav_fix_us` | uint64 | 8 | `esp_timer_get_time()` of last parsed NAV-PV frame for freshness replay |
+| **Total** | | **190** | |
 
-`bin_to_csv.py` supports all legacy formats (78 / 122 / 127 / 155 / 164 bytes) with automatic detection from the file header.
+`bin_to_csv.py` supports all legacy formats (78 / 122 / 127 / 155 / 164 / 190 bytes) with automatic detection from the file header.
 
 ### CalibrationRecord (sentinel)
 
@@ -538,9 +542,9 @@ esp32-telemetry-clean/
 │   └── display.h / .cpp         # LCD helper functions
 │
 ├── Tool/
-│   ├── bin_to_csv.py            # Binary → CSV converter (all formats: 122/127/155/164B)
+│   ├── bin_to_csv.py            # Binary → CSV converter (all formats: 122/127/155/164/190B)
 │   ├── sitl_hal/
-│   │   ├── sitl_replay.py       # Offline SITL pipeline replay from sensor-frame data (v1.4.2+)
+│   │   ├── sitl_replay.py       # Offline SITL pipeline replay from sensor-frame data with GPS source fallback (v1.5.0+, legacy-compatible)
 │   │   └── static_bench_validator.py
 │   ├── dashboard.py             # Plotly/Dash interactive telemetry viewer
 │   ├── motec_exporter.py        # MoTeC i2 Pro .ld exporter
@@ -633,7 +637,7 @@ If the device was moved during the 2-second boot tare, gyro bias will be off —
 | Item | Status | Notes |
 |------|--------|-------|
 | Binary session header | **Done** (v1.4.0) | FileHeader v3: firmware string, record size, 10 boot calibration params |
-| SITL offline replay | **Done** (v1.4.2) | `sitl_hal/sitl_replay.py` re-runs the full pipeline from sensor-frame logs; GPS staleness deterministic |
+| SITL offline replay | **Done** (v1.5.0) | `sitl_hal/sitl_replay.py` re-runs the full pipeline from sensor-frame logs; GPS staleness and NAV-PV/NMEA speed-source selection are deterministic |
 | VGPL longitudinal compensation | **Done** (v1.4.1) | `dv/dt / g` subtracted from ay before Madgwick alongside centripetal |
 | ESKF_6D validation | In progress | A/B comparison on recorded track sessions; 6D becomes primary if it outperforms 5D |
 | Hardware interrupt for BtnA | Planned | `attachInterrupt()` on GPIO 41 — captures clicks during blocking SD calls |
@@ -643,6 +647,14 @@ If the device was moved during the 2-second boot tare, gyro bias will be off —
 ---
 
 ## Changelog
+
+### v1.5.0 — CASIC NAV-PV Velocity Channel + Explicit GPS Speed Source
+
+- **CASIC binary `NAV-PV` parser** added to `SerialGpsWrapper` alongside TinyGPSPlus. The GPS provider now consumes NMEA position/SOG and CASIC binary velocity on the same UART stream.
+- **New explicit GPS velocity fields** logged in every v1.5.0 record: `gps_sog_kmh`, `nav_speed2d`, `nav_s_acc`, `nav_vel_n`, `nav_vel_e`, `nav_vel_valid`, `gps_speed_source`, `nav_fix_us`.
+- **Per-sample speed-source selection** in `Task_Filter`: prefer fresh valid `NAV-PV` speed2D, otherwise fall back to legacy NMEA SOG. The same selected source now feeds stationary detection, straight-line ZARU speed gates, ESKF speed update and COG baseline logic.
+- **`TelemetryRecord` grows to 190 bytes** and all Python tools (`bin_to_csv.py`, `motec_exporter.py`, `sitl_hal/sitl_replay.py`, dashboards/debug tools) were updated with backward-compatible parsing.
+- **SITL replay mirrors the same freshness/fallback rule** so offline analysis uses the exact same GPS speed source policy as the firmware.
 
 ### v1.4.2 — GPS Timing Metadata + SITL Deterministic Replay
 

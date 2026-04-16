@@ -117,7 +117,8 @@ COL_MAP = {
     "lap":           "lap",
     "gps_lat":       "gps_lat (°)",
     "gps_lon":       "gps_lon (°)",
-    "gps_speed_kmh": "gps_speed_kmh (km/h)",
+    "gps_sog_kmh":   "gps_sog_kmh (km/h)",
+    "gps_speed_kmh": "gps_sog_kmh (km/h)",  # legacy alias → canonical name
     "gps_alt_m":     "gps_alt_m (m)",
     "gps_sats":      "gps_sats",
     "gps_hdop":      "gps_hdop",

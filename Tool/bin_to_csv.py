@@ -38,7 +38,7 @@ HEADER_122 = [
     'ax (G)', 'ay (G)', 'az (G)', 'gx (°/s)', 'gy (°/s)', 'gz (°/s)', 'temp_c (°C)',
     'lap',
     'gps_lat (°)', 'gps_lon (°)',
-    'gps_speed_kmh (km/h)', 'gps_alt_m (m)',
+    'gps_sog_kmh (km/h)', 'gps_alt_m (m)',
     'gps_sats',
     'gps_hdop',
     'kf_x (m)', 'kf_y (m)', 'kf_vel (m/s)', 'kf_heading (rad)',
@@ -70,7 +70,7 @@ HEADER_155 = [
     'ax (G)', 'ay (G)', 'az (G)', 'gx (°/s)', 'gy (°/s)', 'gz (°/s)', 'temp_c (°C)',
     'lap',
     'gps_lat (°)', 'gps_lon (°)',
-    'gps_speed_kmh (km/h)', 'gps_alt_m (m)',
+    'gps_sog_kmh (km/h)', 'gps_alt_m (m)',
     'gps_sats',
     'gps_hdop',
     'kf_x (m)', 'kf_y (m)', 'kf_vel (m/s)', 'kf_heading (rad)',
@@ -104,6 +104,28 @@ HEADER_164 = HEADER_155 + ['gps_fix_us (µs)', 'gps_valid']
 COL_FMT_164 = COL_FMT_155 + ['{:d}', '{:d}']
 assert struct.calcsize(FMT_164) == 164, f"FMT_164 mismatch: {struct.calcsize(FMT_164)}"
 
+# 190-byte record (v1.5.0+): adds NAV-PV velocity fields from CASIC binary
+# nav_speed2d: CASIC NAV-PV ground speed [m/s]
+# nav_s_acc:   speed accuracy estimate [m/s]
+# nav_vel_n/e: ENU velocity components [m/s]
+# nav_vel_valid: 0=invalid, 6=2D, 7=3D
+# gps_speed_source: 0=NMEA_SOG, 1=NAV_PV (per-sample source flag)
+# nav_fix_us:  esp_timer when NAV-PV was parsed [µs] (freshness/SITL)
+FMT_190 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQ'
+HEADER_190 = HEADER_164 + [
+    'nav_speed2d (m/s)', 'nav_s_acc (m/s)',
+    'nav_vel_n (m/s)', 'nav_vel_e (m/s)',
+    'nav_vel_valid', 'gps_speed_source',
+    'nav_fix_us (µs)',
+]
+COL_FMT_190 = COL_FMT_164 + [
+    '{:.5f}', '{:.6f}',
+    '{:.5f}', '{:.5f}',
+    '{:d}', '{:d}',
+    '{:d}',
+]
+assert struct.calcsize(FMT_190) == 190, f"FMT_190 mismatch: {struct.calcsize(FMT_190)}"
+
 # Default aliases (used for legacy files without header)
 FMT_DEFAULT = FMT_122
 HEADER = HEADER_122
@@ -111,6 +133,8 @@ COL_FMT = COL_FMT_122
 
 def get_format(record_size):
     """Return (struct_fmt, header_list, col_fmt_list) for a given record size."""
+    if record_size == 190:
+        return FMT_190, HEADER_190, COL_FMT_190
     if record_size == 164:
         return FMT_164, HEADER_164, COL_FMT_164
     if record_size == 155:
