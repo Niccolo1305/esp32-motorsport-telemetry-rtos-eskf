@@ -1,0 +1,50 @@
+[STATIC] Input: C:\Users\1305n\Desktop\esp32-telemetry-clean\Tool\sitl_hal\Bin_test_su_banco - v1.5.0\tel_21.bin
+[STATIC] Rows: total=2750, selected=2649
+[STATIC] CALIB_BOOT: phi=+4.979 deg theta=-2.313 deg bias_a=(-0.00000, -0.00000, +0.06575) bias_g=(+0.23804, -0.00305, +0.04883)
+
+[PASS] CALIB_BOOT observed: phi +4.98 deg, theta -2.31 deg, pose not enforced
+[PASS] raw_ax static gravity-free: mean -0.0001 g, std 0.0024 g
+[PASS] raw_ay static gravity-free: mean -0.0005 g, std 0.0031 g
+[PASS] raw_az static gravity-free: mean -0.0013 g, std 0.0012 g
+[PASS] ax EMA static: mean -0.0001 g, std 0.0005 g
+[PASS] ay EMA static: mean -0.0006 g, std 0.0006 g
+[PASS] az EMA static: mean -0.0013 g, std 0.0003 g
+[PASS] tbias_gz vs raw_gz mean: raw_gz mean -0.0107 dps, tbias mean -0.0078 dps
+[PASS] raw_gz - tbias_gz residual: mean -0.0030 dps, std 0.1662 dps
+[PASS] gx EMA gyro static: mean -0.0139 dps, std 0.1054 dps
+[PASS] gy EMA gyro static: mean -0.0278 dps, std 0.2039 dps
+[PASS] gz EMA gyro static: mean -0.0011 dps, std 0.0341 dps
+[PASS] Static ZARU active ratio: 97.5% of selected window
+[PASS] Straight ZARU inactive in static: 0.0% of selected window
+[PASS] NHC inactive in static: 0.0% of selected window
+[PASS] Recalibration marker absent: no bit 0x08 in selected window
+[PASS] GPS validity observed: 100.0% valid samples
+[PASS] ax EMA relation: MAE vs EMA(raw_ax) = 0.00000 g
+[PASS] ay EMA relation: MAE vs EMA(raw_ay) = 0.00001 g
+[PASS] az EMA relation: MAE vs EMA(raw_az) = 0.00000 g
+[PASS] gz EMA relation: MAE vs EMA(raw_gz - tbias_gz) = 0.00009 dps
+[PASS] raw_* accel norm after gravity removal: mean |raw_a| = 0.0029 g
+[PASS] sensor_* accel norm (pre-calibration): mean |sensor_a| = 0.9967 g; informative only because sensor_* is pre-ellipsoid
+[PASS] CALIB_BOOT body_ax static: mean -0.0002 g
+[PASS] CALIB_BOOT body_ay static: mean -0.0002 g
+[PASS] CALIB_BOOT body_az static: mean +0.9987 g
+[PASS] sensor_* + CALIB_BOOT -> raw_ax: MAE 0.00093 g
+[PASS] sensor_* + CALIB_BOOT -> raw_ay: MAE 0.00200 g
+[PASS] sensor_* + CALIB_BOOT -> raw_az: MAE 0.00001 g
+[PASS] sensor_* + CALIB_BOOT -> raw_gx: MAE 0.00000 dps
+[PASS] sensor_* + CALIB_BOOT -> raw_gy: MAE 0.00000 dps
+[PASS] sensor_* + CALIB_BOOT -> raw_gz: MAE 0.00000 dps
+
+[STATIC] Key metrics:
+  static_ratio=97.5%
+  straight_ratio=0.0%
+  nhc_ratio=0.0%
+  sensor_acc_norm_mean=0.99673 g
+  raw_acc_norm_mean=0.00291 g
+  tbias_gz_mean=-0.00776 dps
+  corrected_gz_mean=-0.00296 dps
+  gz_ema_mae=0.00009 dps
+  recon_raw_accel_mae_max=0.00200 g
+  recon_raw_gyro_mae_max=0.00000 dps
+
+[STATIC] RESULT: PASS

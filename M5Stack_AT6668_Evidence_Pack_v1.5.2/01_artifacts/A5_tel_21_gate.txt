@@ -1,0 +1,19 @@
+[GATE] Input: C:\Users\1305n\Desktop\esp32-telemetry-clean\Tool\sitl_hal\Bin_test_su_banco - v1.5.0\tel_21.bin
+[GATE] Rows analyzed: 2649
+
+[GATE] Static ZARU off reasons:
+  off_total=66 (2.5%)
+  due_to_gps=0 (0.0% of off)
+  due_to_var=66 (100.0% of off)
+  only_gps=0 (0.0% of off)
+  only_var=66 (100.0% of off)
+  gps_and_var=0 (0.0% of off)
+  var_gz=63, var_gx=65, var_gy=66
+
+[GATE] NHC reasons:
+  nhc_total=0
+
+[GATE] First static-off segments:
+  64147230..65447118 us dur=1.30s mean_gps=0.02 km/h max_gps=0.04 mean_kf=0.012 m/s max_kf=0.023 gps_valid_ratio=1.00
+
+[GATE] First NHC segments:

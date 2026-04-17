@@ -1,0 +1,47 @@
+[GPSCMP] Input: C:\Users\1305n\Desktop\esp32-telemetry-clean\Tool\sitl_hal\Bin_test_su_banco\tel_11.bin
+[GPSCMP] Rows analyzed: 32350
+[GPSCMP] Unique valid GPS fixes: 6742
+[GPSCMP] Pairing: successive unique gps_fix_us values
+[GPSCMP] Clean dt window: 90-110 ms
+
+[GPSCMP] All fix pairs:
+  count=6741
+  mean module/pos/kf = 1.960 / 3.191 / 1.742 km/h
+  median module/pos/kf = 1.690 / 2.395 / 0.627 km/h
+  p95 module/pos/kf = 4.520 / 9.154 / 6.391 km/h
+  max module/pos/kf = 6.390 / 353.097 / 13.102 km/h
+  MAE module-pos/module-kf/pos-kf = 2.200 / 1.093 / 2.272 km/h
+  corr module-pos/module-kf/pos-kf = 0.150 / 0.734 / 0.272
+  ratio >= 2.0 km/h module/pos/kf = 39.6% / 57.0% / 29.8%
+  ratio >= 5.0 km/h module/pos/kf = 3.3% / 20.4% / 11.1%
+  confusion @ 2.0 km/h: both=1895 module_only=777 pos_only=1950 neither=2119
+
+[GPSCMP] Clean dt fix pairs:
+  count=3671
+  mean module/pos/kf = 1.861 / 3.434 / 1.647 km/h
+  median module/pos/kf = 1.570 / 2.654 / 0.626 km/h
+  p95 module/pos/kf = 4.410 / 8.541 / 6.194 km/h
+  max module/pos/kf = 6.390 / 353.097 / 11.580 km/h
+  MAE module-pos/module-kf/pos-kf = 1.981 / 1.021 / 2.124 km/h
+  corr module-pos/module-kf/pos-kf = 0.154 / 0.741 / 0.271
+  ratio >= 2.0 km/h module/pos/kf = 35.8% / 63.4% / 27.3%
+  ratio >= 5.0 km/h module/pos/kf = 2.9% / 20.4% / 9.8%
+  confusion @ 2.0 km/h: both=1090 module_only=223 pos_only=1237 neither=1121
+
+[GPSCMP] Interpretation on clean dt pairs:
+  kf_vel follows module speed more closely than lat/lon/dt speed.
+  lat/lon/dt speed is substantially noisier than module speed on this log.
+  Module speed alone is sufficient to trip the 2.0 km/h stationary gate on 35.8% of fix pairs.
+  Module vs lat/lon/dt speed correlation is 0.154; low correlation indicates the two channels are not equivalent here.
+
+[GPSCMP] Worst clean-dt module vs lat/lon/dt disagreements:
+  t=0.72s dt=0.105s dist=10.257m module=3.85 pos=353.10 kf=7.75 km/h flags=0x04
+  t=0.84s dt=0.107s dist=2.577m module=3.13 pos=86.54 kf=6.68 km/h flags=0x04
+  t=156.42s dt=0.103s dist=0.765m module=1.15 pos=26.64 kf=1.70 km/h flags=0x01
+  t=410.34s dt=0.104s dist=0.779m module=1.70 pos=26.86 kf=1.52 km/h flags=0x01
+  t=131.04s dt=0.104s dist=0.633m module=0.39 pos=22.00 kf=2.31 km/h flags=0x01
+  t=2.34s dt=0.104s dist=0.639m module=0.69 pos=22.09 kf=8.22 km/h flags=0x01
+  t=317.84s dt=0.104s dist=0.611m module=2.35 pos=21.19 kf=4.35 km/h flags=0x00
+  t=4.14s dt=0.108s dist=0.594m module=1.39 pos=19.81 kf=0.90 km/h flags=0x01
+  t=410.62s dt=0.103s dist=0.541m module=1.35 pos=18.91 kf=0.24 km/h flags=0x01
+  t=453.24s dt=0.097s dist=0.510m module=1.69 pos=18.87 kf=2.55 km/h flags=0x01

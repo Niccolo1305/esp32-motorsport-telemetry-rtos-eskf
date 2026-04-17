@@ -82,4 +82,4 @@ int btn_click_count = 0;
 bool display_off = false;
 bool display_confirm_pending = false;
 int display_confirm_cycles = 0;
-char buf[384];
+char buf[512];

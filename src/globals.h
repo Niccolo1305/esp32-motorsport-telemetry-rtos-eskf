@@ -97,4 +97,4 @@ extern int btn_click_count;
 extern bool display_off;
 extern bool display_confirm_pending;
 extern int display_confirm_cycles;
-extern char buf[384];
+extern char buf[512];
