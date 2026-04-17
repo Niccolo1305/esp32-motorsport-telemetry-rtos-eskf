@@ -126,6 +126,20 @@ COL_FMT_190 = COL_FMT_164 + [
 ]
 assert struct.calcsize(FMT_190) == 190, f"FMT_190 mismatch: {struct.calcsize(FMT_190)}"
 
+# 202-byte record (v1.5.1+): adds NMEA DHV ground speed and timestamp
+# dhv_gdspd: NMEA DHV horizontal ground speed [m/s]
+# dhv_fix_us: esp_timer when DHV was parsed [µs]
+FMT_202 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ'
+HEADER_202 = HEADER_190 + [
+    'dhv_gdspd (m/s)',
+    'dhv_fix_us (µs)',
+]
+COL_FMT_202 = COL_FMT_190 + [
+    '{:.5f}',
+    '{:d}',
+]
+assert struct.calcsize(FMT_202) == 202, f"FMT_202 mismatch: {struct.calcsize(FMT_202)}"
+
 # Default aliases (used for legacy files without header)
 FMT_DEFAULT = FMT_122
 HEADER = HEADER_122
@@ -133,6 +147,8 @@ COL_FMT = COL_FMT_122
 
 def get_format(record_size):
     """Return (struct_fmt, header_list, col_fmt_list) for a given record size."""
+    if record_size == 202:
+        return FMT_202, HEADER_202, COL_FMT_202
     if record_size == 190:
         return FMT_190, HEADER_190, COL_FMT_190
     if record_size == 164:

@@ -342,22 +342,16 @@ void Task_Filter(void *pvParameters) {
         xSemaphoreGive(gps_mutex);
       }
 
-      // ── GPS Velocity Source Selection (v1.5.0) ────────────────────────────
-      // Per-sample freshness check: prefer CASIC NAV-PV over NMEA SOG when:
-      //   1. nav_vel_valid >= 6  (2D or 3D velocity fix)
-      //   2. nav_fix_us > 0     (at least one NAV-PV frame received)
-      //   3. staleness < 1.5 GPS cycles (150 ms at 10 Hz)
-      //
-      // Fallback: NMEA SOG (last_gps.sog_kmh) — no accuracy estimate.
-      // gps_speed_source is logged per-sample so post-processing tools can
-      // answer "which source did the filter actually use this cycle?".
-      bool nav_fresh = (last_gps.nav_vel_valid >= 6)
-                    && (last_gps.nav_fix_us > 0)
-                    && ((data.timestamp_us - last_gps.nav_fix_us) < 150000ULL);  // 150 ms = 1.5 × 100ms GPS cycle
-      float gps_speed_kmh_used = nav_fresh
-                                 ? (last_gps.nav_speed2d * 3.6f)
-                                 : last_gps.sog_kmh;
-      uint8_t gps_speed_source = nav_fresh ? GPS_SPD_NAV_PV : GPS_SPD_NMEA_SOG;
+      // ── GPS Velocity Source Selection (v1.5.2) ────────────────────────────
+      // Hardware investigation result (AT6668 module):
+      //   - DHV (NMEA): capped at 1 Hz by AT6668 firmware regardless of PCAS03.
+      //   - NAV-PV (binary): CFG-MSG (0x06/0x01) NACKed even after CFG-PRT
+      //     enables binary output. Module does not support periodic NAV-PV.
+      //   - NMEA SOG (RMC, via TinyGPSPlus): 10 Hz, co-epoch with position fix.
+      //     This is the receiver-reported Speed Over Ground exposed by NMEA.
+      // Primary source: sog_kmh. DHV and NAV-PV are logged for diagnostics only.
+      float gps_speed_kmh_used = last_gps.sog_kmh;
+      uint8_t gps_speed_source = GPS_SPD_NMEA_SOG;
 
       // ── Stationary Condition (Statistical Engine + GPS) ───────────────────
       // is_stationary = true ONLY IF:
@@ -365,7 +359,7 @@ void Task_Filter(void *pvParameters) {
       //   2. gz, gx AND gy raw variance are all below their respective noise floors
       //      (3-axis gate: prevents false positives from chassis vibration coupling
       //      into roll/pitch even when gz happens to be quiet)
-      //   3. GPS speed (if available) is < 2 km/h (uses best available source)
+      //   3. GPS speed (if available) is < 2 km/h (uses NMEA SOG in v1.5.2)
       //   4. |mean_gz| < 2.5°/s (Sanity Gate v0.9.9)
       bool is_stationary = false;
       if (var_gz >= 0.0f) { // warm-up complete
@@ -645,7 +639,9 @@ void Task_Filter(void *pvParameters) {
         // fix_us uses same timebase as timestamp_us → (timestamp_us - gps_fix_us) > 5s.
         rec.gps_fix_us = last_gps.fix_us;
         rec.gps_valid  = last_gps.valid ? 1 : 0;
-        // NAV-PV velocity (v1.5.0): CASIC binary primary speed source
+        // Extra GPS velocity metadata for SITL/offline analysis.
+        // NAV-PV remains a passive listener in v1.5.1; DHV is the active
+        // receiver-reported horizontal ground-speed path under test.
         rec.nav_speed2d     = last_gps.nav_speed2d;
         rec.nav_s_acc       = last_gps.nav_s_acc;
         rec.nav_vel_n       = last_gps.nav_vel_n;
@@ -653,6 +649,8 @@ void Task_Filter(void *pvParameters) {
         rec.nav_vel_valid   = last_gps.nav_vel_valid;
         rec.gps_speed_source = gps_speed_source;
         rec.nav_fix_us      = last_gps.nav_fix_us;
+        rec.dhv_gdspd       = last_gps.dhv_gdspd;
+        rec.dhv_fix_us      = last_gps.dhv_fix_us;
         xQueueSend(sd_queue, &rec, 0); // timeout=0: discard if queue full
       }
     }

@@ -79,10 +79,11 @@ VGPL_BETA_FLOOR = 0.005
 LEGACY_GPS_FIX_PERIOD_US = 90_000
 
 INT_COLUMNS = {"t_us", "lap", "gps_sats", "zaru_flags", "gps_fix_us", "gps_valid",
-               "nav_vel_valid", "gps_speed_source", "nav_fix_us"}
+               "nav_vel_valid", "gps_speed_source", "nav_fix_us", "dhv_fix_us"}
 # Optional NAV-PV columns present only in v1.5.0+ logs
 NAV_PV_COLUMNS = {"nav_speed2d", "nav_s_acc", "nav_vel_n", "nav_vel_e",
                   "nav_vel_valid", "gps_speed_source", "nav_fix_us"}
+DHV_COLUMNS = {"dhv_gdspd", "dhv_fix_us"}
 # Freshness threshold: 1.5 × GPS cycle at 10 Hz = 150 ms = 150 000 µs
 NAV_FRESH_THRESHOLD_US = 150_000
 
@@ -161,6 +162,8 @@ class GpsState:
     nav_vel_e: float = 0.0
     nav_vel_valid: int = 0
     nav_fix_us: int = 0
+    dhv_gdspd: float = 0.0
+    dhv_fix_us: int = 0
 
 
 @dataclass
@@ -616,18 +619,12 @@ class SITLReplayer:
         self._update_variance_buffers(gx_r, gy_r, gz_r)
         var_gx, var_gy, var_gz, mean_gx, mean_gy, mean_gz = self._variance_snapshot()
 
-        # ── GPS velocity source selection (mirrors firmware v1.5.0) ──────────
-        # Identical freshness policy as filter_task.cpp Step 9:
-        #   nav_fresh = (nav_vel_valid >= 6) && (nav_fix_us > 0)
-        #            && ((t_us - nav_fix_us) < NAV_FRESH_THRESHOLD_US)
-        nav_fresh = (
-            self.last_gps.nav_vel_valid >= 6
-            and self.last_gps.nav_fix_us > 0
-            and (t_us - self.last_gps.nav_fix_us) < NAV_FRESH_THRESHOLD_US
-        )
-        gps_speed_kmh_used = (
-            self.last_gps.nav_speed2d * 3.6 if nav_fresh else self.last_gps.sog_kmh
-        )
+        # ── GPS velocity source selection (mirrors firmware v1.5.2) ──────────
+        # DHV is hardware-capped to 1 Hz on AT6668 (confirmed via MQTT logs).
+        # NAV-PV cannot be enabled via CFG-MSG on this module (NACK confirmed).
+        # Primary source: sog_kmh (NMEA RMC, 10 Hz receiver-reported SOG).
+        # DHV and NAV-PV fields are retained in the binary record for diagnostics only.
+        gps_speed_kmh_used = self.last_gps.sog_kmh
 
         is_stationary = False
         if var_gz >= 0.0:
@@ -836,14 +833,15 @@ class SITLReplayer:
                     fix_us = t_us
                 self.last_gps_key = key
 
-        # NAV-PV fields: read from log if present, else preserve previous values
-        # (nav_fix_us stays valid until replaced by a newer NAV-PV frame)
+        # NAV-PV fields: read from log if present, else preserve previous values.
         nav_speed2d  = float(row.get("nav_speed2d",  self.last_gps.nav_speed2d))
         nav_s_acc    = float(row.get("nav_s_acc",    self.last_gps.nav_s_acc))
         nav_vel_n    = float(row.get("nav_vel_n",    self.last_gps.nav_vel_n))
         nav_vel_e    = float(row.get("nav_vel_e",    self.last_gps.nav_vel_e))
         nav_vel_valid = int(row.get("nav_vel_valid", self.last_gps.nav_vel_valid))
         nav_fix_us   = int(row.get("nav_fix_us",     self.last_gps.nav_fix_us))
+        dhv_gdspd    = float(row.get("dhv_gdspd",    self.last_gps.dhv_gdspd))
+        dhv_fix_us   = int(row.get("dhv_fix_us",     self.last_gps.dhv_fix_us))
 
         self.last_gps = GpsState(
             lat=lat,
@@ -861,6 +859,8 @@ class SITLReplayer:
             nav_vel_e=nav_vel_e,
             nav_vel_valid=nav_vel_valid,
             nav_fix_us=nav_fix_us,
+            dhv_gdspd=dhv_gdspd,
+            dhv_fix_us=dhv_fix_us,
         )
 
     def _update_variance_buffers(self, gx_r: float, gy_r: float, gz_r: float) -> None:

@@ -54,3 +54,29 @@ cross_domain_audit_report.md
 data_pipeline_audit.md
 CLAUDE.md
 
+# =========================
+# Dati di test locali / CSV
+# =========================
+Tool/*.csv
+Tool/sitl_hal/Bin_test_su_banco*/
+
+# =========================
+# Tool SITL sperimentali locali
+# =========================
+Tool/gps_speed_compare.py
+Tool/sitl_hal/__init__.py
+Tool/sitl_hal/_smoke/
+Tool/sitl_hal/gps_speed_compare.py
+Tool/sitl_hal/static_bench_compare.py
+Tool/sitl_hal/static_bench_validator.py
+Tool/sitl_hal/static_gate_debug.py
+
+# =========================
+# Documenti locali non-source
+# =========================
+Protocollo Operativo.txt
+audit_v1.5.1.md
+whitepaper_at6668_dhv_navpv_findings.md
+whitepaper_at6668_dhv_navpv_findings.pdf
+img/
+

@@ -64,7 +64,7 @@
 //
 //
 // ==============================================================================================
-// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.5.0
+// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.5.2
 // ==============================================================================================
 //
 // Architecture: "End-of-Pipe EMA" + "ZARU-to-Madgwick"
@@ -124,14 +124,16 @@
 //   |
 //   | STEP 8: GPS Snapshot (gps_mutex, 2ms timeout, static cache)
 //   |   last_gps = shared_gps_data copy
-//   |   NMEA path: lat/lon/sog_kmh/alt/sats/hdop + valid/epoch/fix_us
-//   |   CASIC NAV-PV path: nav_speed2d/nav_s_acc/nav_vel_n/nav_vel_e
-//   |                    + nav_vel_valid/nav_fix_us
+//   |   NMEA fix path: lat/lon/sog_kmh/alt/sats/hdop + valid/epoch/fix_us
+//   |   NMEA DHV path: dhv_gdspd + dhv_fix_us     [logged for diagnostics only]
+//   |   CASIC NAV-PV path: nav_* fields passive listener only (logged for diagnostics)
 //   |
-//   | STEP 9: GPS Velocity Selection + Stationary Condition (v1.5.0)
-//   |   nav_fresh = (nav_vel_valid >= 6) AND (nav_fix_us > 0)
-//   |            AND ((timestamp_us - nav_fix_us) < 150000 us)
-//   |   gps_speed_used = nav_speed2d * 3.6 if nav_fresh else sog_kmh
+//   | STEP 9: GPS Velocity Selection + Stationary Condition (v1.5.2-clean)
+//   |   gps_speed_used = sog_kmh
+//   |   Source semantics:
+//   |     * sog_kmh   = NMEA RMC receiver-reported Speed Over Ground at 10 Hz
+//   |     * dhv_gdspd = NMEA DHV, observed 1 Hz on AT6668, diagnostics only
+//   |     * nav_*     = passive CASIC NAV-PV listener, CFG-MSG NACKed by module
 //   |   is_stationary = var_gz < 0.25 AND var_gx < 0.35 AND var_gy < 0.35
 //   |                   AND gps_speed_used < 2 km/h AND |mean_gz| < 2.5 deg/s
 //   |
@@ -158,8 +160,7 @@
 //   |
 //   | STEP 13: ESKF Correct (on fresh GPS epoch, ~10Hz)
 //   |   WGS84 -> ENU, 3-stage sequential (pos/speed/COG), Joseph form
-//   |   Speed stage and COG baseline use gps_speed_used (NAV-PV when fresh,
-//   |   otherwise NMEA SOG fallback)
+//   |   Speed stage and COG baseline use gps_speed_used = sog_kmh
 //   |   COG variation feeds back into Straight-Line ZARU gate
 //   |
 //   |                          PHASE 3: end-of-pipe EMA
@@ -178,11 +179,12 @@
 //   |
 //   |                          PHASE 5: SD record (no mutex)
 //   |
-//   | 190 bytes (v1.5.0): EMA + Raw + GPS + ESKF 5D + 6D Shadow
+//   | 202 bytes (v1.5.2-clean semantics): EMA + Raw + GPS + ESKF 5D + 6D Shadow
 //   |   + ZARU flags (bit 3: recalib) + tbias_gz + sensor-frame raw IMU
 //   |   + gps_fix_us + gps_valid + gps_sog_kmh
 //   |   + nav_speed2d/nav_s_acc/nav_vel_n/nav_vel_e/nav_vel_valid
-//   |   + gps_speed_source + nav_fix_us for deterministic SITL replay
+//   |   + gps_speed_source + nav_fix_us + dhv_gdspd + dhv_fix_us
+//   |   for deterministic SITL replay of the production SOG path plus GPS diagnostics
 //   | → xQueueSend(sd_queue, depth=200) → Task_SD_Writer
 //   |
 // ==============================================================================================
@@ -1054,6 +1056,42 @@
 //   - [SITL] sitl_replay.py mirrors the same NAV-PV freshness / NMEA fallback
 //     policy, preserving deterministic replay of GPS speed-source selection.
 //
+// v1.5.1 — NMEA DHV Primary Speed Path + Passive NAV-PV Listener
+//   - [FEATURE] SerialGpsWrapper now enables only GGA/RMC/DHV over NMEA and
+//     parses DHV gdspd as the primary receiver-reported horizontal ground speed.
+//   - [FEATURE] GPS velocity source priority is now:
+//       * DHV when dhv_fix_us is fresh
+//       * passive NAV-PV listener when available and fresh
+//       * NMEA SOG as final fallback
+//   - [LOGGING] TelemetryRecord extended 190 -> 202 bytes/sample with
+//     dhv_gdspd + dhv_fix_us.
+//   - [DIAG] NAV-PV remains in the firmware as a passive diagnostic listener;
+//     it is not enabled at boot on the current AT6668 path.
+//
+// v1.5.2 — SOG Primary Path + DHV/NAV-PV Diagnostic Retention
+//   - [FIX] GPS velocity path simplified to `gps_sog_kmh` only. This is the
+//     receiver-reported NMEA RMC Speed Over Ground already available at 10 Hz.
+//   - [FIX] DHV is no longer used for control because AT6668 emits it at 1 Hz
+//     regardless of `PCAS03`; it remains logged and published via MQTT only for
+//     diagnostics.
+//   - [FIX] Passive NAV-PV remains logged/diagnosed only. `CFG-PRT` can enable
+//     binary output on the port, but `CFG-MSG` for periodic NAV-PV is NACKed by
+//     this module variant.
+//   - [FIX] Task_Filter and SITL now use the same production source unconditionally:
+//     `sog_kmh` for stationary detection, ZARU speed gates, ESKF speed update and
+//     COG baseline logic.
+//   - [FIX] MQTT `spd_src` now mirrors the real control path in v1.5.2 instead of
+//     the deprecated DHV/NAV-PV freshness heuristic.
+//
+// v1.5.2-clean — Production Cleanup
+//   - [CLEAN] Keeps the `202 B` record format and all GPS diagnostic fields on SD.
+//   - [CLEAN] Keeps `sog_kmh` as the only production GPS velocity source.
+//   - [CLEAN] Removes active `CFG-PRT -> CFG-MSG` probing from GPS boot. CASIC is
+//     now listener-only in the production build.
+//   - [CLEAN] Trims MQTT payload back to operational fields (`gps_fix_us`,
+//     `gps_epoch`, `dhv_*`, `nav_*`, `spd_src`) and drops one-off CASIC debug keys.
+//   - [CLEAN] Reduces MQTT/JSON buffers from 1024 to 512 bytes.
+//
 // ==========================================================
 
 #include <M5Unified.h>
@@ -1156,6 +1194,7 @@ void setup() {
   if (mqtt_enabled) {
     mqttClient.setServer(cfg_mqtt_broker, cfg_mqtt_port);
     mqttClient.setKeepAlive(60);
+    mqttClient.setBufferSize(512);
   }
 
   if (wifi_enabled && mqtt_enabled) {
@@ -1307,10 +1346,12 @@ void setup() {
 
   // ── GPS SETUP ─────────────────────────────────────────────────────────────
   // Hardware init is delegated to SerialGpsWrapper::begin():
-  //   - UART1 on Grove pins (RX=1, TX=2), 115200 baud, RX buffer 512 B
+  //   - UART1 on Grove pins (RX=1, TX=2), 115200 baud, RX buffer 2048 B
   //   - UART overflow ISR callback (atomic counter)
   //   - 500 ms AT6668 startup delay
   //   - CASIC $PCAS02,100 command to set 10 Hz update rate
+  //   - $PCAS03 sentence selection (GGA/RMC/DHV only)
+  //   - passive CASIC listener only in the clean production build
   gps_mutex = xSemaphoreCreateMutex();
   setLabel(30, "GPS: init...");
   gpsWrapper.begin();
@@ -1520,20 +1561,31 @@ void loop() {
         gps_snap = shared_gps_data;
         xSemaphoreGive(gps_mutex);
       }
+      uint8_t mqtt_speed_source = GPS_SPD_NMEA_SOG;
       snprintf(buf, sizeof(buf),
                "{\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,"
                "\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,"
                "\"lap\":%d,\"lat\":%.6f,\"lon\":%.6f,"
                "\"spd\":%.1f,\"alt\":%.1f,\"sats\":%d,\"hdop\":%.1f,"
+               "\"gps_fix_us\":%llu,\"gps_epoch\":%lu,"
                "\"kfx\":%.2f,\"kfy\":%.2f,\"kfv\":%.2f,\"kfh\":%.3f,"
-               "\"nav_spd2d\":%.4f,\"nav_s_acc\":%.5f}",
+               "\"nav_spd2d\":%.4f,\"nav_s_acc\":%.5f,"
+               "\"nav_vv\":%u,\"nav_fix_us\":%llu,"
+               "\"dhv_spd2d\":%.4f,\"dhv_fix_us\":%llu,\"spd_src\":%u}",
                local_data.ema_ax, local_data.ema_ay, local_data.ema_az,
                local_data.ema_gx, local_data.ema_gy, local_data.ema_gz, lap_flag,
                gps_snap.lat, gps_snap.lon, gps_snap.sog_kmh, gps_snap.alt_m,
                (int)gps_snap.sats, gps_snap.hdop,
+               (unsigned long long)gps_snap.fix_us,
+               (unsigned long)gps_snap.epoch,
                local_data.kf_x, local_data.kf_y,
                local_data.kf_vel, local_data.kf_heading,
-               gps_snap.nav_speed2d, gps_snap.nav_s_acc);
+               gps_snap.nav_speed2d, gps_snap.nav_s_acc,
+               (unsigned)gps_snap.nav_vel_valid,
+               (unsigned long long)gps_snap.nav_fix_us,
+               gps_snap.dhv_gdspd,
+               (unsigned long long)gps_snap.dhv_fix_us,
+               (unsigned)mqtt_speed_source);
       if (!mqttClient.publish(cfg_mqtt_topic, buf)) {
         reconnect_network();
       }
