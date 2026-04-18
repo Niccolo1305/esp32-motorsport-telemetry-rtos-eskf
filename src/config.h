@@ -5,7 +5,11 @@
 #include <math.h>
 
 // ── Firmware ────────────────────────────────────────────────────────────────
+#ifdef USE_BMI270
+const char *const FIRMWARE_VERSION = "v1.6.0-atoms3r";
+#else
 const char *const FIRMWARE_VERSION = "v1.5.2-clean";
+#endif
 
 // ── Timing and Sampling ────────────────────────────────────────────────────
 const float FREQ_HZ = 50.0f;           // Core system sampling frequency (IMU + ESKF)
@@ -30,8 +34,18 @@ static constexpr int VAR_BUF_SIZE = 50;                      // 1 s of samples a
 // Variance thresholds for raw gyro (post-rotation, pre-EMA).
 // Raw MEMS noise is higher than EMA-smoothed: starting estimates,
 // tune empirically from stationary recordings (raw_gx/gy/gz in SD log).
+#ifdef USE_BMI270
+// BMI270 ZARU thresholds — CONSERVATIVE STARTING VALUES.
+// MUST be retuned after >=120s stationary recording on the actual sensor unit.
+// BMI270 gyro noise density: 7 mdps/√Hz (datasheet), but actual BW depends on
+// M5Unified config blob (not inspectable). Expected stationary variance ~0.001 (dps)².
+static constexpr float VAR_STILLNESS_GZ_THRESHOLD  = 0.05f;  // [(deg/s)^2]
+static constexpr float VAR_STILLNESS_GXY_THRESHOLD = 0.08f;  // [(deg/s)^2]
+#else
+// MPU-6886 ZARU thresholds (tuned empirically from stationary recordings)
 static constexpr float VAR_STILLNESS_GZ_THRESHOLD  = 0.25f;  // [(deg/s)^2] gz raw variance at rest
 static constexpr float VAR_STILLNESS_GXY_THRESHOLD = 0.35f;  // [(deg/s)^2] gx/gy raw variance (higher: chassis vibration couples into roll/pitch)
+#endif
 static constexpr float ZUPT_GPS_MAX_KMH = 2.0f;              // [km/h] GPS speed threshold
 static constexpr int SD_FLUSH_EVERY = 50;                     // flush interval: 1 s at 50 Hz
 
@@ -67,16 +81,27 @@ static constexpr float VGPL_BETA_FLOOR = 0.005f;        // minimum beta (never f
 // ── WiFi ───────────────────────────────────────────────────────────────────
 static constexpr int MAX_WIFI_NETWORKS = 2;
 
-// ── GPS Hardware (AtomS3 Grove) ────────────────────────────────────────────
-#define GPS_RX_PIN 1      // Grove: module TX → MCU RX (confirmed by hardware test)
-#define GPS_TX_PIN 2      // Grove: module RX → MCU TX (confirmed by hardware test)
+#ifdef USE_BMI270
+// ── AtomS3R GPIO ── TO VERIFY ON HARDWARE ──────────────────────────────────
+// Best-guess from schematic Sch_M5_AtomS3R_v0.4.1. NOT confirmed.
+// M5Unified handles IMU I2C internally (SDA=45, SCL=0) — no Wire.begin needed.
+#define GPS_RX_PIN 1      // TODO: verify Grove connector mapping on AtomS3R
+#define GPS_TX_PIN 2      // TODO: verify
+#define GPS_BAUD   115200
+#define SCK_PIN  7        // TODO: verify SPI connector on AtomS3R
+#define MISO_PIN 8        // TODO: verify
+#define MOSI_PIN 6        // TODO: verify
+#define CS_PIN   5        // TODO: verify
+#else
+// ── AtomS3 GPIO (verified by hardware test) ────────────────────────────────
+#define GPS_RX_PIN 1      // Grove: module TX → MCU RX
+#define GPS_TX_PIN 2      // Grove: module RX → MCU TX
 #define GPS_BAUD   115200 // ATGM336H-6N ships at 115200 (non-standard, not 9600)
-
-// ── Micro SD SPI Pins ──────────────────────────────────────────────────────
 #define SCK_PIN  7
 #define MISO_PIN 8
 #define MOSI_PIN 6
 #define CS_PIN   5 // If the card is not detected, try 38
+#endif
 
 // ── Ellipsoidal Calibration (Tumble Test) ──────────────────────────────────
 // ⚠️ DEFAULT UNCALIBRATED STATE
@@ -101,7 +126,17 @@ const float CALIB_W[3][3] = {
     {0.0f, 0.0f, 1.0f}
 };
 */
-// EXAMPLE OF A CALIBRATED SET (From the author's specific MPU-6886 unit)
+#ifdef USE_BMI270
+// BMI270: UNCALIBRATED — perform tumble test on this specific unit to populate.
+// See Docs/AtomS3R_Migration_Guide.md §7 for the calibration procedure.
+const float CALIB_B[3] = { 0.0f, 0.0f, 0.0f };
+const float CALIB_W[3][3] = {
+    {1.0f, 0.0f, 0.0f},
+    {0.0f, 1.0f, 0.0f},
+    {0.0f, 0.0f, 1.0f}
+};
+#else
+// MPU-6886 calibrated (author's specific unit).
 // Result: σ(‖a‖) 0.042 g → 0.023 g (−45.6 %)
 // AZ bias = −0.065 g corrects the anomaly identified in pendulum tests.
 const float CALIB_B[3] = { -0.00125f, +0.00429f, -0.06491f };
@@ -111,3 +146,21 @@ const float CALIB_W[3][3] = {
     {-0.000511f, +1.000989f, -0.000132f},
     {-0.001575f, -0.000132f, +1.003466f}
 };
+#endif
+
+#ifdef USE_BMI270
+// ── Magnetometer Calibration Placeholder (BMM150 via M5Unified) ───────────
+// Formula: m_cal = MAG_W * (m_raw - MAG_B)
+// PLACEHOLDER: identity W, zero B — raw pass-through.
+// This does NOT replace BMM150 Bosch trim compensation (missing in M5Unified)
+// and does NOT enable magnetic heading or 9-DOF fusion.
+// Purpose: offline empirical ellipsoid fit will populate these matrices,
+// absorbing both M5Unified conversion artifacts and installation distortion.
+// Input/output units: M5Unified raw (arbitrary, AK8963-scaled).
+const float MAG_B[3] = { 0.0f, 0.0f, 0.0f };
+const float MAG_W[3][3] = {
+    {1.0f, 0.0f, 0.0f},
+    {0.0f, 1.0f, 0.0f},
+    {0.0f, 0.0f, 1.0f}
+};
+#endif

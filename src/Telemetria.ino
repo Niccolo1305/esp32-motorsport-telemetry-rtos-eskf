@@ -189,6 +189,36 @@
 //   |
 // ==============================================================================================
 //
+// v1.6.0 - AtomS3R HAL-First Bring-Up (BMI270 + BMM150)
+//   - [HAL] Adds a dual-build target for M5Stack AtomS3R while preserving the
+//     production AtomS3 path unchanged.
+//   - [HAL] Introduces `Bmi270Provider` as a thin IMU HAL adapter over
+//     `M5Unified` for AtomS3R. No hybrid `Wire` + `M5.Imu` ownership.
+//   - [HAL] Keeps `IImuProvider` as the only acquisition interface seen by the
+//     pipeline. Task_Filter remains decoupled from Bosch/M5Unified details.
+//   - [DATA] Extends `ImuRawData` unconditionally with `mx/my/mz` + `mag_valid`
+//     so the FreeRTOS queue layout remains identical across build variants.
+//   - [LOG] Adds an AtomS3R-only `215 B` SD record format (`202 B + 3 float mag
+//     + 1 uint8_t mag_valid`) while keeping AtomS3 at `202 B`.
+//   - [LOG] Magnetometer channels are appended to the end of `TelemetryRecord`
+//     to preserve backward compatibility of legacy fields and calibration sentinels.
+//   - [MAG] Logs BMM150 data as `raw/arbitrary` M5Unified backend output rather
+//     than physical uT. This release does NOT provide Bosch trim compensation,
+//     magnetic heading, or 9-DOF fusion.
+//   - [MAG] Adds placeholder `MAG_B` / `MAG_W` matrices for future offline
+//     empirical ellipsoid fitting on AtomS3R hardware.
+//   - [CAL] Resets accelerometer ellipsoidal calibration to identity for BMI270
+//     builds. A dedicated tumble test is required for the new chip.
+//   - [ZARU] Adds conditional stillness thresholds for BMI270 as conservative
+//     starting values. Final thresholds must be re-tuned from stationary logs.
+//   - [CFG] Adds `m5stack-atoms3r` PlatformIO environment with PSRAM settings and
+//     `-DUSE_BMI270` build flag.
+//   - [TOOLS] Updates `bin_to_csv.py` and `motec_exporter.py` to parse/export the
+//     new `215 B` record format, including magnetometer channels.
+//   - [NOTE] `Bmi270Provider::verifyConfig()` is a functional backend check only:
+//     it does not prove BMI270/BMM150 FSR, DLPF, ODR, or magnetometer semantics.
+//     Those remain part of hardware bring-up and post-flash characterization.
+//
 // ==========================================================
 // --- PATCH NOTES ---
 // ==========================================================
@@ -1107,7 +1137,11 @@
 #include "filter_task.h"
 #include "gps_task.h"
 #include "SerialGpsWrapper.h"
+#ifdef USE_BMI270
+#include "Bmi270Provider.h"
+#else
 #include "Mpu6886Provider.h"
+#endif
 #include "sd_writer.h"
 
 // GPS hardware wrapper — static lifetime required (onReceiveError lambda captures this).
@@ -1115,8 +1149,13 @@
 static SerialGpsWrapper gpsWrapper(1, GPS_BAUD, GPS_RX_PIN, GPS_TX_PIN);
 
 // IMU hardware wrapper — static lifetime (same pattern as gpsWrapper).
-// Encapsulates Wire.begin, FSR verification, DLPF config, and M5.Imu readout.
+#ifdef USE_BMI270
+// AtomS3R: BMI270+BMM150 via M5Unified HAL (no direct Wire access).
+static Bmi270Provider imuProvider;
+#else
+// AtomS3: MPU-6886 via Wire.begin + M5.Imu readout.
 static Mpu6886Provider imuProvider;
+#endif
 
 // ==========================================================
 // --- SETUP ---

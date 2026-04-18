@@ -48,6 +48,7 @@ from datetime import datetime
 #                            122 B  total
 
 HEADER_MAGIC  = b'TEL'
+RECORD_FMT_215 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3fB'  # 215-byte record (v1.6.0+, + magnetometer)
 RECORD_FMT_202 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ'  # 202-byte record (v1.5.1+, + DHV speed/timestamp)
 RECORD_FMT_190 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQ'  # 190-byte record (v1.5.0+, + NAV-PV velocity)
 RECORD_FMT_164 = '<Q7fBddffBf4f6f5fBf6fQB'  # 164-byte record (v1.4.2+, + GPS timing metadata)
@@ -55,6 +56,7 @@ RECORD_FMT_155 = '<Q7fBddffBf4f6f5fBf6f'  # 155-byte record (v1.4.0, uint64 ts +
 RECORD_FMT_127 = '<I7fBddffBf4f6f5fBf'  # 127-byte record (v1.3.1+, + zaru_flags + tbias_gz)
 RECORD_FMT_122 = '<I7fBddffBf4f6f5f'  # 122-byte record (v0.9.8+, raw IMU + 6D)
 RECORD_FMT_78  = '<I7fBddffBf4f'       # 78-byte record (v0.8.0–v0.9.7, EMA only)
+RECORD_SIZE_215 = struct.calcsize(RECORD_FMT_215)
 RECORD_SIZE_202 = struct.calcsize(RECORD_FMT_202)
 RECORD_SIZE_190 = struct.calcsize(RECORD_FMT_190)
 RECORD_SIZE_164 = struct.calcsize(RECORD_FMT_164)
@@ -81,6 +83,8 @@ FIELD_NAMES_202 = [
     'nav_vel_valid', 'gps_speed_source', 'nav_fix_us',
     'dhv_gdspd', 'dhv_fix_us',
 ]
+
+FIELD_NAMES_215 = FIELD_NAMES_202 + ['mag_mx', 'mag_my', 'mag_mz', 'mag_valid']
 
 FIELD_NAMES_190 = [
     't_us',
@@ -226,7 +230,11 @@ def read_bin(path):
         fw_version  = 'unknown'
         print(f'        No FileHeader (legacy file) — assuming {record_size}B record size')
 
-    if record_size == RECORD_SIZE_202:
+    if record_size == RECORD_SIZE_215:
+        fmt        = RECORD_FMT_215
+        fields     = FIELD_NAMES_215
+        has_raw    = True
+    elif record_size == RECORD_SIZE_202:
         fmt        = RECORD_FMT_202
         fields     = FIELD_NAMES_202
         has_raw    = True
@@ -468,6 +476,9 @@ def export_motec_ld(records, has_raw, output_path, venue, fw_version, input_name
         ('GPS Speed (nav)', 'NavSpd',  'm/s',   10,  lambda r: float(r.get('nav_speed2d', 0.0))),
         ('GPS Speed Acc',  'SpdAcc',  'm/s',  10, lambda r: float(r.get('nav_s_acc', 0.0))),
         ('Sensor Temp',    'Temp',    'C',     50,  lambda r: r.get('temp_c', 0.0)),
+        ('Mag X',          'MagX',    'raw',   10,  lambda r: float(r.get('mag_mx', 0.0))),
+        ('Mag Y',          'MagY',    'raw',   10,  lambda r: float(r.get('mag_my', 0.0))),
+        ('Mag Z',          'MagZ',    'raw',   10,  lambda r: float(r.get('mag_mz', 0.0))),
     ]
     # Index reference for summary (GPS Latitude is at index 7)
     GPS_LAT_IDX = 7
@@ -488,7 +499,9 @@ def export_motec_ld(records, has_raw, output_path, venue, fw_version, input_name
     print(f'[MoTeC] Exported: {output_path}')
     print(f'        Format:     native MoTeC .ld (i2 Pro)')
     print(f'        Samples:    {n} @ 50Hz  ({duration_s:.1f}s)')
-    print(f'        Channels:   {len(channels_def)}  (8@50Hz + 4@10Hz)')
+    n50 = sum(1 for c in channels_def if c[3] == 50)
+    n10 = sum(1 for c in channels_def if c[3] == 10)
+    print(f'        Channels:   {len(channels_def)}  ({n50}@50Hz + {n10}@10Hz)')
     print(f'        GPS fixes:  {gps_fix_count} @ 10Hz')
     print(f'        Max speed:  {max_speed:.1f} km/h')
     print(f'        File size:  {file_size / 1024:.1f} KB')

@@ -651,6 +651,19 @@ void Task_Filter(void *pvParameters) {
         rec.nav_fix_us      = last_gps.nav_fix_us;
         rec.dhv_gdspd       = last_gps.dhv_gdspd;
         rec.dhv_fix_us      = last_gps.dhv_fix_us;
+#ifdef USE_BMI270
+        // Magnetometer: apply hard/soft-iron calibration (identity pass-through for now).
+        // MAG_W, MAG_B defined in config.h. Units: M5Unified raw (arbitrary).
+        {
+          float bx = data.mx - MAG_B[0];
+          float by = data.my - MAG_B[1];
+          float bz = data.mz - MAG_B[2];
+          rec.mag_mx = MAG_W[0][0]*bx + MAG_W[0][1]*by + MAG_W[0][2]*bz;
+          rec.mag_my = MAG_W[1][0]*bx + MAG_W[1][1]*by + MAG_W[1][2]*bz;
+          rec.mag_mz = MAG_W[2][0]*bx + MAG_W[2][1]*by + MAG_W[2][2]*bz;
+        }
+        rec.mag_valid = data.mag_valid ? 1 : 0;
+#endif
         xQueueSend(sd_queue, &rec, 0); // timeout=0: discard if queue full
       }
     }

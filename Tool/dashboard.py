@@ -161,7 +161,7 @@ def load_and_prepare(path: str) -> pd.DataFrame:
       2. Computes elapsed time in seconds (``t_s``).
       3. Integrates ``abs(velocity)`` over time to produce a monotonic
          ``distance_m`` column (avoids gaps from negative velocity readings).
-      4. Creates short-name acceleration aliases (``ax_g``, ``ay_g``, …) used
+      4. Creates short-name acceleration aliases (``ax_g``, ``ay_g``, ...) used
          throughout the figure builders.
       5. Computes 2-D acceleration magnitude for the Grip overlay.
       6. Converts Kalman-filter ENU coordinates to WGS-84 for map display.
@@ -176,65 +176,113 @@ def load_and_prepare(path: str) -> pd.DataFrame:
         FileNotFoundError: If *path* does not exist.
         KeyError: If required columns are missing after the rename step.
     """
+    numeric_cols = set(REQUIRED_COLS)
+
     try:
-        df = pd.read_csv(path, encoding='utf-8')
+        df = pd.read_csv(path, encoding="utf-8-sig", comment="#")
     except UnicodeDecodeError:
-        df = pd.read_csv(path, encoding='latin1')
+        try:
+            df = pd.read_csv(path, encoding="utf-8", comment="#")
+        except UnicodeDecodeError:
+            df = pd.read_csv(path, encoding="latin1", comment="#")
 
-    # Rename legacy column names to the canonical format (idempotent)
-    existing_old = {k: v for k, v in COL_MAP.items()
-                    if k in df.columns and v not in df.columns}
-    if existing_old:
-        df.rename(columns=existing_old, inplace=True)
+    df.columns = df.columns.str.strip()
 
-    # Normalize timestamp column: v1.4.0 uses t_us, older uses t_ms
-    if "t_us (µs)" in df.columns and "t_ms (ms)" not in df.columns:
-        df["t_ms (ms)"] = df["t_us (µs)"] / 1000.0  # backwards-compat alias
+    # Normalize column names from legacy schemas and tolerate unit mojibake.
+    rename_map = {}
+    for col in df.columns:
+        base_name = col.split(" (", 1)[0].strip()
+        canonical = COL_MAP.get(base_name)
+        if canonical is not None and col != canonical and canonical not in df.columns:
+            rename_map[col] = canonical
+    if rename_map:
+        df.rename(columns=rename_map, inplace=True)
+
+    # Rebuild the exact canonical labels expected by the dashboard even if the
+    # CSV units were saved with a different codepage.
+    for canonical in REQUIRED_COLS:
+        if canonical in df.columns:
+            continue
+        base_name = canonical.split(" (", 1)[0].strip()
+        actual = next((c for c in df.columns
+                       if c.split(" (", 1)[0].strip() == base_name), None)
+        if actual is not None:
+            df[canonical] = df[actual]
+
+    t_us_col = next((c for c in df.columns
+                     if c.split(" (", 1)[0].strip() == "t_us"), None)
+    t_ms_col = next((c for c in df.columns
+                     if c.split(" (", 1)[0].strip() == "t_ms"), None)
+    gz_col = next((c for c in df.columns
+                   if c.split(" (", 1)[0].strip() == "gz"), None)
+    gx_col = next((c for c in df.columns
+                   if c.split(" (", 1)[0].strip() == "gx"), None)
+    raw_gz_col = next((c for c in df.columns
+                       if c.split(" (", 1)[0].strip() == "raw_gz"), None)
+    raw_gx_col = next((c for c in df.columns
+                       if c.split(" (", 1)[0].strip() == "raw_gx"), None)
+    if t_us_col is not None:
+        numeric_cols.add(t_us_col)
+    if t_ms_col is not None:
+        numeric_cols.add(t_ms_col)
+
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    ts_col = t_us_col or t_ms_col
+    if ts_col is None:
+        raise KeyError("Missing timestamp column: expected t_us/t_ms")
+    df = df[df[ts_col].notna()].copy()
+
+    # Normalize timestamp column: v1.4.0 uses t_us, older uses t_ms.
+    if t_us_col is not None and t_ms_col is None:
+        df["t_ms (ms)"] = df[t_us_col] / 1000.0
+        t_ms_col = "t_ms (ms)"
 
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
         raise KeyError(
-            f"Missing columns — wrong CSV format or firmware version < v0.9?\n"
+            "Missing columns - wrong CSV format or firmware version < v0.9?\n"
             f"  Missing: {missing}"
         )
 
-    # Elapsed time in seconds (origin-normalized)
-    if "t_us (µs)" in df.columns:
-        df["t_s"] = (df["t_us (µs)"] - df["t_us (µs)"].iloc[0]) / 1_000_000.0
+    # Elapsed time in seconds (origin-normalized).
+    if t_us_col is not None:
+        df["t_s"] = (df[t_us_col] - df[t_us_col].iloc[0]) / 1_000_000.0
     else:
-        df["t_s"] = (df["t_ms (ms)"] - df["t_ms (ms)"].iloc[0]) / 1000.0
+        df["t_s"] = (df[t_ms_col] - df[t_ms_col].iloc[0]) / 1000.0
 
-    # Cumulative distance via abs(velocity) integration (gap-free)
+    # Cumulative distance via abs(velocity) integration (gap-free).
     dt = np.diff(df["t_s"].values, prepend=df["t_s"].values[0])
     dt[0] = 0.0
     df["distance_m"] = np.cumsum(np.abs(df["kf_vel (m/s)"].values) * dt)
 
-    # Short-name acceleration aliases for internal use
-    df["ax_g"]      = df["ax (G)"]
-    df["ay_g"]      = df["ay (G)"]
-    df["az_g"]      = df["az (G)"]
-    df["raw_ax_g"]  = df["raw_ax (G)"]
-    df["raw_ay_g"]  = df["raw_ay (G)"]
-    df["raw_az_g"]  = df["raw_az (G)"]
+    # Short-name acceleration aliases for internal use.
+    df["ax_g"] = df["ax (G)"]
+    df["ay_g"] = df["ay (G)"]
+    df["az_g"] = df["az (G)"]
+    df["raw_ax_g"] = df["raw_ax (G)"]
+    df["raw_ay_g"] = df["raw_ay (G)"]
+    df["raw_az_g"] = df["raw_az (G)"]
 
-    # 2-D acceleration magnitude (lateral + longitudinal) → Grip metric
-    df["acc_mag"]     = np.sqrt(df["ax_g"] ** 2 + df["ay_g"] ** 2)
+    # 2-D acceleration magnitude (lateral + longitudinal) -> Grip metric.
+    df["acc_mag"] = np.sqrt(df["ax_g"] ** 2 + df["ay_g"] ** 2)
     df["raw_acc_mag"] = np.sqrt(df["raw_ax_g"] ** 2 + df["raw_ay_g"] ** 2)
 
-    # Velocity in km/h (from Kalman-filter m/s output)
+    # Velocity in km/h (from Kalman-filter m/s output).
     df["vel_kmh"] = df["kf_vel (m/s)"] * 3.6
 
-    # Gyroscope aliases for Yaw Rate / Roll Rate builders
-    df["gz_filt"]  = df["gz (°/s)"]
-    df["gx_filt"]  = df["gx (°/s)"]
-    df["gz_raw"]   = df["raw_gz (°/s)"]
-    df["gx_raw"]   = df["raw_gx (°/s)"]
+    # Gyroscope aliases for Yaw Rate / Roll Rate builders.
+    df["gz_filt"] = df[gz_col]
+    df["gx_filt"] = df[gx_col]
+    df["gz_raw"] = df[raw_gz_col]
+    df["gx_raw"] = df[raw_gx_col]
 
-    # Convert Kalman-filter ENU (x, y) → WGS-84 (lat, lon)
+    # Convert Kalman-filter ENU (x, y) -> WGS-84 (lat, lon).
     df = _convert_kf_to_wgs84(df)
     df.reset_index(drop=True, inplace=True)
     return df
-
 
 def _convert_kf_to_wgs84(df: pd.DataFrame) -> pd.DataFrame:
     """Project Kalman-filter (x, y) ENU metres back to WGS-84 latitude/longitude.

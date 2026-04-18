@@ -56,8 +56,12 @@ enum GpsSpeedSource : uint8_t {
 //   uint64_t nav_fix_us    8 bytes  - esp_timer when passive NAV-PV was parsed [us]
 //   float dhv_gdspd        4 bytes  - NMEA DHV receiver-reported ground speed [m/s]
 //   uint64_t dhv_fix_us    8 bytes  - esp_timer when DHV was parsed [us]
+//   --- v1.6.0 AtomS3R (USE_BMI270) additions: 13 bytes → 215 total ---
+//   float mag_mx/my/mz    12 bytes  - magnetometer [M5Unified raw, arbitrary units]
+//   uint8_t mag_valid       1 byte  - getMag() return value (read success, not freshness)
 //
-// Python read: struct.unpack('<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ', chunk_202_byte)
+// Python read (202B): struct.unpack('<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ', chunk)
+// Python read (215B): struct.unpack('<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3fB', chunk)
 struct __attribute__((packed)) TelemetryRecord {
   uint64_t timestamp_us; // 8
   float ax, ay, az;      // 12
@@ -121,8 +125,22 @@ struct __attribute__((packed)) TelemetryRecord {
 
   float dhv_gdspd;       // 4
   uint64_t dhv_fix_us;   // 8
+
+#ifdef USE_BMI270
+  // Magnetometer data — appended to preserve backward compatibility with 202B records.
+  // Units: M5Unified raw output (arbitrary, AK8963-scaled, uncompensated).
+  // MAG_W/MAG_B calibration (config.h) does NOT replace BMM150 Bosch trim compensation
+  // and does NOT enable magnetic heading or 9-DOF fusion in this release.
+  // Python read (215B): struct.unpack('<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3fB', chunk)
+  float mag_mx, mag_my, mag_mz;  // 12 — calibrated via MAG_W/MAG_B (identity placeholder)
+  uint8_t mag_valid;              //  1 — M5Unified getMag() return value (read success, NOT freshness)
+#endif
 };
+#ifdef USE_BMI270
+static_assert(sizeof(TelemetryRecord) == 215, "TelemetryRecord must be 215 bytes (BMI270+BMM150)");
+#else
 static_assert(sizeof(TelemetryRecord) == 202, "TelemetryRecord must be 202 bytes");
+#endif
 
 // File header written once at the start of every .bin file.
 // Magic "TEL" lets Python tools distinguish modern files from legacy raw logs.
@@ -141,11 +159,19 @@ static_assert(sizeof(FileHeader) == 66, "FileHeader must be 66 bytes");
 
 // IMU sample forwarded from Task_I2C to Task_Filter.
 // temp_c is captured in the exclusive I2C context to avoid cross-task bus races.
+// NOTE: not packed — actual sizeof depends on compiler alignment.
+// Both builds see the same struct (no #ifdef) to avoid FreeRTOS queue size mismatch.
 struct ImuRawData {
   float ax, ay, az;
   float gx, gy, gz;
   float temp_c;
   uint64_t timestamp_us;
+  // Magnetometer — populated by Bmi270Provider, zero/false for Mpu6886Provider.
+  // Units: M5Unified raw output (arbitrary, AK8963-scaled, NOT compensated µT).
+  // See Docs/AtomS3R_Migration_Guide.md §3 and §6 for the M5Unified BMM150
+  // conversion bug (uses AK8963 factor, no trim register compensation).
+  float mx, my, mz;
+  bool mag_valid;  // M5Unified getMag() return value (read success, NOT freshness)
 };
 
 struct FilteredTelemetry {
