@@ -98,6 +98,10 @@ public:
         M5.Imu.getGyroData(&out.gx, &out.gy, &out.gz);
         out.temp_c = 0.0f;
         M5.Imu.getTemp(&out.temp_c);
+        out.mx = 0.0f;
+        out.my = 0.0f;
+        out.mz = 0.0f;
+        out.mag_valid = false;
         out.timestamp_us = esp_timer_get_time();
     }
 

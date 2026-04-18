@@ -29,6 +29,8 @@ HEADER_V2_SIZE = 26               # v2: record_size is uint16_t (26 bytes)
 HEADER_V3_SIZE = 66               # v3: adds 40 bytes of calibration params
 SENTINEL_CALIB = 0xFFFFFFFFFFFFFFFF  # uint64 max — CalibrationRecord marker
 PROGRESS_EVERY = 5000
+TEXT_ENCODING_WRITE = 'utf-8-sig'
+TEXT_ENCODINGS_READ = ('utf-8-sig', 'utf-8', 'latin1')
 
 # ── Format Registry ──────────────────────────────────────────────────────────
 # 122-byte record (v0.9.8 — v1.3.0)
@@ -140,6 +142,21 @@ COL_FMT_202 = COL_FMT_190 + [
 ]
 assert struct.calcsize(FMT_202) == 202, f"FMT_202 mismatch: {struct.calcsize(FMT_202)}"
 
+# 215-byte record (v1.6.0+): adds magnetometer + validity (AtomS3R / BMI270+BMM150)
+# mag_mx/my/mz: hard/soft-iron calibrated magnetometer
+#   Units: M5Unified raw output (arbitrary, AK8963-scaled, NOT physical µT).
+#   See Docs/AtomS3R_Migration_Guide.md for the M5Unified BMM150 conversion bug.
+# mag_valid: M5Unified getMag() return value (read success, NOT mag-specific freshness).
+FMT_215 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3fB'
+HEADER_215 = HEADER_202 + [
+    'mag_mx (raw)',
+    'mag_my (raw)',
+    'mag_mz (raw)',
+    'mag_valid',
+]
+COL_FMT_215 = COL_FMT_202 + ['{:.3f}', '{:.3f}', '{:.3f}', '{:d}']
+assert struct.calcsize(FMT_215) == 215, f"FMT_215 mismatch: {struct.calcsize(FMT_215)}"
+
 # Default aliases (used for legacy files without header)
 FMT_DEFAULT = FMT_122
 HEADER = HEADER_122
@@ -147,6 +164,8 @@ COL_FMT = COL_FMT_122
 
 def get_format(record_size):
     """Return (struct_fmt, header_list, col_fmt_list) for a given record size."""
+    if record_size == 215:
+        return FMT_215, HEADER_215, COL_FMT_215
     if record_size == 202:
         return FMT_202, HEADER_202, COL_FMT_202
     if record_size == 190:
@@ -161,6 +180,7 @@ def get_format(record_size):
     return FMT_122, HEADER_122, COL_FMT_122
 
 HEADER_LINE = ','.join(HEADER) + '\n'
+CSV_PREAMBLE_LINES = []
 
 # ── ANSI Colors ───────────────────────────────────────────────────────────────
 BOLD  = '\033[1m'
@@ -311,6 +331,72 @@ def read_file_header(bin_path):
         return result, hdr_size
 
 
+def open_text_read(path):
+    """Open a text file with UTF-8 first, then legacy fallback for old CSVs."""
+    last_exc = None
+    for enc in TEXT_ENCODINGS_READ:
+        try:
+            f = open(path, 'r', encoding=enc)
+            f.read(4096)
+            f.seek(0)
+            return f
+        except UnicodeDecodeError as exc:
+            last_exc = exc
+            try:
+                f.close()
+            except Exception:
+                pass
+    if last_exc is not None:
+        raise last_exc
+    return open(path, 'r', encoding='utf-8')
+
+
+def build_csv_preamble_lines(hdr):
+    """Build metadata comment lines that must appear before the CSV header."""
+    lines = []
+    if hdr and 'calibration' in hdr:
+        c = hdr['calibration']
+        lines.append(
+            f"# CALIB_BOOT: sin_phi={c[0]:.5f} cos_phi={c[1]:.5f} "
+            f"sin_theta={c[2]:.5f} cos_theta={c[3]:.5f} "
+            f"bias_ax={c[4]:.5f} bias_ay={c[5]:.5f} bias_az={c[6]:.5f} "
+            f"bias_gx={c[7]:.5f} bias_gy={c[8]:.5f} bias_gz={c[9]:.5f}"
+        )
+    if hdr and hdr.get('record_size', 0) >= 215:
+        lines.append(
+            "# COLUMN_NOTE: mag_valid=1 means M5Unified getMag() returned success "
+            "(backend read status), not magnetometer freshness."
+        )
+    return lines
+
+
+def write_csv_preamble(fobj):
+    """Write metadata comment lines followed by the CSV header."""
+    for line in CSV_PREAMBLE_LINES:
+        fobj.write(line + '\n')
+    fobj.write(HEADER_LINE)
+
+
+def is_csv_comment_line(line):
+    """True for metadata/comment lines embedded in the CSV body."""
+    return line.startswith('#')
+
+
+def read_csv_preamble_and_header(csv_path):
+    """Return (leading_comment_lines, header_line) from an existing CSV file."""
+    preamble = []
+    with open_text_read(csv_path) as f:
+        for raw_line in f:
+            stripped = raw_line.rstrip('\n\r')
+            if not stripped:
+                continue
+            if stripped.startswith('#'):
+                preamble.append(stripped)
+                continue
+            return preamble, stripped + '\n'
+    raise ValueError(f"CSV header not found in {csv_path}")
+
+
 # ── Binary → CSV row conversion ───────────────────────────────────────────────
 
 def bin_record_count(bin_path):
@@ -325,10 +411,6 @@ def bin_to_csv_lines(bin_path, total=None):
     hdr, offset = read_file_header(bin_path)
     chunk_size = hdr['record_size'] if hdr else CHUNK_SIZE_DEFAULT
     fmt, _, col_fmt = get_format(chunk_size)
-    
-    if hdr and 'calibration' in hdr:
-        c = hdr['calibration']
-        yield f"# CALIB_BOOT: sin_phi={c[0]:.5f} cos_phi={c[1]:.5f} sin_theta={c[2]:.5f} cos_theta={c[3]:.5f} bias_ax={c[4]:.5f} bias_ay={c[5]:.5f} bias_az={c[6]:.5f} bias_gx={c[7]:.5f} bias_gy={c[8]:.5f} bias_gz={c[9]:.5f}"
 
     with open(bin_path, 'rb') as f:
         if offset > 0:
@@ -353,29 +435,46 @@ def bin_to_csv_lines(bin_path, total=None):
 
 
 def csv_to_lines(csv_path):
-    """Yield CSV rows (skips header line)."""
-    total = sum(1 for _ in open(csv_path)) - 1
-    with open(csv_path, 'r') as f:
-        f.readline()  # skip header
+    """Yield CSV body lines, preserving inline metadata after the header."""
+    total = count_csv_lines(csv_path)
+    with open_text_read(csv_path) as f:
+        header_seen = False
         count = 0
         for line in f:
             stripped = line.rstrip('\n\r')
+            if not stripped:
+                continue
+            if not header_seen:
+                if stripped.startswith('#'):
+                    continue
+                header_seen = True
+                continue
             if stripped:
                 yield stripped
-                count += 1
-                if count % PROGRESS_EVERY == 0:
+                if not is_csv_comment_line(stripped):
+                    count += 1
+                if count and count % PROGRESS_EVERY == 0:
                     pct = count * 100 // total if total else 0
                     print(f"    Read {count:>10,} / {total:,}  ({pct}%)", end='\r')
     print(f"    Read {count:>10,} / {total:,}  (100%)    ")
 
 
 def count_csv_lines(csv_path):
-    """Count data rows (excluding header)."""
+    """Count non-empty body lines, excluding leading metadata comments and header."""
     count = 0
-    with open(csv_path, 'r') as f:
-        f.readline()  # skip header
-        for _ in f:
-            count += 1
+    with open_text_read(csv_path) as f:
+        header_seen = False
+        for line in f:
+            stripped = line.rstrip('\n\r')
+            if not stripped:
+                continue
+            if not header_seen:
+                if stripped.startswith('#'):
+                    continue
+                header_seen = True
+                continue
+            if not is_csv_comment_line(stripped):
+                count += 1
     return count
 
 
@@ -391,11 +490,12 @@ def write_split_files(lines_gen, base_name, split_fn, description):
     line_count_total = 0
     line_count_part = 0
     file_size_part = 0
-    header_bytes = len(HEADER_LINE.encode('utf-8'))
+    preamble_text = ''.join(line + '\n' for line in CSV_PREAMBLE_LINES)
+    header_bytes = len((preamble_text + HEADER_LINE).encode('utf-8-sig'))
 
     out_path = f"{base_name}_part{part}.csv"
-    fout = open(out_path, 'w')
-    fout.write(HEADER_LINE)
+    fout = open(out_path, 'w', encoding=TEXT_ENCODING_WRITE, newline='\n')
+    write_csv_preamble(fout)
     file_size_part = header_bytes
     files_written = [out_path]
 
@@ -412,15 +512,16 @@ def write_split_files(lines_gen, base_name, split_fn, description):
             part += 1
             line_count_part = 0
             out_path = f"{base_name}_part{part}.csv"
-            fout = open(out_path, 'w')
-            fout.write(HEADER_LINE)
+            fout = open(out_path, 'w', encoding=TEXT_ENCODING_WRITE, newline='\n')
+            write_csv_preamble(fout)
             file_size_part = header_bytes
             files_written.append(out_path)
 
         fout.write(line_data)
         file_size_part += line_bytes
-        line_count_part += 1
-        line_count_total += 1
+        if not is_csv_comment_line(line):
+            line_count_part += 1
+            line_count_total += 1
 
     fout.close()
     size_mb = file_size_part / (1024 * 1024)
@@ -462,11 +563,12 @@ def no_split(lines_gen, out_path):
     """Write everything into a single CSV file."""
     t0 = time.perf_counter()
     count = 0
-    with open(out_path, 'w') as f:
-        f.write(HEADER_LINE)
+    with open(out_path, 'w', encoding=TEXT_ENCODING_WRITE, newline='\n') as f:
+        write_csv_preamble(f)
         for line in lines_gen:
             f.write(line + '\n')
-            count += 1
+            if not is_csv_comment_line(line):
+                count += 1
     elapsed = time.perf_counter() - t0
     size_mb = os.path.getsize(out_path) / (1024 * 1024)
     print(f"\n  {GREEN}✓{RESET} {out_path}: {count:,} rows, {size_mb:.1f} MB ({elapsed:.1f}s)")
@@ -527,7 +629,7 @@ def split_menu(lines_gen_factory, base_name, total_lines, est_csv_mb):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    global HEADER_LINE
+    global HEADER_LINE, CSV_PREAMBLE_LINES
     banner()
 
     # Determine input
@@ -543,6 +645,7 @@ def main():
             print(f"  Firmware: {hdr['firmware_version']}, record_size={hdr['record_size']}B")
             _, hdr_cols, _ = get_format(hdr['record_size'])
             HEADER_LINE = ','.join(hdr_cols) + '\n'
+            CSV_PREAMBLE_LINES = build_csv_preamble_lines(hdr)
         print(f"  Direct conversion: {bin_file} → {csv_file}")
         total = bin_record_count(bin_file)
         no_split(bin_to_csv_lines(bin_file, total), csv_file)
@@ -570,8 +673,10 @@ def main():
             # Update HEADER_LINE for the detected record format
             _, hdr_cols, _ = get_format(hdr['record_size'])
             HEADER_LINE = ','.join(hdr_cols) + '\n'
+            CSV_PREAMBLE_LINES = build_csv_preamble_lines(hdr)
         else:
             print(f"  {DIM}Legacy file (no header) — record_size={CHUNK_SIZE_DEFAULT}B{RESET}")
+            CSV_PREAMBLE_LINES = []
 
         total_lines = bin_record_count(input_file)
         # Estimate CSV size: updated dynamically from the first record
@@ -595,6 +700,7 @@ def main():
     elif ext == '.csv':
         file_mb = os.path.getsize(input_file) / (1024 * 1024)
         print(f"  {BOLD}Input:{RESET} {input_file} ({file_mb:.1f} MB)")
+        CSV_PREAMBLE_LINES, HEADER_LINE = read_csv_preamble_and_header(input_file)
         print(f"  {DIM}Counting rows...{RESET}", end=' ', flush=True)
         total_lines = count_csv_lines(input_file)
         print(f"{total_lines:,} data rows")
