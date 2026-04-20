@@ -30,7 +30,9 @@ from datetime import datetime
 
 # ── Telemetry binary format ───────────────────────────────────────────────────
 # Matches struct TelemetryRecord in Telemetria.ino (__attribute__((packed)))
-# Supported sizes: 127 B (v1.3.1+), 122 B (v0.9.8–v1.3.0), 78 B (v0.8.0–v0.9.7)
+# Supported sizes: 242 B (v1.7.0+ AtomS3R v5 raw/FIFO), 224 B (v1.6.1+ AtomS3R),
+# 215 B legacy AtomS3R, 202 B,
+# 190 B, 164 B, 155 B, 127 B (v1.3.1+), 122 B (v0.9.8-v1.3.0), 78 B (v0.8.0-v0.9.7)
 #
 #   Field order and types (little-endian):
 #   t_ms            uint32    4 B   — IMU hardware timestamp (ms)
@@ -48,7 +50,9 @@ from datetime import datetime
 #                            122 B  total
 
 HEADER_MAGIC  = b'TEL'
-RECORD_FMT_215 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3fB'  # 215-byte record (v1.6.0+, + magnetometer)
+RECORD_FMT_242 = '<Q7fBddffBf4f6f5fBf6h6f3hH3f8BQB4fBBQfQ'  # 242-byte record (v1.7.0+, AtomS3R v5 raw/FIFO)
+RECORD_FMT_224 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3hH3fBB'  # 224-byte record (v1.6.1+, Bosch-direct mag)
+RECORD_FMT_215 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3fB'  # 215-byte record (v1.6.0 legacy, M5Unified mag)
 RECORD_FMT_202 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ'  # 202-byte record (v1.5.1+, + DHV speed/timestamp)
 RECORD_FMT_190 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQ'  # 190-byte record (v1.5.0+, + NAV-PV velocity)
 RECORD_FMT_164 = '<Q7fBddffBf4f6f5fBf6fQB'  # 164-byte record (v1.4.2+, + GPS timing metadata)
@@ -56,6 +60,8 @@ RECORD_FMT_155 = '<Q7fBddffBf4f6f5fBf6f'  # 155-byte record (v1.4.0, uint64 ts +
 RECORD_FMT_127 = '<I7fBddffBf4f6f5fBf'  # 127-byte record (v1.3.1+, + zaru_flags + tbias_gz)
 RECORD_FMT_122 = '<I7fBddffBf4f6f5f'  # 122-byte record (v0.9.8+, raw IMU + 6D)
 RECORD_FMT_78  = '<I7fBddffBf4f'       # 78-byte record (v0.8.0–v0.9.7, EMA only)
+RECORD_SIZE_242 = struct.calcsize(RECORD_FMT_242)
+RECORD_SIZE_224 = struct.calcsize(RECORD_FMT_224)
 RECORD_SIZE_215 = struct.calcsize(RECORD_FMT_215)
 RECORD_SIZE_202 = struct.calcsize(RECORD_FMT_202)
 RECORD_SIZE_190 = struct.calcsize(RECORD_FMT_190)
@@ -84,7 +90,37 @@ FIELD_NAMES_202 = [
     'dhv_gdspd', 'dhv_fix_us',
 ]
 
-FIELD_NAMES_215 = FIELD_NAMES_202 + ['mag_mx', 'mag_my', 'mag_mz', 'mag_valid']
+FIELD_NAMES_215 = FIELD_NAMES_202 + ['mag_mx_legacy', 'mag_my_legacy', 'mag_mz_legacy', 'mag_valid_legacy']
+FIELD_NAMES_242 = [
+    't_us',
+    'ax', 'ay', 'az', 'gx', 'gy', 'gz', 'temp_c',
+    'lap',
+    'gps_lat', 'gps_lon', 'gps_sog_kmh', 'gps_alt_m',
+    'gps_sats', 'gps_hdop',
+    'kf_x', 'kf_y', 'kf_vel', 'kf_heading',
+    'pipe_lin_ax', 'pipe_lin_ay', 'pipe_lin_az',
+    'pipe_body_gx', 'pipe_body_gy', 'pipe_body_gz',
+    'kf6_x', 'kf6_y', 'kf6_vel', 'kf6_heading', 'kf6_bgz',
+    'zaru_flags', 'tbias_gz',
+    'bmi_raw_ax', 'bmi_raw_ay', 'bmi_raw_az',
+    'bmi_raw_gx', 'bmi_raw_gy', 'bmi_raw_gz',
+    'bmi_acc_x_g', 'bmi_acc_y_g', 'bmi_acc_z_g',
+    'bmi_gyr_x_dps', 'bmi_gyr_y_dps', 'bmi_gyr_z_dps',
+    'bmm_raw_x', 'bmm_raw_y', 'bmm_raw_z',
+    'bmm_rhall',
+    'bmm_ut_x', 'bmm_ut_y', 'bmm_ut_z',
+    'mag_valid', 'mag_sample_fresh', 'mag_overflow', 'imu_sample_fresh',
+    'fifo_frames_drained', 'fifo_backlog', 'fifo_overrun', 'reserved0',
+    'gps_fix_us', 'gps_valid',
+    'nav_speed2d', 'nav_s_acc', 'nav_vel_n', 'nav_vel_e',
+    'nav_vel_valid', 'gps_speed_source', 'nav_fix_us',
+    'dhv_gdspd', 'dhv_fix_us',
+]
+FIELD_NAMES_224 = FIELD_NAMES_202 + [
+    'mag_raw_x', 'mag_raw_y', 'mag_raw_z', 'mag_rhall',
+    'mag_ut_x', 'mag_ut_y', 'mag_ut_z',
+    'mag_valid', 'mag_fresh',
+]
 
 FIELD_NAMES_190 = [
     't_us',
@@ -192,7 +228,11 @@ def _read_bin_file_header(path):
             return None, 0
         hdr_ver = struct.unpack('<B', hdr_ver_byte)[0]
         
-        if hdr_ver >= 3:
+        if hdr_ver >= 5:
+            rest = f.read(76)  # 80 - 4 already read
+            fw_ver_b, rec_size, start_ms = struct.unpack('<16sHI', rest[:22])
+            data_offset = 80
+        elif hdr_ver >= 3:
             # Header v3 (v1.4.0+): 66 bytes (adds 40 bytes of calibration params)
             rest = f.read(62)  # 66 - 4 already read
             fw_ver_b, rec_size, start_ms = struct.unpack('<16sHI', rest[:22])
@@ -230,7 +270,15 @@ def read_bin(path):
         fw_version  = 'unknown'
         print(f'        No FileHeader (legacy file) — assuming {record_size}B record size')
 
-    if record_size == RECORD_SIZE_215:
+    if record_size == RECORD_SIZE_242:
+        fmt        = RECORD_FMT_242
+        fields     = FIELD_NAMES_242
+        has_raw    = True
+    elif record_size == RECORD_SIZE_224:
+        fmt        = RECORD_FMT_224
+        fields     = FIELD_NAMES_224
+        has_raw    = True
+    elif record_size == RECORD_SIZE_215:
         fmt        = RECORD_FMT_215
         fields     = FIELD_NAMES_215
         has_raw    = True
@@ -295,7 +343,15 @@ def read_csv(path):
     """
     records = []
     with open(path, 'r') as f:
-        raw_headers = f.readline().rstrip('\n').split(',')
+        raw_headers = []
+        for line in f:
+            line = line.rstrip('\n')
+            if not line or line.startswith('#'):
+                continue
+            raw_headers = line.split(',')
+            break
+        if not raw_headers:
+            return records, 'unknown', False
 
         # Strip unit annotations: 'ax (G)' → 'ax', 'gps_lat (°)' → 'gps_lat'
         headers = []
@@ -304,11 +360,11 @@ def read_csv(path):
             paren = h.find(' (')
             headers.append(h[:paren] if paren != -1 else h)
 
-        has_raw = 'raw_ax' in headers
+        has_raw = ('raw_ax' in headers) or ('pipe_lin_ax' in headers)
 
         for line in f:
             line = line.rstrip('\n')
-            if not line:
+            if not line or line.startswith('#'):
                 continue
             parts = line.split(',')
             rec = {}
@@ -451,12 +507,12 @@ def export_motec_ld(records, has_raw, output_path, venue, fw_version, input_name
               '(ax/ay/az, gx/gy/gz).')
         print('         EMA has ~313ms phase delay. For clean data use firmware v0.9.8+.')
 
-    ax_key = 'ax'     if use_ema else 'raw_ax'
-    ay_key = 'ay'     if use_ema else 'raw_ay'
-    az_key = 'az'     if use_ema else 'raw_az'
-    gx_key = 'gx'     if use_ema else 'raw_gx'
-    gy_key = 'gy'     if use_ema else 'raw_gy'
-    gz_key = 'gz'     if use_ema else 'raw_gz'
+    ax_key = 'ax' if use_ema else ('pipe_lin_ax' if 'pipe_lin_ax' in records[0] else 'raw_ax')
+    ay_key = 'ay' if use_ema else ('pipe_lin_ay' if 'pipe_lin_ay' in records[0] else 'raw_ay')
+    az_key = 'az' if use_ema else ('pipe_lin_az' if 'pipe_lin_az' in records[0] else 'raw_az')
+    gx_key = 'gx' if use_ema else ('pipe_body_gx' if 'pipe_body_gx' in records[0] else 'raw_gx')
+    gy_key = 'gy' if use_ema else ('pipe_body_gy' if 'pipe_body_gy' in records[0] else 'raw_gy')
+    gz_key = 'gz' if use_ema else ('pipe_body_gz' if 'pipe_body_gz' in records[0] else 'raw_gz')
 
     channels_def = [
         # (name,           short,     unit,    Hz,  extractor)
@@ -476,9 +532,16 @@ def export_motec_ld(records, has_raw, output_path, venue, fw_version, input_name
         ('GPS Speed (nav)', 'NavSpd',  'm/s',   10,  lambda r: float(r.get('nav_speed2d', 0.0))),
         ('GPS Speed Acc',  'SpdAcc',  'm/s',  10, lambda r: float(r.get('nav_s_acc', 0.0))),
         ('Sensor Temp',    'Temp',    'C',     50,  lambda r: r.get('temp_c', 0.0)),
-        ('Mag X',          'MagX',    'raw',   10,  lambda r: float(r.get('mag_mx', 0.0))),
-        ('Mag Y',          'MagY',    'raw',   10,  lambda r: float(r.get('mag_my', 0.0))),
-        ('Mag Z',          'MagZ',    'raw',   10,  lambda r: float(r.get('mag_mz', 0.0))),
+        ('Mag X Legacy',   'MagXLeg', 'arb',   10,  lambda r: float(r.get('mag_mx_legacy', 0.0))),
+        ('Mag Y Legacy',   'MagYLeg', 'arb',   10,  lambda r: float(r.get('mag_my_legacy', 0.0))),
+        ('Mag Z Legacy',   'MagZLeg', 'arb',   10,  lambda r: float(r.get('mag_mz_legacy', 0.0))),
+        ('Mag Raw X',      'MagRawX', 'LSB',   10,  lambda r: float(r.get('bmm_raw_x', r.get('mag_raw_x', 0.0)))),
+        ('Mag Raw Y',      'MagRawY', 'LSB',   10,  lambda r: float(r.get('bmm_raw_y', r.get('mag_raw_y', 0.0)))),
+        ('Mag Raw Z',      'MagRawZ', 'LSB',   10,  lambda r: float(r.get('bmm_raw_z', r.get('mag_raw_z', 0.0)))),
+        ('Mag RHALL',      'MagHall', 'LSB',   10,  lambda r: float(r.get('bmm_rhall', r.get('mag_rhall', 0.0)))),
+        ('Mag X',          'MagX',    'uT',    10,  lambda r: float(r.get('bmm_ut_x', r.get('mag_ut_x', 0.0)))),
+        ('Mag Y',          'MagY',    'uT',    10,  lambda r: float(r.get('bmm_ut_y', r.get('mag_ut_y', 0.0)))),
+        ('Mag Z',          'MagZ',    'uT',    10,  lambda r: float(r.get('bmm_ut_z', r.get('mag_ut_z', 0.0)))),
     ]
     # Index reference for summary (GPS Latitude is at index 7)
     GPS_LAT_IDX = 7
@@ -541,6 +604,10 @@ def main():
 
     if not has_raw:
         fmt_label = '78B (EMA only)'
+    elif records and 'bmm_ut_x' in records[0]:
+        fmt_label = '242B (v5 raw/FIFO + explicit Bosch acquisition truth)'
+    elif records and 'mag_ut_x' in records[0]:
+        fmt_label = '224B (raw+6D+ZARU+SITL+GPS timing+Bosch mag)'
     elif records and 'gps_fix_us' in records[0]:
         fmt_label = '164B (raw+6D+ZARU+SITL+GPS timing)'
     elif records and 'sensor_ax' in records[0]:

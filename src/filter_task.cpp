@@ -29,6 +29,7 @@
 #include "filter_task.h"
 
 #include "globals.h"
+#include "imu_axis_remap.h"
 #include "math_utils.h"
 
 void Task_Filter(void *pvParameters) {
@@ -141,8 +142,18 @@ void Task_Filter(void *pvParameters) {
           continue; // discard stale IMU sample, start fresh
         }
 
-        // STEP 1: Ellipsoidal calibration (chip native frame)
-        float ax_cal = data.ax, ay_cal = data.ay, az_cal = data.az;
+        // STEP 0.5: explicit chip -> pipeline convention remap.
+        float acc_chip_x = data.bmi_acc_x_g;
+        float acc_chip_y = data.bmi_acc_y_g;
+        float acc_chip_z = data.bmi_acc_z_g;
+        float gyr_chip_x = data.bmi_gyr_x_dps;
+        float gyr_chip_y = data.bmi_gyr_y_dps;
+        float gyr_chip_z = data.bmi_gyr_z_dps;
+        remap_chip_axes_to_pipeline(acc_chip_x, acc_chip_y, acc_chip_z);
+        remap_chip_axes_to_pipeline(gyr_chip_x, gyr_chip_y, gyr_chip_z);
+
+        // STEP 1: Ellipsoidal calibration (pipeline convention input frame)
+        float ax_cal = acc_chip_x, ay_cal = acc_chip_y, az_cal = acc_chip_z;
         apply_ellipsoidal_calibration(ax_cal, ay_cal, az_cal);
 
         // STEP 2: Geometric alignment (vehicle frame)
@@ -160,9 +171,9 @@ void Task_Filter(void *pvParameters) {
         // drift (~0.08 °/s/min on gx/gy, non-thermal) dominates the G-sensitivity
         // signal (~0.5 °/s), making K_gs unreliable. ZARU 3-axis handles both
         // thermal and electronic drift in real-time. See tel_94 validation test.
-        float gx_clean = data.gx - bias_gx;
-        float gy_clean = data.gy - bias_gy;
-        float gz_clean = data.gz - bias_gz;
+        float gx_clean = gyr_chip_x - bias_gx;
+        float gy_clean = gyr_chip_y - bias_gy;
+        float gz_clean = gyr_chip_z - bias_gz;
 
         rotate_3d(gx_clean, gy_clean, gz_clean, gx_r, gy_r, gz_r, cos_phi,
                  sin_phi, cos_theta, sin_theta);
@@ -589,7 +600,7 @@ void Task_Filter(void *pvParameters) {
       // data.temp_c already available from the IMU queue: no extra I2C call.
       // GPS: snapshot already acquired above for the ESKF.
       if (sd_queue != NULL) {
-        TelemetryRecord rec;
+        TelemetryRecord rec = {};
         rec.timestamp_us = data.timestamp_us;
         // EMA accel/gyro: already ZARU-corrected (no "- tb_*" subtraction needed)
         rec.ax = ema_ax;
@@ -612,11 +623,10 @@ void Task_Filter(void *pvParameters) {
         rec.kf_y = eskf.py();
         rec.kf_vel = eskf.speed_ms();
         rec.kf_heading = eskf.heading();
-        // Raw post-Madgwick IMU: bypasses EMA, zero-latency (feeds ESKF via Data Fork)
-        // raw_g* are NOT ZARU-corrected: true uncorrected signal for offline
-        // diagnostics and re-processing. Use gx/gy/gz (EMA) for clean values.
-        rec.raw_ax = lin_ax; rec.raw_ay = lin_ay; rec.raw_az = lin_az;
-        rec.raw_gx = gx_r;   rec.raw_gy = gy_r;   rec.raw_gz = gz_r;
+        // Zero-latency pipeline channels: gravity-removed linear accel and
+        // vehicle-frame gyro before EMA.
+        rec.pipe_lin_ax = lin_ax; rec.pipe_lin_ay = lin_ay; rec.pipe_lin_az = lin_az;
+        rec.pipe_body_gx = gx_r;  rec.pipe_body_gy = gy_r;  rec.pipe_body_gz = gz_r;
         // ESKF 6D Shadow (v0.9.8)
         rec.kf6_x = eskf6.px();
         rec.kf6_y = eskf6.py();
@@ -631,9 +641,43 @@ void Task_Filter(void *pvParameters) {
         if (recalib_marker)      flags |= 0x08; // bit 3: Recalibration
         rec.zaru_flags = flags;
         rec.tbias_gz = tb_gz; // post-ZARU snapshot (consistent with EMA correction)
-        // Sensor-frame raw (SITL, v1.4.0): chip-native, pre-calibration
-        rec.sensor_ax = data.ax;  rec.sensor_ay = data.ay;  rec.sensor_az = data.az;
-        rec.sensor_gx = data.gx;  rec.sensor_gy = data.gy;  rec.sensor_gz = data.gz;
+#ifdef USE_BMI270
+        rec.bmi_raw_ax = data.bmi_raw_ax;
+        rec.bmi_raw_ay = data.bmi_raw_ay;
+        rec.bmi_raw_az = data.bmi_raw_az;
+        rec.bmi_raw_gx = data.bmi_raw_gx;
+        rec.bmi_raw_gy = data.bmi_raw_gy;
+        rec.bmi_raw_gz = data.bmi_raw_gz;
+        rec.bmi_acc_x_g = data.bmi_acc_x_g;
+        rec.bmi_acc_y_g = data.bmi_acc_y_g;
+        rec.bmi_acc_z_g = data.bmi_acc_z_g;
+        rec.bmi_gyr_x_dps = data.bmi_gyr_x_dps;
+        rec.bmi_gyr_y_dps = data.bmi_gyr_y_dps;
+        rec.bmi_gyr_z_dps = data.bmi_gyr_z_dps;
+        rec.bmm_raw_x = data.bmm_raw_x;
+        rec.bmm_raw_y = data.bmm_raw_y;
+        rec.bmm_raw_z = data.bmm_raw_z;
+        rec.bmm_rhall = data.bmm_rhall;
+        rec.bmm_ut_x = data.bmm_ut_x;
+        rec.bmm_ut_y = data.bmm_ut_y;
+        rec.bmm_ut_z = data.bmm_ut_z;
+        rec.mag_valid = data.mag_valid ? 1 : 0;
+        rec.mag_sample_fresh = data.mag_sample_fresh ? 1 : 0;
+        rec.mag_overflow = data.mag_overflow ? 1 : 0;
+        rec.imu_sample_fresh = data.imu_sample_fresh ? 1 : 0;
+        rec.fifo_frames_drained = data.fifo_frames_drained;
+        rec.fifo_backlog = data.fifo_backlog;
+        rec.fifo_overrun = data.fifo_overrun ? 1 : 0;
+        rec.reserved0 = 0;
+#else
+        // Legacy AtomS3 provider-frame channels retained for 202-byte format.
+        rec.sensor_ax = data.bmi_acc_x_g;
+        rec.sensor_ay = data.bmi_acc_y_g;
+        rec.sensor_az = data.bmi_acc_z_g;
+        rec.sensor_gx = data.bmi_gyr_x_dps;
+        rec.sensor_gy = data.bmi_gyr_y_dps;
+        rec.sensor_gz = data.bmi_gyr_z_dps;
+#endif
         // GPS timing metadata (SITL, v1.4.2): enables deterministic offline replay of
         // staleness detection and eskf.correct() gating.
         // fix_us uses same timebase as timestamp_us → (timestamp_us - gps_fix_us) > 5s.
@@ -651,19 +695,6 @@ void Task_Filter(void *pvParameters) {
         rec.nav_fix_us      = last_gps.nav_fix_us;
         rec.dhv_gdspd       = last_gps.dhv_gdspd;
         rec.dhv_fix_us      = last_gps.dhv_fix_us;
-#ifdef USE_BMI270
-        // Magnetometer: apply hard/soft-iron calibration (identity pass-through for now).
-        // MAG_W, MAG_B defined in config.h. Units: M5Unified raw (arbitrary).
-        {
-          float bx = data.mx - MAG_B[0];
-          float by = data.my - MAG_B[1];
-          float bz = data.mz - MAG_B[2];
-          rec.mag_mx = MAG_W[0][0]*bx + MAG_W[0][1]*by + MAG_W[0][2]*bz;
-          rec.mag_my = MAG_W[1][0]*bx + MAG_W[1][1]*by + MAG_W[1][2]*bz;
-          rec.mag_mz = MAG_W[2][0]*bx + MAG_W[2][1]*by + MAG_W[2][2]*bz;
-        }
-        rec.mag_valid = data.mag_valid ? 1 : 0;
-#endif
         xQueueSend(sd_queue, &rec, 0); // timeout=0: discard if queue full
       }
     }

@@ -64,7 +64,7 @@
 //
 //
 // ==============================================================================================
-// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.5.2
+// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.7.0
 // ==============================================================================================
 //
 // Architecture: "End-of-Pipe EMA" + "ZARU-to-Madgwick"
@@ -81,25 +81,28 @@
 // │   |   dt_real_sec = delta(timestamp_us) / 1e6                               │
 // │   |   Guard: if dt <= 0 or dt > 1.0 s -> fallback to DT=0.02 s             │
 // │   |                                                                         │
-// │   | STEP 1: Ellipsoidal Calibration (native chip frame)                     │
+// │   | STEP 1: Axis Convention Remap (chip frame -> pipeline convention)       │
+// │   |   AtomS3R: remap_chip_axes_to_pipeline(a_raw / g_raw); AtomS3: no-op    │
+// │   |                                                                         │
+// │   | STEP 2: Ellipsoidal Calibration (pipeline convention)                   │
 // │   |   a_cal = CALIB_W * (a_raw - CALIB_B)                                  │
 // │   |                                                                         │
-// │   | STEP 2: Geometric Alignment (chip frame -> vehicle frame)               │
+// │   | STEP 3: Geometric Alignment (pipeline convention -> vehicle frame)      │
 // │   |   rotate_3d(a_cal, cos_phi, sin_phi, cos_theta, sin_theta)              │
 // │   |                                                                         │
-// │   | STEP 3: Mounting Bias (residuals post-ellipsoid)                        │
+// │   | STEP 4: Mounting Bias (residuals post-ellipsoid)                        │
 // │   |   a_r = a_r_raw - bias_a{x,y,z}                                        │
 // │   |                                                                         │
-// │   | STEP 4a: Gyroscope — static bias + vehicle frame rotation               │
+// │   | STEP 5a: Gyroscope — static bias + vehicle frame rotation               │
 // │   |   g_clean = g_raw - bias_g{x,y,z}    (boot trimmed-mean bias)           │
 // │   |   rotate_3d(g_clean, ...) -> g_r [deg/s]                                │
 // │   |                                                                         │
-// │   | STEP 4b: ZARU->Rad split (v1.3.5)                                      │
+// │   | STEP 5b: ZARU->Rad split (v1.3.5)                                      │
 // │   |   g_rad_raw = g_r * DEG2RAD           [uncorrected → ESKF 6D shadow]    │
 // │   |   g_rad     = (g_r - thermal_bias) * DEG2RAD  [corrected → Madgwick]    │
 // │   |   thermal_bias from PREVIOUS cycle's ZARU (20ms delay, negligible)      │
 // │   |                                                                         │
-// │   | STEP 5: VGPL Kinematic Compensation (Centripetal + Longitudinal)       │
+// │   | STEP 6: VGPL Kinematic Compensation (Centripetal + Longitudinal)       │
 // │   |   cent_x = -(v_eskf * gz_rad) / G_ACCEL  [lateral, body X axis]        │
 // │   |   long_y = dv_dt / G_ACCEL              [longitudinal, body Y axis]    │
 // │   |   ax_madg = ax_r - cent_x                                              │
@@ -109,7 +112,7 @@
 // │   |   Norm-gate: k_norm = max(0, 1 - |norm-1| / 0.15)                      │
 // │   |   beta_eff = max(0.005, beta * k_norm)  -> never zero, always correcting│
 // │   |                                                                         │
-// │   | STEP 6: Gravity Cancellation via Quaternion                             │
+// │   | STEP 7: Gravity Cancellation via Quaternion                             │
 // │   |   lin_a{x,y,z} = a_r - grav(q)   [g, gravity removed, zero latency]    │
 // │   |                                                                         │
 // │   | Snapshot local_prev_* (EMA globals) + lap_snap                          │
@@ -117,18 +120,18 @@
 //   |
 //   |                          PHASE 2: no mutex
 //   |
-//   | STEP 7: Statistical Engine — RAW variance (3-axis, v1.3.5)
+//   | STEP 8: Statistical Engine — RAW variance (3-axis, v1.3.5)
 //   |   Circular buffer 50 samples (1s at 50Hz) of gz_r/gx_r/gy_r [RAW, not EMA]
 //   |   var_gz/gx/gy = E[x^2] - E[x]^2 (clamped >= 0)
 //   |   mean_gz/gx/gy = buffer means (absolute bias, pre-correction)
 //   |
-//   | STEP 8: GPS Snapshot (gps_mutex, 2ms timeout, static cache)
+//   | STEP 9: GPS Snapshot (gps_mutex, 2ms timeout, static cache)
 //   |   last_gps = shared_gps_data copy
 //   |   NMEA fix path: lat/lon/sog_kmh/alt/sats/hdop + valid/epoch/fix_us
 //   |   NMEA DHV path: dhv_gdspd + dhv_fix_us     [logged for diagnostics only]
 //   |   CASIC NAV-PV path: nav_* fields passive listener only (logged for diagnostics)
 //   |
-//   | STEP 9: GPS Velocity Selection + Stationary Condition (v1.5.2-clean)
+//   | STEP 10: GPS Velocity Selection + Stationary Condition (v1.5.2-clean)
 //   |   gps_speed_used = sog_kmh
 //   |   Source semantics:
 //   |     * sog_kmh   = NMEA RMC receiver-reported Speed Over Ground at 10 Hz
@@ -137,38 +140,38 @@
 //   |   is_stationary = var_gz < 0.25 AND var_gx < 0.35 AND var_gy < 0.35
 //   |                   AND gps_speed_used < 2 km/h AND |mean_gz| < 2.5 deg/s
 //   |
-//   | STEP 10a: Static ZARU
+//   | STEP 11a: Static ZARU
 //   |   If is_stationary: thermal_bias_g{x,y,z} = mean_g{x,y,z} (instant)
 //   |
-//   | STEP 10b: Straight-Line ZARU (v1.3.5)
+//   | STEP 11b: Straight-Line ZARU (v1.3.5)
 //   |   Triple gate, zero latency:
 //   |     gate 1: |lin_ay| < 0.05g                   (no lateral load)
 //   |     gate 2: |gz_r - thermal_bias_gz| < 2.0°/s  (RAW corrected, instant)
 //   |     gate 3: |cog_variation| < 0.10 rad          (COG stable, >15m baseline)
 //   |   thermal_bias += 0.01 * (mean - bias)  [slow EMA learning]
 //   |
-//   | STEP 11a: ESKF 5D Predict (50Hz)
+//   | STEP 12a: ESKF 5D Predict (50Hz)
 //   |   eskf.predict(lin_ax, lin_ay, gz_rad, dt, is_stationary) [ZARU-corrected]
 //   |   ZUPT: if is_stationary, vx=vy=0
 //   |
-//   | STEP 11b: ESKF 6D Predict (shadow, v0.9.8)
+//   | STEP 12b: ESKF 6D Predict (shadow, v0.9.8)
 //   |   eskf6.predict(lin_ax, lin_ay, gz_rad_raw, dt, is_stationary) [uncorrected]
 //   |   If is_stationary: eskf6.correct_bias(gz_rad_raw, 0.001)
 //   |
-//   | STEP 12: NHC — v_lateral=0 pseudo-measurement (v1.3.1, 50Hz)
+//   | STEP 13: NHC — v_lateral=0 pseudo-measurement (v1.3.1, 50Hz)
 //   |   Active: speed > 1.4 m/s AND |lin_ay| < 0.5g; R_nhc = 0.5 (m/s)^2
 //   |
-//   | STEP 13: ESKF Correct (on fresh GPS epoch, ~10Hz)
+//   | STEP 14: ESKF Correct (on fresh GPS epoch, ~10Hz)
 //   |   WGS84 -> ENU, 3-stage sequential (pos/speed/COG), Joseph form
 //   |   Speed stage and COG baseline use gps_speed_used = sog_kmh
 //   |   COG variation feeds back into Straight-Line ZARU gate
 //   |
 //   |                          PHASE 3: end-of-pipe EMA
 //   |
-//   | STEP 14: Thermal bias snapshot (post-ZARU)
+//   | STEP 15: Thermal bias snapshot (post-ZARU)
 //   |   tb_gx/gy/gz = thermal_bias_gx/gy/gz (current cycle's value)
 //   |
-//   | STEP 15: EMA alpha=0.06 (end-of-pipe, v1.3.5)
+//   | STEP 16: EMA alpha=0.06 (end-of-pipe, v1.3.5)
 //   |   ema_a = alpha * lin_a          + (1-alpha) * prev_a
 //   |   ema_g = alpha * (g_r - tb_g)   + (1-alpha) * prev_g  [ZARU-corrected input]
 //   |   -> Display 5Hz, MQTT 10Hz, SD 50Hz
@@ -179,8 +182,8 @@
 //   |
 //   |                          PHASE 5: SD record (no mutex)
 //   |
-//   | 202 bytes (v1.5.2-clean semantics): EMA + Raw + GPS + ESKF 5D + 6D Shadow
-//   |   + ZARU flags (bit 3: recalib) + tbias_gz + sensor-frame raw IMU
+//   | 202 bytes on AtomS3, 242 bytes on AtomS3R: EMA + Raw + GPS + ESKF 5D + 6D Shadow
+//   |   + ZARU flags (bit 3: recalib) + tbias_gz + Bosch-direct acquisition truth
 //   |   + gps_fix_us + gps_valid + gps_sog_kmh
 //   |   + nav_speed2d/nav_s_acc/nav_vel_n/nav_vel_e/nav_vel_valid
 //   |   + gps_speed_source + nav_fix_us + dhv_gdspd + dhv_fix_us
@@ -188,36 +191,6 @@
 //   | → xQueueSend(sd_queue, depth=200) → Task_SD_Writer
 //   |
 // ==============================================================================================
-//
-// v1.6.0 - AtomS3R HAL-First Bring-Up (BMI270 + BMM150)
-//   - [HAL] Adds a dual-build target for M5Stack AtomS3R while preserving the
-//     production AtomS3 path unchanged.
-//   - [HAL] Introduces `Bmi270Provider` as a thin IMU HAL adapter over
-//     `M5Unified` for AtomS3R. No hybrid `Wire` + `M5.Imu` ownership.
-//   - [HAL] Keeps `IImuProvider` as the only acquisition interface seen by the
-//     pipeline. Task_Filter remains decoupled from Bosch/M5Unified details.
-//   - [DATA] Extends `ImuRawData` unconditionally with `mx/my/mz` + `mag_valid`
-//     so the FreeRTOS queue layout remains identical across build variants.
-//   - [LOG] Adds an AtomS3R-only `215 B` SD record format (`202 B + 3 float mag
-//     + 1 uint8_t mag_valid`) while keeping AtomS3 at `202 B`.
-//   - [LOG] Magnetometer channels are appended to the end of `TelemetryRecord`
-//     to preserve backward compatibility of legacy fields and calibration sentinels.
-//   - [MAG] Logs BMM150 data as `raw/arbitrary` M5Unified backend output rather
-//     than physical uT. This release does NOT provide Bosch trim compensation,
-//     magnetic heading, or 9-DOF fusion.
-//   - [MAG] Adds placeholder `MAG_B` / `MAG_W` matrices for future offline
-//     empirical ellipsoid fitting on AtomS3R hardware.
-//   - [CAL] Resets accelerometer ellipsoidal calibration to identity for BMI270
-//     builds. A dedicated tumble test is required for the new chip.
-//   - [ZARU] Adds conditional stillness thresholds for BMI270 as conservative
-//     starting values. Final thresholds must be re-tuned from stationary logs.
-//   - [CFG] Adds `m5stack-atoms3r` PlatformIO environment with PSRAM settings and
-//     `-DUSE_BMI270` build flag.
-//   - [TOOLS] Updates `bin_to_csv.py` and `motec_exporter.py` to parse/export the
-//     new `215 B` record format, including magnetometer channels.
-//   - [NOTE] `Bmi270Provider::verifyConfig()` is a functional backend check only:
-//     it does not prove BMI270/BMM150 FSR, DLPF, ODR, or magnetometer semantics.
-//     Those remain part of hardware bring-up and post-flash characterization.
 //
 // ==========================================================
 // --- PATCH NOTES ---
@@ -984,7 +957,7 @@
 // v1.4.0 — IMU HAL + SITL Raw Data Logging
 //
 //   Two architectural additions: hardware abstraction for the IMU sensor
-//   (mirrors v1.3.3 GPS HAL) and sensor-frame raw data logging for offline
+//   (mirrors v1.3.3 GPS HAL) and provider-frame raw data logging for offline
 //   SITL pipeline reconstruction.
 //
 //   - [ARCH] IMU Hardware Abstraction Layer:
@@ -1003,9 +976,11 @@
 //     (boot + button handler) pass &imuProvider.
 //
 //   - [FEATURE] SITL Raw Data Logging:
-//     6 new sensor-frame float fields (sensor_ax/ay/az/gx/gy/gz) appended to
-//     TelemetryRecord. These are chip-native, pre-calibration, pre-rotation
-//     values from ImuRawData — the earliest point in the pipeline. Combined
+//     6 new provider-frame float fields (sensor_ax/ay/az/gx/gy/gz) appended to
+//     TelemetryRecord. These are pre-calibration, pre-rotation values from
+//     ImuRawData — the earliest point in the pipeline. On AtomS3R the provider
+//     already remaps accel/gyro to the historical board convention, so these
+//     are not strict chip-register axes. Combined
 //     with FileHeader v3 calibration parameters, SITL can reconstruct the
 //     entire pipeline offline for Madgwick/ZARU/ESKF tuning.
 //   - [FEATURE] Timestamp upgrade: uint32_t timestamp_ms → uint64_t
@@ -1122,6 +1097,40 @@
 //     `gps_epoch`, `dhv_*`, `nav_*`, `spd_src`) and drops one-off CASIC debug keys.
 //   - [CLEAN] Reduces MQTT/JSON buffers from 1024 to 512 bytes.
 //
+// v1.6.0 — AtomS3R Bosch-Direct HAL Introduction
+//   - [HAL] AtomS3R gains a dedicated Bosch-direct sensor stack for BMI270 and
+//     BMM150. `M5Unified` remains board/display/power only, with
+//     `cfg.internal_imu = false` so the production IMU path is not owned by M5.
+//   - [HAL] `Bmi270Provider` is introduced for explicit Bosch bring-up on
+//     `M5.In_I2C`, including CHIP_ID/config verification and BMM150 AUX setup.
+//   - [CFG] AtomS3R IMU configuration is made explicit: accel `+-8 g @ 50 Hz`
+//     with Bosch normal/perf filtering, gyro `+-2000 dps @ 50 Hz` with ~20 Hz LPF.
+//   - [MAG] The production path stops using `M5.Imu.getMag()` / M5Unified
+//     scaling. Magnetometer data is acquired only through the BMI270 AUX master.
+//   - [DATA] AtomS3R SD logging moves off the old `215 B` legacy magnetometer
+//     format and introduces the Bosch-direct transitional `224 B` layout with
+//     decoded BMM150 raw values plus compensated magnetic output.
+//   - [TOOLS] Offline tools are updated to keep `202 B` AtomS3 logs readable and
+//     to distinguish `215 B` legacy AtomS3R logs from Bosch-direct AtomS3R logs.
+//
+// v1.7.0 — AtomS3R Raw/FIFO v5 Cleanup
+//   - [HAL] AtomS3R acquisition is refactored into a pure provider model:
+//     BMI270 raw/physical data comes from Bosch FIFO, BMM150 comes from AUX,
+//     and no remap/calibration is applied inside the provider.
+//   - [PIPELINE] The board/pipeline axis convention is now declared explicitly
+//     in the processing path: chip axes are remapped only in calibration and
+//     `Task_Filter`, not at acquisition time.
+//   - [MAG] Boot calibration now captures a static magnetometer reference for
+//     the run (`mag_ref_ut_*`) without subtracting it in the runtime path.
+//   - [DATA] AtomS3R SD logging format becomes `242 B` with `FileHeader v5`:
+//     zero-latency pipeline channels, BMI270 raw + physical channels, BMM150
+//     raw + RHALL + compensated `uT`, and FIFO/mag freshness-overflow flags.
+//   - [TOOLS] Offline tooling now parses `202 B`, `215 B`, transitional `224 B`,
+//     and current `242 B` logs. `sitl_hal` maps `v5` explicitly, while legacy
+//     `Tool/script/*` analyzers fail fast on `v5` instead of mis-parsing it.
+//   - [NOTE] `verifyConfig()` on AtomS3R now means cached bring-up verification,
+//     not a runtime plausibility check.
+//
 // ==========================================================
 
 #include <M5Unified.h>
@@ -1150,7 +1159,7 @@ static SerialGpsWrapper gpsWrapper(1, GPS_BAUD, GPS_RX_PIN, GPS_TX_PIN);
 
 // IMU hardware wrapper — static lifetime (same pattern as gpsWrapper).
 #ifdef USE_BMI270
-// AtomS3R: BMI270+BMM150 via M5Unified HAL (no direct Wire access).
+// AtomS3R: BMI270+BMM150 via Bosch Sensor APIs over M5.In_I2C.
 static Bmi270Provider imuProvider;
 #else
 // AtomS3: MPU-6886 via Wire.begin + M5.Imu readout.
@@ -1163,6 +1172,9 @@ static Mpu6886Provider imuProvider;
 
 void setup() {
   auto cfg = M5.config();
+#ifdef USE_BMI270
+  cfg.internal_imu = false;
+#endif
   M5.begin(cfg);
 
   // ── 1. DISPLAY FIRST ─────────────────────────────────────────────────────
@@ -1184,9 +1196,10 @@ void setup() {
   setLabel(10, "System Init...");
   setLabel(30, "");
 
-  // ── 2. IMU INIT (Wire + FSR verify + DLPF 20 Hz) ─────────────────────────
-  // Delegated to Mpu6886Provider::begin() — encapsulates Wire.begin(38,39),
-  // FSR register readback (0x1B/0x1C), and DLPF configuration (0x1A/0x1D).
+  // IMU bring-up is delegated to the selected provider implementation.
+  // AtomS3: MPU-6886 via direct Wire init + register verification.
+  // AtomS3R: Bosch-direct BMI270/BMM150 init over M5.In_I2C with explicit
+  // range, ODR, LPF, AUX, and chip-ID verification.
   imuProvider.begin();
   if (!imuProvider.verifyConfig()) {
     setLabel(30, "IMU: ERROR!", RED, BLACK);
@@ -1355,12 +1368,16 @@ void setup() {
 
     File newFile = SD.open(current_log_filename, FILE_WRITE);
     if (newFile) {
-      // Write FileHeader (66 bytes, v3) as the first block of the .bin file.
+      // Write FileHeader as the first block of the .bin file.
       // The Python converter detects the "TEL" magic and uses record_size
       // from the header to parse subsequent records.
       FileHeader hdr = {};
       hdr.magic[0] = 0x54; hdr.magic[1] = 0x45; hdr.magic[2] = 0x4C; // "TEL"
+#ifdef USE_BMI270
+      hdr.header_version = 5; // v5: AtomS3R raw/FIFO record format
+#else
       hdr.header_version = 3; // v3: adds boot calibration params for SITL
+#endif
       strncpy(hdr.firmware_version, FIRMWARE_VERSION, sizeof(hdr.firmware_version) - 1);
       hdr.record_size = sizeof(TelemetryRecord);
       hdr.start_time_ms = millis();
@@ -1369,6 +1386,10 @@ void setup() {
       hdr.cal_sin_theta = sin_theta;   hdr.cal_cos_theta = cos_theta;
       hdr.cal_bias_ax = bias_ax;       hdr.cal_bias_ay = bias_ay;       hdr.cal_bias_az = bias_az;
       hdr.cal_bias_gx = bias_gx;       hdr.cal_bias_gy = bias_gy;       hdr.cal_bias_gz = bias_gz;
+      hdr.header_flags = mag_ref_valid ? FILE_HEADER_FLAG_MAG_REF_VALID : 0;
+      hdr.mag_ref_ut_x = mag_ref_ut_x;
+      hdr.mag_ref_ut_y = mag_ref_ut_y;
+      hdr.mag_ref_ut_z = mag_ref_ut_z;
       newFile.write((const uint8_t *)&hdr, sizeof(FileHeader));
       newFile.close();
       Serial.printf("[OK] SD binary file: %s (header %dB + %d bytes/record)\n",

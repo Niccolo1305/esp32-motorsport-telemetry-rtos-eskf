@@ -38,6 +38,8 @@ float sin_phi = 0.0f, cos_phi = 1.0f;
 float sin_theta = 0.0f, cos_theta = 1.0f;
 float bias_gx = 0.0f, bias_gy = 0.0f, bias_gz = 0.0f;
 float bias_ax = 0.0f, bias_ay = 0.0f, bias_az = 0.0f;
+float mag_ref_ut_x = 0.0f, mag_ref_ut_y = 0.0f, mag_ref_ut_z = 0.0f;
+bool mag_ref_valid = false;
 
 // ── EMA Previous Values ────────────────────────────────────────────────────
 float prev_ax = 0.0f, prev_ay = 0.0f, prev_az = 0.0f;

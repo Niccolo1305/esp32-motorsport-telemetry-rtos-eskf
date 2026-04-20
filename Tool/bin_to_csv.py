@@ -2,10 +2,10 @@
 bin_to_csv.py — Binary telemetry → CSV converter with interactive split
 
 Usage:
-  python bin_to_csv.py                      # interactive menu
-  python bin_to_csv.py tel_23.bin            # convert → split menu
-  python bin_to_csv.py tel_23.csv            # split existing CSV
-  python bin_to_csv.py tel_23.bin out.csv    # convert without split
+  python bin_to_csv.py                       # interactive menu
+  python bin_to_csv.py tel_23.bin           # convert → split menu
+  python bin_to_csv.py tel_23.csv           # split existing CSV
+  python bin_to_csv.py tel_23.bin out.csv   # convert without split
 """
 
 import struct
@@ -26,7 +26,8 @@ CHUNK_SIZE_DEFAULT = 122          # record size v0.9.8 (no header, 122 bytes)
 HEADER_MAGIC = b'TEL'             # FileHeader magic bytes (v0.9.7+)
 HEADER_V1_SIZE = 25               # v1: record_size is uint8_t  (25 bytes)
 HEADER_V2_SIZE = 26               # v2: record_size is uint16_t (26 bytes)
-HEADER_V3_SIZE = 66               # v3: adds 40 bytes of calibration params
+HEADER_V3_SIZE = 66               # v3/v4: adds 40 bytes of calibration params
+HEADER_V5_SIZE = 80               # v5: adds header_flags + mag_ref_ut_xyz
 SENTINEL_CALIB = 0xFFFFFFFFFFFFFFFF  # uint64 max — CalibrationRecord marker
 PROGRESS_EVERY = 5000
 TEXT_ENCODING_WRITE = 'utf-8-sig'
@@ -142,20 +143,92 @@ COL_FMT_202 = COL_FMT_190 + [
 ]
 assert struct.calcsize(FMT_202) == 202, f"FMT_202 mismatch: {struct.calcsize(FMT_202)}"
 
-# 215-byte record (v1.6.0+): adds magnetometer + validity (AtomS3R / BMI270+BMM150)
-# mag_mx/my/mz: hard/soft-iron calibrated magnetometer
-#   Units: M5Unified raw output (arbitrary, AK8963-scaled, NOT physical µT).
-#   See Docs/AtomS3R_Migration_Guide.md for the M5Unified BMM150 conversion bug.
-# mag_valid: M5Unified getMag() return value (read success, NOT mag-specific freshness).
+# 215-byte record (v1.6.0 legacy AtomS3R): M5Unified-scaled magnetometer output.
 FMT_215 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3fB'
 HEADER_215 = HEADER_202 + [
-    'mag_mx (raw)',
-    'mag_my (raw)',
-    'mag_mz (raw)',
-    'mag_valid',
+    'mag_mx_legacy (arb)',
+    'mag_my_legacy (arb)',
+    'mag_mz_legacy (arb)',
+    'mag_valid_legacy',
 ]
 COL_FMT_215 = COL_FMT_202 + ['{:.3f}', '{:.3f}', '{:.3f}', '{:d}']
 assert struct.calcsize(FMT_215) == 215, f"FMT_215 mismatch: {struct.calcsize(FMT_215)}"
+
+# 224-byte record (v1.6.1+): Bosch-direct AtomS3R magnetometer fields.
+FMT_224 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3hH3fBB'
+HEADER_224 = HEADER_202 + [
+    'mag_raw_x (LSB)',
+    'mag_raw_y (LSB)',
+    'mag_raw_z (LSB)',
+    'mag_rhall (LSB)',
+    'mag_ut_x (uT)',
+    'mag_ut_y (uT)',
+    'mag_ut_z (uT)',
+    'mag_valid',
+    'mag_fresh',
+]
+COL_FMT_224 = COL_FMT_202 + ['{:d}', '{:d}', '{:d}', '{:d}', '{:.6f}', '{:.6f}', '{:.6f}', '{:d}', '{:d}']
+assert struct.calcsize(FMT_224) == 224, f"FMT_224 mismatch: {struct.calcsize(FMT_224)}"
+
+# 242-byte record (v1.7.0+): AtomS3R v5 raw/FIFO layout with explicit acquisition truth.
+FMT_242 = '<Q7fBddffBf4f6f5fBf6h6f3hH3f8BQB4fBBQfQ'
+HEADER_242 = [
+    't_us (µs)',
+    'ax (G)', 'ay (G)', 'az (G)', 'gx (°/s)', 'gy (°/s)', 'gz (°/s)', 'temp_c (°C)',
+    'lap',
+    'gps_lat (°)', 'gps_lon (°)',
+    'gps_sog_kmh (km/h)', 'gps_alt_m (m)',
+    'gps_sats',
+    'gps_hdop',
+    'kf_x (m)', 'kf_y (m)', 'kf_vel (m/s)', 'kf_heading (rad)',
+    'pipe_lin_ax (G)', 'pipe_lin_ay (G)', 'pipe_lin_az (G)',
+    'pipe_body_gx (°/s)', 'pipe_body_gy (°/s)', 'pipe_body_gz (°/s)',
+    'kf6_x (m)', 'kf6_y (m)', 'kf6_vel (m/s)', 'kf6_heading (rad)', 'kf6_bgz (rad/s)',
+    'zaru_flags', 'tbias_gz (°/s)',
+    'bmi_raw_ax (LSB)', 'bmi_raw_ay (LSB)', 'bmi_raw_az (LSB)',
+    'bmi_raw_gx (LSB)', 'bmi_raw_gy (LSB)', 'bmi_raw_gz (LSB)',
+    'bmi_acc_x_g (G)', 'bmi_acc_y_g (G)', 'bmi_acc_z_g (G)',
+    'bmi_gyr_x_dps (°/s)', 'bmi_gyr_y_dps (°/s)', 'bmi_gyr_z_dps (°/s)',
+    'bmm_raw_x (LSB)', 'bmm_raw_y (LSB)', 'bmm_raw_z (LSB)',
+    'bmm_rhall (LSB)',
+    'bmm_ut_x (uT)', 'bmm_ut_y (uT)', 'bmm_ut_z (uT)',
+    'mag_valid',
+    'mag_sample_fresh',
+    'mag_overflow',
+    'imu_sample_fresh',
+    'fifo_frames_drained',
+    'fifo_backlog',
+    'fifo_overrun',
+    'reserved0',
+    'gps_fix_us (µs)', 'gps_valid',
+    'nav_speed2d (m/s)', 'nav_s_acc (m/s)', 'nav_vel_n (m/s)', 'nav_vel_e (m/s)',
+    'nav_vel_valid', 'gps_speed_source', 'nav_fix_us (µs)',
+    'dhv_gdspd (m/s)', 'dhv_fix_us (µs)',
+]
+COL_FMT_242 = [
+    '{:d}',
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.1f}',
+    '{:d}',
+    '{:.7f}', '{:.7f}',
+    '{:.2f}', '{:.2f}',
+    '{:d}',
+    '{:.2f}',
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}',
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}',
+    '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}', '{:.5f}',
+    '{:d}', '{:.5f}',
+    '{:d}', '{:d}', '{:d}', '{:d}', '{:d}', '{:d}',
+    '{:.6f}', '{:.6f}', '{:.6f}', '{:.6f}', '{:.6f}', '{:.6f}',
+    '{:d}', '{:d}', '{:d}',
+    '{:d}',
+    '{:.6f}', '{:.6f}', '{:.6f}',
+    '{:d}', '{:d}', '{:d}', '{:d}', '{:d}', '{:d}', '{:d}', '{:d}',
+    '{:d}', '{:d}',
+    '{:.5f}', '{:.6f}', '{:.5f}', '{:.5f}',
+    '{:d}', '{:d}', '{:d}',
+    '{:.5f}', '{:d}',
+]
+assert struct.calcsize(FMT_242) == 242, f"FMT_242 mismatch: {struct.calcsize(FMT_242)}"
 
 # Default aliases (used for legacy files without header)
 FMT_DEFAULT = FMT_122
@@ -164,6 +237,10 @@ COL_FMT = COL_FMT_122
 
 def get_format(record_size):
     """Return (struct_fmt, header_list, col_fmt_list) for a given record size."""
+    if record_size == 242:
+        return FMT_242, HEADER_242, COL_FMT_242
+    if record_size == 224:
+        return FMT_224, HEADER_224, COL_FMT_224
     if record_size == 215:
         return FMT_215, HEADER_215, COL_FMT_215
     if record_size == 202:
@@ -279,6 +356,8 @@ def read_file_header(bin_path):
     Supports both header versions:
       v1 (25 bytes): record_size is uint8_t  — firmware <= v0.9.12
       v2 (26 bytes): record_size is uint16_t — firmware >= v0.9.13
+      v3/v4 (66 bytes): adds boot calibration params
+      v5 (80 bytes): adds header_flags + mag_ref_ut_xyz
     The header_version byte (offset 3) determines the layout.
     """
     with open(bin_path, 'rb') as f:
@@ -288,8 +367,19 @@ def read_file_header(bin_path):
 
         hdr_ver = preamble[3]
 
-        if hdr_ver >= 3:
-            # v3: 3s B 16s H I 10f = 3+1+16+2+4+40 = 66 bytes
+        if hdr_ver >= 5:
+            hdr_size = HEADER_V5_SIZE
+            f.seek(0)
+            raw = f.read(hdr_size)
+            if len(raw) < hdr_size:
+                return None, 0
+            parts = struct.unpack('<3sB16sHI10fH3f', raw)
+            magic_, hdr_ver_, fw_ver, rec_size, start_ms = parts[:5]
+            cal_params = parts[5:15]
+            header_flags = parts[15]
+            mag_ref = parts[16:19]
+        elif hdr_ver >= 3:
+            # v3/v4: 3s B 16s H I 10f = 3+1+16+2+4+40 = 66 bytes
             hdr_size = HEADER_V3_SIZE
             f.seek(0)
             raw = f.read(hdr_size)
@@ -298,6 +388,8 @@ def read_file_header(bin_path):
             parts = struct.unpack('<3sB16sHI10f', raw)
             magic_, hdr_ver_, fw_ver, rec_size, start_ms = parts[:5]
             cal_params = parts[5:]  # 10 float: sin_phi..bias_gz
+            header_flags = 0
+            mag_ref = None
         elif hdr_ver >= 2:
             # v2: 3s B 16s H I = 3+1+16+2+4 = 26 bytes
             hdr_size = HEADER_V2_SIZE
@@ -308,6 +400,8 @@ def read_file_header(bin_path):
             magic_, hdr_ver_, fw_ver, rec_size, start_ms = struct.unpack(
                 '<3sB16sHI', raw)
             cal_params = None
+            header_flags = 0
+            mag_ref = None
         else:
             # v1: 3s B 16s B I = 3+1+16+1+4 = 25 bytes
             hdr_size = HEADER_V1_SIZE
@@ -318,6 +412,8 @@ def read_file_header(bin_path):
             magic_, hdr_ver_, fw_ver, rec_size, start_ms = struct.unpack(
                 '<3sB16sBI', raw)
             cal_params = None
+            header_flags = 0
+            mag_ref = None
 
         fw_str = fw_ver.split(b'\x00')[0].decode('ascii', errors='replace')
         result = {
@@ -325,9 +421,12 @@ def read_file_header(bin_path):
             'firmware_version': fw_str,
             'record_size': rec_size,
             'start_time_ms': start_ms,
+            'header_flags': header_flags,
         }
         if cal_params is not None:
             result['calibration'] = cal_params
+        if mag_ref is not None:
+            result['mag_ref_ut'] = mag_ref
         return result, hdr_size
 
 
@@ -362,11 +461,36 @@ def build_csv_preamble_lines(hdr):
             f"bias_ax={c[4]:.5f} bias_ay={c[5]:.5f} bias_az={c[6]:.5f} "
             f"bias_gx={c[7]:.5f} bias_gy={c[8]:.5f} bias_gz={c[9]:.5f}"
         )
-    if hdr and hdr.get('record_size', 0) >= 215:
+    if hdr and hdr.get('record_size', 0) == 215:
         lines.append(
-            "# COLUMN_NOTE: mag_valid=1 means M5Unified getMag() returned success "
-            "(backend read status), not magnetometer freshness."
+            "# COLUMN_NOTE: legacy AtomS3R 215B magnetometer columns are "
+            "M5Unified-scaled arbitrary units, not Bosch-compensated physical uT."
         )
+    if hdr and hdr.get('record_size', 0) == 224:
+        lines.append(
+            "# COLUMN_NOTE: mag_raw_* and mag_rhall are decoded native BMM150 "
+            "register values; mag_ut_* are Bosch-compensated physical outputs in uT."
+        )
+        lines.append(
+            "# COLUMN_NOTE: mag_valid=1 means the compensated reading is valid; "
+            "mag_fresh=1 means the BMI270 AUX interface reported a fresh mag sample."
+        )
+    if hdr and hdr.get('record_size', 0) == 242:
+        lines.append(
+            "# COLUMN_NOTE: v5 AtomS3R schema. pipe_lin_* / pipe_body_* are zero-latency "
+            "pipeline diagnostics; bmi_* / bmm_* are Bosch-direct acquisition truth."
+        )
+        lines.append(
+            "# COLUMN_NOTE: mag_valid=1 means BMM150 compensation succeeded; "
+            "mag_sample_fresh=1 means AUX delivered a fresh sample; mag_overflow/fifo_overrun flag sensor-side issues."
+        )
+        if hdr.get('header_flags', 0) & 0x0001 and 'mag_ref_ut' in hdr:
+            mx, my, mz = hdr['mag_ref_ut']
+            lines.append(
+                f"# MAG_REF_BOOT_UT: mx={mx:.6f} my={my:.6f} mz={mz:.6f}"
+            )
+        else:
+            lines.append("# MAG_REF_BOOT_UT: invalid")
     return lines
 
 
