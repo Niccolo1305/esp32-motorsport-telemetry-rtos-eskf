@@ -1,90 +1,80 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// config.h — Constants, pin definitions, and calibration parameters
+// config.h - Constants, pin definitions, and calibration parameters
 #pragma once
 
 #include <math.h>
 
-// ── Firmware ────────────────────────────────────────────────────────────────
 #ifdef USE_BMI270
-const char *const FIRMWARE_VERSION = "v1.6.0-atoms3r";
+const char *const FIRMWARE_VERSION = "v1.7.0-atoms3r";
 #else
 const char *const FIRMWARE_VERSION = "v1.5.2-clean";
 #endif
 
-// ── Timing and Sampling ────────────────────────────────────────────────────
+// Timing and sampling
 const float FREQ_HZ = 50.0f;           // Core system sampling frequency (IMU + ESKF)
-const float DT = 1.0f / FREQ_HZ;       // Delta Time in seconds
-const int DT_MS = (int)(DT * 1000.0f); // Delta Time in milliseconds for FreeRTOS
+const float DT = 1.0f / FREQ_HZ;       // Delta time in seconds
+const int DT_MS = (int)(DT * 1000.0f); // Delta time in milliseconds for FreeRTOS
 
-// ── Main Loop ──────────────────────────────────────────────────────────────
+// Main loop
 const int LOOP_HZ = 100;
 const int MQTT_10HZ_CYCLES = LOOP_HZ / 10;
 const int DISPLAY_5HZ_CYCLES = LOOP_HZ / 5;
 
-// ── Math ───────────────────────────────────────────────────────────────────
+// Math
 const float DEG2RAD = (float)M_PI / 180.0f;
 
-// ── EMA Filter ─────────────────────────────────────────────────────────────
 // Single EMA on all accel + gyro axes (tau ~313 ms at 50 Hz).
 // Does NOT feed the ESKF (Data Fork): used only for display/MQTT/SD/ZARU.
 const float alpha = 0.06f;
 
-// ── Statistical ZUPT/ZARU Engine ───────────────────────────────────────────
-static constexpr int VAR_BUF_SIZE = 50;                      // 1 s of samples at 50 Hz
+// Statistical ZUPT/ZARU engine
+static constexpr int VAR_BUF_SIZE = 50; // 1 s of samples at 50 Hz
 // Variance thresholds for raw gyro (post-rotation, pre-EMA).
 // Raw MEMS noise is higher than EMA-smoothed: starting estimates,
 // tune empirically from stationary recordings (raw_gx/gy/gz in SD log).
 #ifdef USE_BMI270
-// BMI270 ZARU thresholds — CONSERVATIVE STARTING VALUES.
-// MUST be retuned after >=120s stationary recording on the actual sensor unit.
-// BMI270 gyro noise density: 7 mdps/√Hz (datasheet), but actual BW depends on
-// M5Unified config blob (not inspectable). Expected stationary variance ~0.001 (dps)².
-static constexpr float VAR_STILLNESS_GZ_THRESHOLD  = 0.05f;  // [(deg/s)^2]
-static constexpr float VAR_STILLNESS_GXY_THRESHOLD = 0.08f;  // [(deg/s)^2]
+// BMI270 thresholds for the Bosch-direct 50 Hz / ~20 Hz LPF configuration.
+// Retune from fresh stationary recordings on the actual unit and mount.
+static constexpr float VAR_STILLNESS_GZ_THRESHOLD  = 0.05f; // [(deg/s)^2]
+static constexpr float VAR_STILLNESS_GXY_THRESHOLD = 0.08f; // [(deg/s)^2]
 #else
 // MPU-6886 ZARU thresholds (tuned empirically from stationary recordings)
-static constexpr float VAR_STILLNESS_GZ_THRESHOLD  = 0.25f;  // [(deg/s)^2] gz raw variance at rest
-static constexpr float VAR_STILLNESS_GXY_THRESHOLD = 0.35f;  // [(deg/s)^2] gx/gy raw variance (higher: chassis vibration couples into roll/pitch)
+static constexpr float VAR_STILLNESS_GZ_THRESHOLD  = 0.25f; // [(deg/s)^2]
+static constexpr float VAR_STILLNESS_GXY_THRESHOLD = 0.35f; // [(deg/s)^2]
 #endif
-static constexpr float ZUPT_GPS_MAX_KMH = 2.0f;              // [km/h] GPS speed threshold
-static constexpr int SD_FLUSH_EVERY = 50;                     // flush interval: 1 s at 50 Hz
+static constexpr float ZUPT_GPS_MAX_KMH = 2.0f; // [km/h] GPS speed threshold
+static constexpr int SD_FLUSH_EVERY = 50;       // flush interval: 1 s at 50 Hz
 
-// ── Non-Holonomic Constraint (NHC) ──────────────────────────────────────
-// Lateral velocity pseudo-measurement v_lat = 0 constrains heading drift
-// continuously while the vehicle is in motion. Disabled during extreme
-// lateral dynamics (drifting, aquaplaning) via the lateral-G gate.
-static constexpr float NHC_R = 0.5f;                    // [(m/s)²] lateral vel measurement noise
-static constexpr float NHC_MIN_SPEED_MS = 1.4f;         // ~5 km/h — below this NHC is off
-static constexpr float NHC_MAX_LAT_G = 0.5f;            // [g] disable NHC above this lateral accel
+// Non-holonomic constraint (NHC)
+static constexpr float NHC_R = 0.5f;            // [(m/s)^2] lateral vel measurement noise
+static constexpr float NHC_MIN_SPEED_MS = 1.4f; // ~5 km/h; below this NHC is off
+static constexpr float NHC_MAX_LAT_G = 0.5f;    // [g] disable NHC above this lateral accel
 
-// ── Enhanced Straight-Line ZARU ──────────────────────────────────────────
-// COG-variation gate and gx (roll) bias learning on fast straights.
-// COG is computed over a long baseline (COG_MIN_BASELINE_M) to suppress
-// GPS position noise: σ_COG ≈ σ_pos/baseline ≈ 1.5m/15m = 0.1 rad.
-static constexpr float STRAIGHT_ALPHA = 0.01f;          // EMA alpha for straight-line bias learning
-static constexpr float STRAIGHT_COG_MAX_RAD = 0.10f;    // [rad] ~5.7° max COG change over baseline
-static constexpr float STRAIGHT_MIN_SPEED_KMH = 40.0f;  // min speed for straight detection
-static constexpr float STRAIGHT_MAX_LAT_G = 0.05f;      // [g] max lateral accel (raised for track vibrations)
-static constexpr float COG_MIN_BASELINE_M = 15.0f;      // [m] min displacement for COG computation
+// Enhanced straight-line ZARU
+static constexpr float STRAIGHT_ALPHA = 0.01f;         // EMA alpha for straight-line bias learning
+static constexpr float STRAIGHT_COG_MAX_RAD = 0.10f;   // [rad] ~5.7 deg max COG change over baseline
+static constexpr float STRAIGHT_MIN_SPEED_KMH = 40.0f; // min speed for straight detection
+static constexpr float STRAIGHT_MAX_LAT_G = 0.05f;     // [g] max lateral accel
+static constexpr float COG_MIN_BASELINE_M = 15.0f;     // [m] min displacement for COG computation
 
-// ── Virtual Gravity Plane Lock (VGPL) v1.3.4 ────────────────────────────
-// Centripetal compensation: subtracts estimated centripetal acceleration
-// (v_eskf × gz_rad) from the accelerometer BEFORE feeding Madgwick.
-// This allows beta to remain > 0 at all times, preventing the quaternion
-// drift caused by gyroscope bias integration when beta was forced to 0.
-// Replaces the Dual-Gate Adaptive Beta (v1.1.1) which failed in practice
-// due to MPU-6886 gx/gy electronic bias drift (~0.076 °/s/min).
-static constexpr float VGPL_NORM_GATE = 0.15f;          // [g] residual norm deviation that fully disables beta
-static constexpr float VGPL_RATE_LIMIT = 0.15f;         // [g/sample] max per-cycle change for each compensation channel
-static constexpr float VGPL_BETA_FLOOR = 0.005f;        // minimum beta (never fully zero, slow self-correction)
+// Virtual Gravity Plane Lock (VGPL)
+static constexpr float VGPL_NORM_GATE = 0.15f;   // [g] residual norm deviation that fully disables beta
+static constexpr float VGPL_RATE_LIMIT = 0.15f;  // [g/sample] max per-cycle change for each compensation channel
+static constexpr float VGPL_BETA_FLOOR = 0.005f; // minimum beta (never fully zero)
 
-// ── WiFi ───────────────────────────────────────────────────────────────────
+// WiFi
 static constexpr int MAX_WIFI_NETWORKS = 2;
 
 #ifdef USE_BMI270
-// ── AtomS3R GPIO ── TO VERIFY ON HARDWARE ──────────────────────────────────
-// Best-guess from schematic Sch_M5_AtomS3R_v0.4.1. NOT confirmed.
-// M5Unified handles IMU I2C internally (SDA=45, SCL=0) — no Wire.begin needed.
+// AtomS3R board constants.
+// M5.begin() initializes the internal board I2C bus. The AtomS3R Bosch-direct
+// provider uses M5.In_I2C as the only transport for the internal sensor bus.
+static constexpr int ATOMS3R_IMU_SDA_PIN = 45;
+static constexpr int ATOMS3R_IMU_SCL_PIN = 0;
+static constexpr uint32_t ATOMS3R_IMU_I2C_FREQ = 400000;
+static constexpr uint8_t ATOMS3R_BMI270_ADDR_PRIMARY = 0x69;
+static constexpr uint8_t ATOMS3R_BMI270_ADDR_FALLBACK = 0x68;
+static constexpr uint8_t ATOMS3R_BMM150_ADDR = 0x10;
 #define GPS_RX_PIN 1      // TODO: verify Grove connector mapping on AtomS3R
 #define GPS_TX_PIN 2      // TODO: verify
 #define GPS_BAUD   115200
@@ -93,9 +83,9 @@ static constexpr int MAX_WIFI_NETWORKS = 2;
 #define MOSI_PIN 6        // TODO: verify
 #define CS_PIN   5        // TODO: verify
 #else
-// ── AtomS3 GPIO (verified by hardware test) ────────────────────────────────
-#define GPS_RX_PIN 1      // Grove: module TX → MCU RX
-#define GPS_TX_PIN 2      // Grove: module RX → MCU TX
+// AtomS3 GPIO (verified by hardware test)
+#define GPS_RX_PIN 1      // Grove: module TX -> MCU RX
+#define GPS_TX_PIN 2      // Grove: module RX -> MCU TX
 #define GPS_BAUD   115200 // ATGM336H-6N ships at 115200 (non-standard, not 9600)
 #define SCK_PIN  7
 #define MISO_PIN 8
@@ -103,32 +93,10 @@ static constexpr int MAX_WIFI_NETWORKS = 2;
 #define CS_PIN   5 // If the card is not detected, try 38
 #endif
 
-// ── Ellipsoidal Calibration (Tumble Test) ──────────────────────────────────
-// ⚠️ DEFAULT UNCALIBRATED STATE
-// You MUST perform your own tumble test to populate these matrices.
-// See the README for instructions. Failure to do so will cause ESKF drift.
-//
-// Formula: a_calibrated = W * (a_raw - b)
-// Applied in Task_Filter as STEP 1 (before rotate_3d and Madgwick).
-
-/* Bias vector (Offset) - Default: 0.0f
-const float CALIB_B[3] = {
-    0.0f, // AX
-    0.0f, // AY
-    0.0f  // AZ
-};
-
-// Transformation Matrix (Scale & Orthogonality) - Default: Identity Matrix
-// WARNING: Do not set the main diagonal to 0, or acceleration will be multiplied by 0!
-const float CALIB_W[3][3] = {
-    {1.0f, 0.0f, 0.0f},
-    {0.0f, 1.0f, 0.0f},
-    {0.0f, 0.0f, 1.0f}
-};
-*/
+// Ellipsoidal calibration (tumble test)
+// Default uncalibrated state for AtomS3R: perform a dedicated tumble test
+// before trusting long-run ESKF results on the new sensor.
 #ifdef USE_BMI270
-// BMI270: UNCALIBRATED — perform tumble test on this specific unit to populate.
-// See Docs/AtomS3R_Migration_Guide.md §7 for the calibration procedure.
 const float CALIB_B[3] = { 0.0f, 0.0f, 0.0f };
 const float CALIB_W[3][3] = {
     {1.0f, 0.0f, 0.0f},
@@ -137,30 +105,13 @@ const float CALIB_W[3][3] = {
 };
 #else
 // MPU-6886 calibrated (author's specific unit).
-// Result: σ(‖a‖) 0.042 g → 0.023 g (−45.6 %)
-// AZ bias = −0.065 g corrects the anomaly identified in pendulum tests.
+// Result: sigma(norm(a)) 0.042 g -> 0.023 g (-45.6%)
+// AZ bias = -0.065 g corrects the anomaly identified in pendulum tests.
 const float CALIB_B[3] = { -0.00125f, +0.00429f, -0.06491f };
 
 const float CALIB_W[3][3] = {
     {+1.000824f, -0.000511f, -0.001575f},
     {-0.000511f, +1.000989f, -0.000132f},
     {-0.001575f, -0.000132f, +1.003466f}
-};
-#endif
-
-#ifdef USE_BMI270
-// ── Magnetometer Calibration Placeholder (BMM150 via M5Unified) ───────────
-// Formula: m_cal = MAG_W * (m_raw - MAG_B)
-// PLACEHOLDER: identity W, zero B — raw pass-through.
-// This does NOT replace BMM150 Bosch trim compensation (missing in M5Unified)
-// and does NOT enable magnetic heading or 9-DOF fusion.
-// Purpose: offline empirical ellipsoid fit will populate these matrices,
-// absorbing both M5Unified conversion artifacts and installation distortion.
-// Input/output units: M5Unified raw (arbitrary, AK8963-scaled).
-const float MAG_B[3] = { 0.0f, 0.0f, 0.0f };
-const float MAG_W[3][3] = {
-    {1.0f, 0.0f, 0.0f},
-    {0.0f, 1.0f, 0.0f},
-    {0.0f, 0.0f, 1.0f}
 };
 #endif

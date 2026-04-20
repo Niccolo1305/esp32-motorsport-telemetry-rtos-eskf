@@ -3,11 +3,12 @@ Dual-core FreeRTOS telemetry firmware for ESP32-S3 with 50Hz ESKF sensor fusion 
 
 # ESP32 Telemetria
 
-![Firmware](https://img.shields.io/badge/firmware-v1.5.2--clean-blue)
+![Firmware AtomS3](https://img.shields.io/badge/AtomS3-v1.5.2--clean-blue)
+![Firmware AtomS3R](https://img.shields.io/badge/AtomS3R-v1.7.0--atoms3r-blue)
 ![Platform](https://img.shields.io/badge/platform-ESP32--S3-informational)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 
-> Motorsport telemetry system for the **M5Stack Atom S3** (ESP32-S3).
+> Motorsport telemetry system for the **M5Stack AtomS3** and **AtomS3R** (ESP32-S3).
 > 50 Hz IMU · GPS fusion · Error-State Kalman Filter · SD logging · MoTeC i2 Pro export
 
 ![Dashboard – full lap raw](img/Giro_completo_raw.jpeg)
@@ -16,17 +17,23 @@ Dual-core FreeRTOS telemetry firmware for ESP32-S3 with 50Hz ESKF sensor fusion 
 
 ## Overview
 
-ESP32 Telemetria is a self-contained data-acquisition unit that fits in your hand and logs professional-grade telemetry at 50 Hz. It fuses a 6-DOF IMU (MPU-6886) with GPS to estimate position, velocity, and heading through an Error-State Kalman Filter running in real time on the Atom S3's dual-core ESP32-S3.
+ESP32 Telemetria is a self-contained data-acquisition unit that fits in your hand and logs professional-grade telemetry at 50 Hz. It fuses a 6-DOF IMU with GPS to estimate position, velocity, and heading through an Error-State Kalman Filter running in real time on the ESP32-S3's dual cores.
+
+Two hardware targets are supported:
+- **AtomS3** (`v1.5.2-clean`): MPU-6886 6-DOF IMU, 202-byte records
+- **AtomS3R** (`v1.7.0-atoms3r`): BMI270 6-DOF IMU + BMM150 magnetometer via Bosch Sensor APIs with FIFO-based acquisition, 242-byte records with full acquisition-truth logging (native raw, physical channels, FIFO diagnostics)
 
 Recorded sessions are stored in a compact binary format on a micro-SD card and can be post-processed through a Python toolchain that outputs interactive dashboards or native **MoTeC i2 Pro** log files — the same format used by professional motorsport engineers.
 
-As of `v1.5.2-clean` the IMU and GPS stacks are abstracted behind `IImuProvider` / `IGpsProvider` interfaces, decoupling the pipeline from hardware. Every session logs sensor-frame raw IMU plus explicit GPS timing metadata and GPS diagnostic metadata (`gps_sog_kmh`, `dhv_gdspd`, `nav_speed2d`, `nav_s_acc`, `nav_vel_n/e`, `gps_speed_source`, `gps_fix_us`, `dhv_fix_us`, `nav_fix_us`). This enables offline SITL replay of the same production GPS path used by the firmware, while retaining enough evidence to audit unsupported GPS velocity channels.
+The IMU and GPS stacks are abstracted behind `IImuProvider` / `IGpsProvider` interfaces, decoupling the pipeline from hardware. Every session logs sensor-frame raw IMU plus explicit GPS timing metadata and GPS diagnostic metadata (`gps_sog_kmh`, `dhv_gdspd`, `nav_speed2d`, `nav_s_acc`, `nav_vel_n/e`, `gps_speed_source`, `gps_fix_us`, `dhv_fix_us`, `nav_fix_us`). This enables offline SITL replay of the same production GPS path used by the firmware, while retaining enough evidence to audit unsupported GPS velocity channels.
 
-**Current firmware:** v1.5.2-clean
+**Current firmware:** AtomS3 `v1.5.2-clean` · AtomS3R `v1.7.0-atoms3r`
 
 ---
 
 ## Hardware
+
+### AtomS3 (MPU-6886)
 
 | Component | Part | Interface |
 |-----------|------|-----------|
@@ -36,16 +43,29 @@ As of `v1.5.2-clean` the IMU and GPS stacks are abstracted behind `IImuProvider`
 | Storage | Micro-SD | SPI (pins 5–8) |
 | Display | Built-in LCD | M5Unified |
 
+### AtomS3R (BMI270 + BMM150)
+
+| Component | Part | Interface |
+|-----------|------|-----------|
+| Main board | [M5Stack AtomS3R](https://shop.m5stack.com/products/atoms3r) | — |
+| IMU | BMI270 (built-in) | I2C via M5.In_I2C, FIFO-based |
+| Magnetometer | BMM150 (built-in) | AUX I2C through BMI270 |
+| GPS | ATGM336H-6N | UART1 (pins 1/2), 115200 baud |
+| Storage | Micro-SD | SPI (pins 5–8) |
+| Display | Built-in LCD | M5Unified |
+
+> On AtomS3R, `M5Unified` handles board/display/power only. `cfg.internal_imu = false` must be set before `M5.begin()`. All IMU/magnetometer access goes through `Bmi270Provider` using Bosch Sensor APIs on `M5.In_I2C`.
+
 ## Bill of Materials
 
-The entire project is designed to be affordable, modular, and extremely compact. You can build the full telemetry stack for **under $30**.
+The entire project is designed to be affordable, modular, and extremely compact. You can build the full telemetry stack for **under $30** (AtomS3) or **under $35** (AtomS3R).
 
 | Component | Role | Price (Est.) | Link |
 |:----------|:-----|:-------------|:-----|
 | **ATOMS3 Dev Kit** (0.85" screen) | Core MCU (ESP32-S3 dual-core), MPU-6886 IMU, built-in LCD | ~$15.50 | [M5Stack Store](https://shop.m5stack.com/products/atoms3-dev-kit-w-0-85-inch-screen?variant=43676991258881) |
+| **ATOMS3R** (alternative) | Core MCU (ESP32-S3), BMI270+BMM150 IMU, OPI PSRAM, built-in LCD | ~$19.95 | [M5Stack Store](https://shop.m5stack.com/products/atoms3r) |
 | **GPS/BDS Unit v1.1** (AT6668) | 10 Hz position and speed data for ESKF sequential correction | ~$9.95 | [M5Stack Store](https://shop.m5stack.com/products/gps-bds-unit-v1-1-at6668) |
 | **ATOMIC TF-Card Reader** | SPI interface for 50 Hz async binary data logging | ~$4.50 | [M5Stack Store](https://shop.m5stack.com/products/atomic-tf-card-reader) |
-| **Total** | | **~$29.95** | |
 
 > A standard Micro SD card (FAT32, ≤ 16 GB, Class 10 or faster) is also required.
 
@@ -53,7 +73,7 @@ The entire project is designed to be affordable, modular, and extremely compact.
 
 ## Features
 
-- **50 Hz IMU pipeline** — 5-phase signal chain: ellipsoid calibration → geometric alignment → VGPL-compensated Madgwick AHRS → gravity removal → ESKF navigation → end-of-pipe EMA
+- **50 Hz IMU pipeline** — 5-phase signal chain: axis remap (AtomS3R) → ellipsoid calibration → geometric alignment → VGPL-compensated Madgwick AHRS → gravity removal → ESKF navigation → end-of-pipe EMA
 - **Ellipsoid hard/soft-iron calibration** for the accelerometer (tumble-test derived, `W·(a−B)` applied pre-rotation)
 - **VGPL kinematic compensation** (v1.4.1) — subtracts both centripetal (`v×ωz/g`) and longitudinal (`dv/dt/g`) acceleration before Madgwick, keeping beta > 0 at all times and eliminating horizon tilt from gyro drift
 - **ZARU-to-Madgwick bias correction** — thermal bias learned by ZARU is fed back into the gyro before Madgwick each cycle, preventing ~4.7 °/s/hr electronic drift from projecting phantom acceleration into the navigation output
@@ -63,8 +83,10 @@ The entire project is designed to be affordable, modular, and extremely compact.
 - **Shadow ESKF_6D** — 6-state filter with independent online gyro-bias estimation, running in parallel for validation; logged as `kf6_*`
 - **GPS staleness detection** via monotonic IMU clock (`timestamp_us − fix_us > 5 s`), same timebase as IMU for deterministic SITL replay
 - **Explicit GPS source/timing diagnostics** — logs NMEA SOG plus DHV and passive NAV-PV metadata so unsupported high-rate velocity channels can be audited offline without serial access
-- **Dependency-injection IMU/GPS providers** — `IImuProvider` / `IGpsProvider` virtual interfaces decouple hardware from the pipeline (v1.1.0+)
-- **Async SD logging** via FreeRTOS queue — 202 bytes/record at 50 Hz (`v1.5.2` format, including GPS source/timing diagnostics)
+- **Dependency-injection IMU/GPS providers** — `IImuProvider` / `IGpsProvider` virtual interfaces decouple hardware from the pipeline; `Mpu6886Provider` (AtomS3), `Bmi270Provider` with FIFO-based acquisition (AtomS3R)
+- **Bosch-direct acquisition truth** (AtomS3R) — v5 records log native BMI270 int16 raw, physical channels, BMM150 raw+compensated uT, and FIFO diagnostics alongside the pipeline output
+- **Boot magnetometer reference** (AtomS3R) — calibration captures mag reference at boot, stored in FileHeader for future 9-DoF fusion
+- **Async SD logging** via FreeRTOS queue — 202 bytes/record (AtomS3) or 242 bytes/record (AtomS3R v5) at 50 Hz
 - **MQTT publishing** at 10 Hz over Wi-Fi for live telemetry monitoring
 - **MoTeC i2 Pro export** — native `.ld` format, 12 channels (8 @ 50 Hz + 4 @ 10 Hz)
 - **Interactive dashboard** built with Plotly/Dash for post-session analysis
@@ -102,17 +124,29 @@ pip install -r Tool/requirements.txt
 ### Build & Flash
 
 ```bash
-# Build only
-pio run
+# AtomS3 (MPU-6886)
+pio run -e m5stack-atoms3
+pio run -e m5stack-atoms3 -t upload
 
-# Build and upload
-pio run --target upload
+# AtomS3R (BMI270 + BMM150)
+pio run -e m5stack-atoms3r
+pio run -e m5stack-atoms3r -t upload
 
-# Open serial monitor
+# Serial monitor
 pio device monitor
 
 # Upload and monitor in one shot
-pio run --target upload && pio device monitor
+pio run -e m5stack-atoms3 -t upload && pio device monitor
+```
+
+#### Sensor Bench Test Firmwares
+
+Bare-metal IMU characterization (no GPS, no ESKF, no SD, no MQTT):
+
+```bash
+pio run -e atoms3_bench -t upload     # AtomS3
+pio run -e atoms3r_bench -t upload    # AtomS3R
+pio device monitor | tee results.txt
 ```
 
 ### Flash pre-built binary
@@ -148,7 +182,7 @@ The device works fully offline without Wi-Fi — SD logging is independent of ne
 
 ## On-Device Controls (BtnA / Screen Tap)
 
-The Atom S3 has a single capacitive button (BtnA) that covers the entire LCD surface. All user interaction happens through tap patterns and a long press, detected via a 400 ms debounce window.
+Both the AtomS3 and AtomS3R have a single capacitive button (BtnA) that covers the entire LCD surface. All user interaction happens through tap patterns and a long press, detected via a 400 ms debounce window.
 
 ### During Boot
 
@@ -170,7 +204,7 @@ The Atom S3 has a single capacitive button (BtnA) that covers the entire LCD sur
 
 A single tap shows **"DISPLAY OFF?"** for 5 seconds. A second tap within the window confirms and puts the LCD to sleep (backlight off + controller sleep). Any tap while sleeping wakes the display immediately. Double and triple taps during the confirmation window cancel it and execute normally.
 
-Turning the display off during a session reduces internal temperature and consequently the thermal drift of the MPU-6886, improving gyroscope bias stability over long runs. Critical alarms (GPS lost, SD write error) automatically wake the display regardless of sleep state.
+Turning the display off during a session reduces internal temperature and consequently the thermal drift of the IMU, improving gyroscope bias stability over long runs. Critical alarms (GPS lost, SD write error) automatically wake the display regardless of sleep state.
 
 ### Display States
 
@@ -241,7 +275,7 @@ All tools are in `Tool/` and accept `.bin` files directly or `.csv` files from `
 python Tool/bin_to_csv.py <file.bin>
 ```
 
-Detects the record format automatically from the file header (supports 122 / 127 / 155 / 164-byte formats across all firmware versions). Launches an interactive lap-split menu for multi-lap sessions.
+Detects the record format automatically from the file header (supports 122 / 127 / 155 / 164 / 190 / 202 / 215 / 224 / 242-byte formats across all firmware versions). Launches an interactive lap-split menu for multi-lap sessions.
 
 ### 2 — Offline SITL Replay
 
@@ -250,9 +284,9 @@ python Tool/sitl_hal/sitl_replay.py <file.csv>
 python Tool/sitl_hal/sitl_replay.py <file.bin> --output <out_sitl.csv>
 ```
 
-Replays the exact firmware pipeline (`filter_task.cpp`) offline using the sensor-frame channels logged since v1.4.0 (`sensor_ax/ay/az`, `sensor_gx/gy/gz`). Produces a new CSV with re-computed EMA, ZARU, ESKF, and VGPL outputs — useful for tuning constants without reflashing.
+Replays the exact firmware pipeline (`filter_task.cpp`) offline using the sensor-frame channels logged in the binary records. On AtomS3 this uses `sensor_ax/ay/az`, `sensor_gx/gy/gz`; on AtomS3R v5 logs it uses the native BMI270 physical channels (`bmi_acc_*_g`, `bmi_gyr_*_dps`). Produces a new CSV with re-computed EMA, ZARU, ESKF, and VGPL outputs — useful for tuning constants without reflashing.
 
-With `v1.5.2` logs the replay mirrors the on-device production GPS path (`gps_sog_kmh`) and preserves DHV / passive NAV-PV metadata for diagnostics. Legacy `v1.4.2` logs still reproduce GPS staleness deterministically via `gps_fix_us` / `gps_valid`.
+The replay mirrors the on-device production GPS path (`gps_sog_kmh`) and preserves DHV / passive NAV-PV metadata for diagnostics. Legacy logs still reproduce GPS staleness deterministically via `gps_fix_us` / `gps_valid`.
 
 ### 3 — Interactive Dashboard
 
@@ -315,7 +349,7 @@ Produces a native `.ld` file openable in **i2 Pro** or **i2 Standard**:
 
 | Task | Core | Priority | Responsibility |
 |------|------|----------|----------------|
-| `Task_I2C` | 0 | 3 | Reads MPU-6886 via `IImuProvider*` every 20 ms; pushes to `imuQueue` (overwrite, depth 1) |
+| `Task_I2C` | 0 | 3 | Reads IMU via `IImuProvider*` every 20 ms (MPU-6886 or BMI270 FIFO); pushes to `imuQueue` (overwrite, depth 1) |
 | `Task_GPS` | 0 | 2 | Polls UART1 via `IGpsProvider*`, parses NMEA, writes to `shared_gps_data` under `gps_mutex` |
 | `Task_Filter` | 1 | 2 | Consumes IMU queue, runs 5-phase signal chain, drives ESKF |
 | `Task_SD_Writer` | 1 | 1 | Async SD logging from `sd_queue` (depth 200), flushes every 50 samples |
@@ -327,7 +361,7 @@ Produces a native `.ld` file openable in **i2 Pro** or **i2 Standard**:
 
 Each 20 ms cycle inside `Task_Filter` runs 5 phases. The key architectural principle is **"End-of-Pipe EMA + ZARU-to-Madgwick"**: the EMA filter is purely aesthetic (display/MQTT/SD) and sits after all navigation updates, while the ZARU thermal bias is fed back into the gyro *before* Madgwick each cycle.
 
-> Authoritative reference: in-source pipeline comment block in [`src/Telemetria.ino`](src/Telemetria.ino). The image below still reflects the older v1.4.2 graph and is pending a visual refresh for the current `v1.5.2` GPS diagnostics / production-SOG path.
+> Authoritative reference: in-source pipeline comment block in [`src/Telemetria.ino`](src/Telemetria.ino) (v1.7.0). The image below still reflects the older v1.4.2 graph and is pending a visual refresh.
 
 ```mermaid
 flowchart LR
@@ -337,17 +371,17 @@ flowchart LR
     classDef ema   fill:#1f618d,stroke:#3498db,color:#fff,stroke-width:2px
     classDef out   fill:#b03a2e,stroke:#e74c3c,color:#fff,stroke-width:2px
 
-    IMU["MPU-6886\n50 Hz\nIImuProvider"]:::hw
+    IMU["MPU-6886 / BMI270+BMM150\n50 Hz\nIImuProvider"]:::hw
     GPS["AT6668 GNSS\n10 Hz\nNMEA + CASIC NAV-PV"]:::hw
 
-    P1["Phase 1\ntelemetry_mutex\n─────────────\nEllipsoid cal\nGeometric align\nVGPL cent+long\nMadgwick AHRS\nGravity removal"]:::phase
+    P1["Phase 1\ntelemetry_mutex\n─────────────\nAxis remap (AtomS3R)\nEllipsoid cal\nGeometric align\nVGPL cent+long\nMadgwick AHRS\nGravity removal"]:::phase
     P2["Phase 2\nno mutex\n─────────────\nVariance engine\nGPS snapshot + speed source select\nZARU 3-axis\nESKF 5D + 6D\nNHC · GPS correct"]:::ctrl
     P3["Phase 3\nEnd-of-pipe EMA\n─────────────\nα=0.06 τ≈313ms\nZARU-corrected\ninput"]:::ema
     P4["Phase 4\ntelemetry_mutex\n─────────────\nEMA write-back\nshared_telemetry"]:::ctrl
 
     MQTT["MQTT\n10 Hz"]:::out
     DISP["LCD\n5 Hz"]:::out
-    SD["Task_SD_Writer\n190B · 50 Hz"]:::out
+    SD["Task_SD_Writer\n202/242B · 50 Hz"]:::out
 
     IMU --> P1
     GPS --> P2
@@ -393,7 +427,11 @@ Both log to SD at 50 Hz. Only the 5D drives display and MQTT. A future version w
 
 ## Calibration
 
-Boot calibration (2 s static window, 100 samples) handles gyro bias automatically. Accelerometer calibration is hardcoded — derived from a tumble test and validated against a pendulum fixture.
+Boot calibration (2 s static window, 100 samples) handles gyro bias and mounting angles automatically. On AtomS3R, the calibration also captures a boot magnetometer reference (trimmed-mean of valid BMM150 samples), stored in the FileHeader for future 9-DoF fusion.
+
+Accelerometer ellipsoidal calibration is hardcoded in `src/config.h`:
+- **AtomS3**: derived from a tumble test and validated against a pendulum fixture.
+- **AtomS3R**: currently identity (uncalibrated) — needs a dedicated tumble test before trusting long-run ESKF results.
 
 To recalibrate:
 
@@ -412,51 +450,76 @@ To recalibrate:
 
 ## Binary Log Format
 
-### File Header (66 bytes, v3)
+### File Header (80 bytes, v5)
 
 Written once at the start of every `.bin` file:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `magic` | 3 × uint8 | `"TEL"` — identifies this as a telemetry file |
-| `header_version` | uint8 | `3` (v1→v2: record_size widened to uint16; v2→v3: calibration params added) |
-| `firmware_version` | char[16] | e.g. `"v1.5.2"` |
-| `record_size` | uint16 | Bytes per record (`202` for `v1.5.2`) |
+| `header_version` | uint8 | `5` (v1→v2: record_size widened to uint16; v2→v3: calibration params; v3→v5: flags + mag ref) |
+| `firmware_version` | char[16] | e.g. `"v1.7.0-atoms3r"` |
+| `record_size` | uint16 | Bytes per record (`202` for AtomS3, `242` for AtomS3R) |
 | `start_time_ms` | uint32 | `millis()` at file open |
 | `cal_sin_phi..cal_cos_theta` | 4 × float | Boot mounting rotation (φ, θ) |
 | `cal_bias_ax..cal_bias_gz` | 6 × float | Boot accel/gyro residual biases |
+| `header_flags` | uint16 | Bitmask: bit 0 = `FILE_HEADER_FLAG_MAG_REF_VALID` |
+| `mag_ref_ut_x..mag_ref_ut_z` | 3 × float | Boot magnetometer reference [uT] (AtomS3R only) |
 
-### Data Record (202 bytes, `v1.5.2` semantics, `__attribute__((packed))`)
+Legacy header sizes: 25 B (v1), 26 B (v2), 66 B (v3/v4).
 
-`struct.unpack('<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ', chunk_202_byte)`
+### Data Record — AtomS3 (202 bytes, `v1.5.2`)
 
 | Field | Type | Bytes | Description |
 |-------|------|-------|-------------|
 | `timestamp_us` | uint64 | 8 | IMU hardware clock (µs, `esp_timer_get_time()`) |
 | `ax`, `ay`, `az` | 3 × float | 12 | EMA linear acceleration [G], ZARU-corrected |
 | `gx`, `gy`, `gz` | 3 × float | 12 | EMA angular rate [°/s], ZARU-corrected |
-| `temp_c` | float | 4 | MPU-6886 temperature [°C] |
+| `temp_c` | float | 4 | Sensor temperature [°C] |
 | `lap` | uint8 | 1 | Session flag (1 = recording, 0 = idle) |
 | `gps_lat`, `gps_lon` | 2 × double | 16 | GPS coordinates (WGS84) |
-| `gps_sog_kmh`, `gps_alt_m` | 2 × float | 8 | Legacy NMEA speed-over-ground [km/h] and altitude |
+| `gps_sog_kmh`, `gps_alt_m` | 2 × float | 8 | NMEA speed-over-ground [km/h] and altitude |
 | `gps_sats` | uint8 | 1 | Satellites locked |
 | `gps_hdop` | float | 4 | Horizontal dilution of precision |
 | `kf_x..kf_heading` | 4 × float | 16 | ESKF 5D: ENU position [m], speed [m/s], heading [rad] |
-| `raw_ax..raw_gz` | 6 × float | 24 | Post-Madgwick IMU, zero latency, bypasses EMA |
+| `pipe_lin_ax..pipe_body_gz` | 6 × float | 24 | Post-Madgwick IMU, zero latency, bypasses EMA |
 | `kf6_x..kf6_bgz` | 5 × float | 20 | ESKF 6D shadow output + estimated gz bias |
 | `zaru_flags` | uint8 | 1 | Bitmask: bit0=Static ZARU, bit1=Straight ZARU, bit2=NHC, bit3=Recalibration |
 | `tbias_gz` | float | 4 | Current learned thermal bias gz [°/s] |
 | `sensor_ax..sensor_gz` | 6 × float | 24 | Sensor-frame raw IMU pre-calibration (SITL input) |
-| `gps_fix_us` | uint64 | 8 | `esp_timer_get_time()` of last valid GPS fix (retained from v1.4.2 for deterministic SITL timing) |
-| `gps_valid` | uint8 | 1 | Mirror of `GpsData.valid` for this sample (retained from v1.4.2 for deterministic SITL timing) |
-| `nav_speed2d`, `nav_s_acc`, `nav_vel_n`, `nav_vel_e` | 4 × float | 16 | CASIC NAV-PV ground speed [m/s], speed accuracy estimate [m/s], North/East velocity [m/s] |
-| `nav_vel_valid`, `gps_speed_source` | 2 × uint8 | 2 | NAV-PV validity and per-sample source tag (`0 = SOG` in `v1.5.2` production mode) |
-| `nav_fix_us` | uint64 | 8 | `esp_timer_get_time()` of last parsed NAV-PV frame for diagnostics / replay |
-| `dhv_gdspd` | float | 4 | NMEA DHV receiver-reported horizontal ground speed [m/s], diagnostics only in `v1.5.2` |
-| `dhv_fix_us` | uint64 | 8 | `esp_timer_get_time()` of last parsed DHV sentence |
+| `gps_fix_us` | uint64 | 8 | `esp_timer_get_time()` of last valid GPS fix |
+| `gps_valid` | uint8 | 1 | Mirror of `GpsData.valid` |
+| `nav_speed2d..nav_vel_e` | 4 × float | 16 | CASIC NAV-PV diagnostics [m/s] |
+| `nav_vel_valid`, `gps_speed_source` | 2 × uint8 | 2 | NAV-PV validity + per-sample source tag |
+| `nav_fix_us` | uint64 | 8 | Timestamp of last parsed NAV-PV frame |
+| `dhv_gdspd` | float | 4 | NMEA DHV ground speed [m/s], diagnostics only |
+| `dhv_fix_us` | uint64 | 8 | Timestamp of last parsed DHV sentence |
 | **Total** | | **202** | |
 
-`bin_to_csv.py` supports all legacy formats (78 / 122 / 127 / 155 / 164 / 190 / 202 bytes) with automatic detection from the file header.
+### Data Record — AtomS3R v5 (242 bytes, `v1.7.0`)
+
+The AtomS3R record shares the same common block as AtomS3 up to `tbias_gz`, then replaces `sensor_ax..sensor_gz` (24 bytes) with explicit acquisition truth (64 bytes):
+
+| Field | Type | Bytes | Description |
+|-------|------|-------|-------------|
+| *(common block)* | | 130 | Same as AtomS3: `timestamp_us` through `tbias_gz` |
+| `bmi_raw_ax..bmi_raw_gz` | 6 × int16 | 12 | Native BMI270 register values (chip-frame, pre-remap) |
+| `bmi_acc_x_g..bmi_gyr_z_dps` | 6 × float | 24 | Physical BMI270 values [g, °/s] (chip-frame, pre-remap) |
+| `bmm_raw_x..bmm_raw_z` | 3 × int16 | 6 | Native BMM150 register values |
+| `bmm_rhall` | uint16 | 2 | BMM150 hall resistance |
+| `bmm_ut_x..bmm_ut_z` | 3 × float | 12 | Bosch-compensated magnetometer [uT] |
+| `mag_valid` | uint8 | 1 | Compensated reading validity |
+| `mag_sample_fresh` | uint8 | 1 | Fresh AUX sample indicator |
+| `mag_overflow` | uint8 | 1 | Magnetometer overflow flag |
+| `imu_sample_fresh` | uint8 | 1 | IMU FIFO sample freshness |
+| `fifo_frames_drained` | uint8 | 1 | FIFO frames consumed this cycle |
+| `fifo_backlog` | uint8 | 1 | FIFO frames pending after drain |
+| `fifo_overrun` | uint8 | 1 | FIFO overflow detected |
+| `reserved0` | uint8 | 1 | Padding |
+| *(GPS tail)* | | 47 | Same as AtomS3: `gps_fix_us` through `dhv_fix_us` |
+| **Total** | | **242** | |
+
+`bin_to_csv.py` supports all legacy formats (122 / 127 / 155 / 164 / 190 / 202 / 215 / 224 / 242 bytes) with automatic detection from the file header.
 
 ### CalibrationRecord (sentinel)
 
@@ -526,7 +589,7 @@ esp32-telemetry-clean/
 ├── src/
 │   ├── Telemetria.ino           # Entry point: setup() + loop()
 │   ├── config.h                 # Constants, pins, calibration matrices (primary tuning file)
-│   ├── types.h                  # Struct definitions (TelemetryRecord 164B, FileHeader, GpsData, …)
+│   ├── types.h                  # Struct definitions (TelemetryRecord 202/242B, FileHeader 80B, …)
 │   ├── globals.h / globals.cpp  # Shared state (extern declarations + definitions)
 │   ├── eskf.h                   # Header-only ESKF library (ESKF2D + ESKF_6D)
 │   ├── madgwick.h               # Header-only Madgwick AHRS — single norm-gate adaptive β
@@ -536,18 +599,30 @@ esp32-telemetry-clean/
 │   ├── gps_task.h / .cpp        # GPS parsing task (Task_GPS) — uses IGpsProvider DI
 │   ├── IImuProvider.h           # Pure virtual IMU provider interface
 │   ├── Mpu6886Provider.h        # Concrete IImuProvider for MPU-6886 (header-only)
+│   ├── Bmi270Provider.h / .cpp  # Concrete IImuProvider for BMI270+BMM150 (Bosch-direct, FIFO)
+│   ├── imu_axis_remap.h         # Chip-frame → pipeline-frame axis convention mapping
 │   ├── IGpsProvider.h           # Pure virtual GPS provider interface
 │   ├── SerialGpsWrapper.h       # Concrete IGpsProvider (HardwareSerial + TinyGPSPlus, header-only)
 │   ├── sd_writer.h / .cpp       # Async SD logging task (Task_SD_Writer)
 │   ├── wifi_manager.h / .cpp    # Wi-Fi connection, reconnect, radio on/off
-│   ├── calibration.h / .cpp     # Boot & manual IMU calibration
-│   └── display.h / .cpp         # LCD helper functions
+│   ├── calibration.h / .cpp     # Boot & manual IMU calibration (+ mag reference on AtomS3R)
+│   ├── display.h / .cpp         # LCD helper functions
+│   └── vendor/bosch/            # Vendored Bosch Sensor APIs (BMI270, BMM150)
+│
+├── test_fw/                     # Sensor bench test firmwares
+│   ├── set_src.py               # PlatformIO pre-script for custom src_dir
+│   ├── shared/bench_common.h    # Shared bench utilities
+│   ├── atoms3_bench/main.cpp    # MPU-6886 characterization
+│   └── atoms3r_bench/main.cpp   # BMI270+BMM150 characterization
 │
 ├── Tool/
-│   ├── bin_to_csv.py            # Binary → CSV converter (all formats: 122/127/155/164/190/202B)
+│   ├── bin_to_csv.py            # Binary → CSV converter (all formats: 122–242B)
 │   ├── sitl_hal/
-│   │   ├── sitl_replay.py       # Offline SITL pipeline replay from sensor-frame data with production SOG path + GPS diagnostics (legacy-compatible)
-│   │   └── static_bench_validator.py
+│   │   ├── sitl_replay.py       # Offline SITL pipeline replay (production SOG path + diagnostics)
+│   │   └── schema_compat.py     # Schema compatibility helpers
+│   ├── script/
+│   │   ├── schema_guard.py      # Validates struct/format alignment between firmware and Python
+│   │   └── …                    # Analysis scripts (analyze4, bias_drift_report, gsen_analysis, …)
 │   ├── dashboard.py             # Plotly/Dash interactive telemetry viewer
 │   ├── motec_exporter.py        # MoTeC i2 Pro .ld exporter
 │   └── requirements.txt         # Python dependencies
@@ -558,6 +633,7 @@ esp32-telemetry-clean/
 │
 ├── platformio.ini
 ├── wifi_config.example.txt
+├── CLAUDE.md                    # Claude Code project context
 └── README.md
 ```
 
@@ -626,6 +702,8 @@ If the device was moved during the 2-second boot tare, gyro bias will be off —
 
 - **`SD.begin()` blocks button polling** — presses during the SD retry may be missed. The bypass timeout has been extended to mitigate this; a hardware interrupt would fully solve it.
 - **No calibration motion detection** — the firmware does not detect if the device is moved during the 2-second tare.
+- **AtomS3R ellipsoidal calibration is identity** — needs a dedicated tumble test before trusting long-run ESKF results on the BMI270.
+- **AtomS3R magnetometer is logging-only** — no runtime hard/soft-iron calibration, no 9-DoF heading fusion. Boot mag reference is stored in the FileHeader for future use.
 
 ### Post-processing
 
@@ -638,9 +716,14 @@ If the device was moved during the 2-second boot tare, gyro bias will be off —
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Binary session header | **Done** (v1.4.0) | FileHeader v3: firmware string, record size, 10 boot calibration params |
-| SITL offline replay | **Done** (`v1.5.2`) | `sitl_hal/sitl_replay.py` re-runs the full pipeline from sensor-frame logs; GPS staleness is deterministic and the production SOG path is replayed exactly while DHV/NAV-PV remain available for diagnostics |
+| Binary session header | **Done** (v1.7.0) | FileHeader v5 (80 B): firmware string, record size, calibration params, header flags, boot mag reference |
+| SITL offline replay | **Done** (`v1.5.2+`) | `sitl_hal/sitl_replay.py` re-runs the full pipeline from sensor-frame logs; production SOG path replayed exactly |
 | VGPL longitudinal compensation | **Done** (v1.4.1) | `dv/dt / g` subtracted from ay before Madgwick alongside centripetal |
+| AtomS3R BMI270+BMM150 bring-up | **Done** (`v1.7.0`) | Bosch-direct provider with FIFO acquisition, 242-byte v5 record with full acquisition truth |
+| Boot magnetometer reference | **Done** (`v1.7.0`) | Captured at boot, stored in FileHeader; ready for future 9-DoF fusion |
+| Sensor bench test firmwares | **Done** (`v1.7.0`) | `atoms3_bench` / `atoms3r_bench` environments for bare-metal IMU characterization |
+| AtomS3R ellipsoidal calibration | Planned | Needs dedicated tumble test on BMI270; currently identity matrix |
+| AtomS3R 9-DoF heading fusion | Planned | Requires mag hard/soft-iron calibration before integrating BMM150 into Madgwick |
 | ESKF_6D validation | In progress | A/B comparison on recorded track sessions; 6D becomes primary if it outperforms 5D |
 | Hardware interrupt for BtnA | Planned | `attachInterrupt()` on GPIO 41 — captures clicks during blocking SD calls |
 | Shake detection at boot | Planned | Detect motion during tare window and warn or auto-repeat |
@@ -649,6 +732,32 @@ If the device was moved during the 2-second boot tare, gyro bias will be off —
 ---
 
 ## Changelog
+
+### v1.7.0 — AtomS3R v5 Record Layout + Acquisition Truth
+
+- **AtomS3R record format upgraded to 242 bytes** (v5) — replaces the legacy `sensor_ax..sensor_gz` block with explicit acquisition truth: native BMI270 int16 raw, scale-converted physical channels, native BMM150 raw + RHALL, Bosch-compensated uT, and FIFO diagnostics (`imu_sample_fresh`, `fifo_frames_drained`, `fifo_backlog`, `fifo_overrun`).
+- **FileHeader upgraded to v5 (80 bytes)** — adds `header_flags` (uint16 bitmask) and `mag_ref_ut_x/y/z` (boot magnetometer reference in uT).
+- **Axis remap moved out of the provider** — `Bmi270Provider` now outputs sensor-faithful native data; `remap_chip_axes_to_pipeline()` in `imu_axis_remap.h` handles chip→pipeline convention mapping in `filter_task.cpp` and `calibration.cpp`.
+- **Boot magnetometer reference capture** — `calibration.cpp` collects valid BMM150 samples during the 2 s tare window and stores the trimmed-mean reference in `mag_ref_ut_x/y/z` globals + FileHeader.
+- **Pipeline channel rename** — `raw_ax/ay/az` → `pipe_lin_ax/ay/az`, `raw_gx/gy/gz` → `pipe_body_gx/gy/gz` in the TelemetryRecord for clarity.
+- **Sensor bench test firmwares** added (`atoms3_bench`, `atoms3r_bench` PlatformIO environments) for bare-metal IMU characterization.
+- **`bin_to_csv.py`** extended with 242-byte v5 format support and updated column headers.
+- **`schema_guard.py`** added for struct/format alignment validation between firmware and Python tools.
+
+### v1.6.1 — Bosch-Direct AtomS3R Magnetometer
+
+- **AtomS3R IMU path replaced with Bosch Sensor APIs** — `Bmi270Provider` uses vendored `BMI270_SensorAPI` and `BMM150_SensorAPI` on `M5.In_I2C`. No `M5.Imu` calls remain in the AtomS3R runtime.
+- **BMI270 explicitly configured**: ±8 g / ±2000 dps / 50 Hz / normal mode with register-level read-back verification at boot.
+- **BMM150 logged as both decoded raw and Bosch-compensated uT** — fields: `mag_raw_x/y/z`, `mag_rhall`, `mag_ut_x/y/z`, `mag_valid`, `mag_fresh`.
+- **AtomS3R record size grows to 224 bytes**, FileHeader v4.
+- Legacy `215 B` AtomS3R logs preserved as a separate historical format (M5Unified-scaled arbitrary units).
+
+### v1.6.0 — HAL-First AtomS3R Bring-Up
+
+- **Initial AtomS3R bring-up** with BMI270 + BMM150 magnetometer logging via M5Unified IMU path.
+- **`ImuRawData` unified struct** — both `Mpu6886Provider` and AtomS3R provider fill the same struct fields; MPU-6886 zeroes BMI/BMM-specific channels.
+- **AtomS3R record size: 215 bytes** with M5Unified-scaled magnetometer (arbitrary units, not physical uT).
+- **OPI PSRAM support** enabled in the AtomS3R PlatformIO environment.
 
 ### v1.5.2 — SOG Production Path + GPS Diagnostic Retention
 

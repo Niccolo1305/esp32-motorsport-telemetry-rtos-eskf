@@ -37,6 +37,7 @@ if str(TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(TOOL_DIR))
 
 import bin_to_csv  # type: ignore  # local tool module
+from schema_compat import apply_runtime_aliases, expand_available_columns
 
 
 # Mirrors src/config.h / src/eskf.h
@@ -939,16 +940,17 @@ def parse_row(header: Sequence[str], raw_values: Sequence[str]) -> Dict[str, flo
             row[key] = int(raw)
         else:
             row[key] = float(raw)
+    apply_runtime_aliases(row)
     return row
 
 
 def iter_csv_payload(header_line: str, lines: Iterable[str]) -> Iterator[Tuple[str, object]]:
     header = next(csv.reader([header_line]))
     normalized_header = [normalize_column(col) for col in header]
-    missing = sorted(REQUIRED_COLUMNS - set(normalized_header))
+    missing = sorted(REQUIRED_COLUMNS - expand_available_columns(normalized_header))
     if missing:
         raise ValueError(
-            "Input does not contain the v1.4.x SITL columns required by this script: "
+            "Input does not contain the SITL columns required by this script: "
             + ", ".join(missing)
         )
 

@@ -8,6 +8,7 @@
 
 #include "IImuProvider.h"
 #include "globals.h"
+#include "imu_axis_remap.h"
 #include "math_utils.h"
 
 void calibrate_alignment(IImuProvider* imu) {
@@ -15,21 +16,29 @@ void calibrate_alignment(IImuProvider* imu) {
   // If FREQ_HZ changes, both resize without stack buffer overflow.
   static constexpr int CALIB_SAMPLES = (int)(50.0f * 2.0f); // 2 s at 50 Hz
   static_assert(CALIB_SAMPLES <= 200, "CALIB_SAMPLES too large for the stack");
+  static constexpr int CALIB_MAG_MIN_VALID = CALIB_SAMPLES / 4;
 
   float samples_ax[CALIB_SAMPLES], samples_ay[CALIB_SAMPLES], samples_az[CALIB_SAMPLES];
   float samples_gx[CALIB_SAMPLES], samples_gy[CALIB_SAMPLES], samples_gz[CALIB_SAMPLES];
+  float samples_mag_x[CALIB_SAMPLES], samples_mag_y[CALIB_SAMPLES], samples_mag_z[CALIB_SAMPLES];
+  int mag_sample_count = 0;
 
   // Suspend Task_I2C (Core 0) to avoid I2C bus contention.
-  // Without this protection, getAccelData/getGyroData here and in Task_I2C
-  // run on two cores in parallel on the same physical bus, producing
-  // interleaved reads and a corrupted calibration (v0.9.2).
+  // Calibration is the only other legal consumer of the internal IMU bus.
   if (TaskI2CHandle != NULL) vTaskSuspend(TaskI2CHandle);
+
+  // FIFO/AUX warm-up discard: flush stale backlog accumulated before the static
+  // calibration window. On AtomS3 this is a harmless one-sample discard.
+  ImuRawData warmup_discard;
+  imu->update(warmup_discard);
 
   for (int i = 0; i < CALIB_SAMPLES; i++) {
     ImuRawData raw;
     imu->update(raw);
-    float ax = raw.ax, ay = raw.ay, az = raw.az;
-    float gx = raw.gx, gy = raw.gy, gz = raw.gz;
+    float ax = raw.bmi_acc_x_g, ay = raw.bmi_acc_y_g, az = raw.bmi_acc_z_g;
+    float gx = raw.bmi_gyr_x_dps, gy = raw.bmi_gyr_y_dps, gz = raw.bmi_gyr_z_dps;
+    remap_chip_axes_to_pipeline(ax, ay, az);
+    remap_chip_axes_to_pipeline(gx, gy, gz);
     // Ellipsoidal calibration applied to raw samples before computing
     // mounting angles. Without this correction the AZ = -0.065 g bias
     // would be absorbed into bias_az instead of being removed.
@@ -40,6 +49,12 @@ void calibrate_alignment(IImuProvider* imu) {
     samples_gx[i] = gx;
     samples_gy[i] = gy;
     samples_gz[i] = gz;
+    if (raw.mag_valid && raw.mag_sample_fresh && !raw.mag_overflow && mag_sample_count < CALIB_SAMPLES) {
+      samples_mag_x[mag_sample_count] = raw.bmm_ut_x;
+      samples_mag_y[mag_sample_count] = raw.bmm_ut_y;
+      samples_mag_z[mag_sample_count] = raw.bmm_ut_z;
+      mag_sample_count++;
+    }
     vTaskDelay(pdMS_TO_TICKS(DT_MS));
   }
 
@@ -80,6 +95,17 @@ void calibrate_alignment(IImuProvider* imu) {
     bias_ax = ax_r - 0.0f;
     bias_ay = ay_r - 0.0f;
     bias_az = az_r - 1.0f;
+    if (mag_sample_count >= CALIB_MAG_MIN_VALID) {
+      mag_ref_ut_x = trimmed_mean(samples_mag_x, mag_sample_count);
+      mag_ref_ut_y = trimmed_mean(samples_mag_y, mag_sample_count);
+      mag_ref_ut_z = trimmed_mean(samples_mag_z, mag_sample_count);
+      mag_ref_valid = true;
+    } else {
+      mag_ref_ut_x = 0.0f;
+      mag_ref_ut_y = 0.0f;
+      mag_ref_ut_z = 0.0f;
+      mag_ref_valid = false;
+    }
 
     prev_ax = 0;
     prev_ay = 0;

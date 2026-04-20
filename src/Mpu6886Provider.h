@@ -94,14 +94,31 @@ public:
     }
 
     void update(ImuRawData& out) override {
-        M5.Imu.getAccelData(&out.ax, &out.ay, &out.az);
-        M5.Imu.getGyroData(&out.gx, &out.gy, &out.gz);
+        out = {};
+        M5.Imu.getAccelData(&out.bmi_acc_x_g, &out.bmi_acc_y_g, &out.bmi_acc_z_g);
+        M5.Imu.getGyroData(&out.bmi_gyr_x_dps, &out.bmi_gyr_y_dps, &out.bmi_gyr_z_dps);
         out.temp_c = 0.0f;
         M5.Imu.getTemp(&out.temp_c);
-        out.mx = 0.0f;
-        out.my = 0.0f;
-        out.mz = 0.0f;
+        out.bmi_raw_ax = 0;
+        out.bmi_raw_ay = 0;
+        out.bmi_raw_az = 0;
+        out.bmi_raw_gx = 0;
+        out.bmi_raw_gy = 0;
+        out.bmi_raw_gz = 0;
+        out.bmm_raw_x = 0;
+        out.bmm_raw_y = 0;
+        out.bmm_raw_z = 0;
+        out.bmm_rhall = 0;
+        out.bmm_ut_x = 0.0f;
+        out.bmm_ut_y = 0.0f;
+        out.bmm_ut_z = 0.0f;
+        out.imu_sample_fresh = true;
+        out.fifo_frames_drained = 1;
+        out.fifo_backlog = 0;
+        out.fifo_overrun = false;
         out.mag_valid = false;
+        out.mag_sample_fresh = false;
+        out.mag_overflow = false;
         out.timestamp_us = esp_timer_get_time();
     }
 

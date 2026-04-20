@@ -1,106 +1,85 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-// Bmi270Provider.h — Concrete IImuProvider for BMI270+BMM150 (M5Stack AtomS3R)
+// Bmi270Provider.h - AtomS3R Bosch-direct IMU provider (BMI270 + BMM150)
 //
-// Backend: M5Unified 0.2.13+ (handles BMI270 init, config file upload,
-// AUX I2C BMM150 setup, axis corrections, and data readout internally).
-//
-// This provider does NOT access Wire or BMI270/BMM150 registers directly.
-// M5.begin() must be called before begin().
-//
-// FSR/DLPF/ODR: accepts M5Unified defaults (operational assumptions, not verified):
-//   Accel FSR: assumed ±8g (config blob, not register-inspectable — confirm at bring-up)
-//   Gyro FSR:  assumed ±2000 dps (config blob, not register-inspectable — confirm at bring-up)
-//   DLPF:      determined by config blob (bandwidth unknown — characterize from noise data)
-//   BMM150 ODR: 30 Hz (register 0x4C = 0x38, verified in M5Unified source)
-// If these defaults prove inadequate, a low-level backend replacing M5Unified
-// entirely (not a hybrid) would be required.
-//
-// Magnetometer units: M5Unified raw output (arbitrary, AK8963-scaled).
-//   M5Unified applies AK8963 conversion factor (10*4912/32760) instead of
-//   BMM150-specific compensation. No trim register readout. The output is
-//   NOT in µT or any standard physical unit. Downstream calibration matrices
-//   (MAG_W/MAG_B in config.h) absorb the missing compensation once populated
-//   via offline empirical ellipsoid fit.
-//
-// verifyConfig(): functional/operational check only — not register-level.
-//   Reads one accel sample and verifies plausible magnitude (~1g at rest).
-//   Does NOT verify FSR/DLPF register values.
-//
-// NOTE: verifyConfig() is a functional M5Unified backend check only; it does
-// NOT prove BMI270/BMM150 FSR, DLPF, ODR, or magnetometer data semantics.
-// Those must be confirmed during hardware bring-up and noise characterization.
-//
-// Lifetime: MUST be a static or global object (same pattern as Mpu6886Provider).
-//
-// Usage:
-//   // In Telemetria.ino, file scope:
-//   static Bmi270Provider imuProvider;
-//
-//   // In setup(), AFTER M5.begin():
-//   imuProvider.begin();
-//   if (!imuProvider.verifyConfig()) { /* display error */ }
-//
-//   // When creating Task_I2C:
-//   xTaskCreatePinnedToCore(Task_I2C, "I2C", 4096, &imuProvider, 3, &TaskI2CHandle, 0);
-//
-//   // In calibrate_alignment():
-//   calibrate_alignment(&imuProvider);
+// M5Unified is used only for board/display/power and as the owner-facing
+// transport of the internal I2C bus (M5.In_I2C). All IMU semantics, scaling,
+// FIFO handling, and magnetometer compensation are provided directly by Bosch
+// Sensor APIs.
 #pragma once
 
 #include <M5Unified.h>
-#include <math.h>
+
+extern "C" {
+#include "vendor/bosch/bmi270/bmi2.h"
+#include "vendor/bosch/bmi270/bmi270.h"
+#include "vendor/bosch/bmm150/bmm150.h"
+}
 
 #include "IImuProvider.h"
 
 class Bmi270Provider : public IImuProvider {
 public:
-    void begin() override {
-        // M5Unified has already initialized BMI270+BMM150 during M5.begin().
-        // Functional verification: attempt a sensor read and check plausibility.
-        float tax, tay, taz;
-        _config_ok = M5.Imu.getAccelData(&tax, &tay, &taz);
-        if (_config_ok) {
-            float amag = sqrtf(tax * tax + tay * tay + taz * taz);
-            // Plausibility: total accel magnitude should be near 1g at rest.
-            // Wide range [0.5, 1.5] to tolerate orientation and vibration.
-            _config_ok = (amag > 0.5f && amag < 1.5f);
-            Serial.printf("[IMU] BMI270 functional check: |a|=%.3fg -> %s\n",
-                          amag, _config_ok ? "OK" : "OUT OF RANGE");
-        } else {
-            Serial.println("[IMU] BMI270 functional check FAILED — M5.Imu not responding");
-        }
-
-        // Check mag availability (separate from accel/gyro OK).
-        float tmx, tmy, tmz;
-        _mag_available = M5.Imu.getMag(&tmx, &tmy, &tmz);
-        Serial.printf("[IMU] BMM150 mag: %s\n",
-                      _mag_available ? "detected" : "NOT DETECTED");
-    }
-
-    void update(ImuRawData& out) override {
-        M5.Imu.getAccelData(&out.ax, &out.ay, &out.az);
-        M5.Imu.getGyroData(&out.gx, &out.gy, &out.gz);
-        out.temp_c = 0.0f;
-        M5.Imu.getTemp(&out.temp_c);
-        if (_mag_available) {
-            // mag_valid reflects M5Unified update cycle result, not mag-specific
-            // freshness. At 50 Hz sampling with 30 Hz BMM150 ODR, some cycles
-            // return cached (non-fresh) mag data with valid=true.
-            out.mag_valid = M5.Imu.getMag(&out.mx, &out.my, &out.mz);
-        } else {
-            out.mx = 0.0f;
-            out.my = 0.0f;
-            out.mz = 0.0f;
-            out.mag_valid = false;
-        }
-        out.timestamp_us = esp_timer_get_time();
-    }
-
-    bool verifyConfig() override {
-        return _config_ok;
-    }
+    void begin() override;
+    void update(ImuRawData& out) override;
+    bool verifyConfig() override { return _config_ok; }
 
 private:
+    static constexpr uint8_t kPrimaryAddr = 0x69;
+    static constexpr uint8_t kFallbackAddr = 0x68;
+    static constexpr uint32_t kI2CFreq = 400000;
+    static constexpr float kAccelScaleG = 8.0f / 32768.0f;
+    static constexpr float kGyroScaleDps = 2000.0f / 32768.0f;
+    static constexpr uint16_t kFifoBufferSize = 2048;
+    static constexpr uint16_t kMaxParsedFrames = 80;
+
+    bool probe_bmi_address();
+    bool init_bmi270();
+    bool init_bmm150();
+    bool init_fifo();
+    bool read_fifo_sample(ImuRawData& out);
+    bool read_temperature(float& out_temp);
+    bool flush_fifo(const char* reason);
+    void cache_register_report();
+    void log_bringup_report() const;
+    bool read_reg(uint8_t reg, uint8_t* data, uint32_t len) const;
+    bool write_reg(uint8_t reg, const uint8_t* data, uint32_t len) const;
+    uint8_t read_reg8(uint8_t reg) const;
+    static void decode_bmm150_raw(const uint8_t aux_data[8],
+                                  int16_t& raw_x,
+                                  int16_t& raw_y,
+                                  int16_t& raw_z,
+                                  uint16_t& rhall);
+
+    static BMI2_INTF_RETURN_TYPE bmi_read(uint8_t reg_addr, uint8_t* reg_data, uint32_t len, void* intf_ptr);
+    static BMI2_INTF_RETURN_TYPE bmi_write(uint8_t reg_addr, const uint8_t* reg_data, uint32_t len, void* intf_ptr);
+    static void bmi_delay_us(uint32_t period, void* intf_ptr);
+
+    static BMM150_INTF_RET_TYPE bmm_read(uint8_t reg_addr, uint8_t* reg_data, uint32_t len, void* intf_ptr);
+    static BMM150_INTF_RET_TYPE bmm_write(uint8_t reg_addr, const uint8_t* reg_data, uint32_t len, void* intf_ptr);
+    static void bmm_delay_us(uint32_t period, void* intf_ptr);
+
+    bmi2_dev _bmi = {};
+    bmm150_dev _bmm = {};
+    bmi2_fifo_frame _fifo = {};
+    uint8_t _bmi_addr = kPrimaryAddr;
     bool _config_ok = false;
-    bool _mag_available = false;
+    bool _mag_ok = false;
+    bool _have_last_sample = false;
+    ImuRawData _last_sample = {};
+
+    uint8_t _fifo_buffer[kFifoBufferSize] = {};
+    bmi2_sens_axes_data _acc_frames[kMaxParsedFrames] = {};
+    bmi2_sens_axes_data _gyr_frames[kMaxParsedFrames] = {};
+    bmi2_aux_fifo_data _aux_frames[kMaxParsedFrames] = {};
+
+    uint8_t _chip_id = 0;
+    uint8_t _acc_conf = 0;
+    uint8_t _acc_range = 0;
+    uint8_t _gyr_conf = 0;
+    uint8_t _gyr_range = 0;
+    uint8_t _aux_conf = 0;
+    uint8_t _aux_if_conf = 0;
+    uint8_t _aux_rd_addr = 0;
+    uint8_t _pwr_ctrl = 0;
+    uint16_t _fifo_config = 0;
 };
