@@ -43,7 +43,9 @@ static constexpr float VAR_STILLNESS_GZ_THRESHOLD  = 0.25f; // [(deg/s)^2]
 static constexpr float VAR_STILLNESS_GXY_THRESHOLD = 0.35f; // [(deg/s)^2]
 #endif
 static constexpr float ZUPT_GPS_MAX_KMH = 2.0f; // [km/h] GPS speed threshold
-static constexpr int SD_FLUSH_EVERY = 50;       // flush interval: 1 s at 50 Hz
+static constexpr int SD_FLUSH_EVERY  = 250;     // flush interval: 5 s at 50 Hz (reduces FAT/GC spikes)
+static constexpr int SD_QUEUE_DEPTH  = 200;     // record buffer depth (4 s at 50 Hz)
+static constexpr int SD_TASK_STACK   = 8192;    // Task_SD_Writer stack size (bytes)
 
 // Non-holonomic constraint (NHC)
 static constexpr float NHC_R = 0.5f;            // [(m/s)^2] lateral vel measurement noise

@@ -695,7 +695,9 @@ void Task_Filter(void *pvParameters) {
         rec.nav_fix_us      = last_gps.nav_fix_us;
         rec.dhv_gdspd       = last_gps.dhv_gdspd;
         rec.dhv_fix_us      = last_gps.dhv_fix_us;
-        xQueueSend(sd_queue, &rec, 0); // timeout=0: discard if queue full
+        if (xQueueSend(sd_queue, &rec, 0) != pdTRUE) {
+          sd_records_dropped++;
+        }
       }
     }
   }

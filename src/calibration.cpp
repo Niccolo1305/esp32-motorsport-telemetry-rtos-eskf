@@ -142,7 +142,9 @@ void calibrate_alignment(IImuProvider* imu) {
       crec.gps_sog_kmh = bias_gx;
       crec.gps_alt_m = bias_gy;
       crec.gps_hdop = bias_gz;
-      xQueueSend(sd_queue, &crec, 0);
+      if (xQueueSend(sd_queue, &crec, 0) != pdTRUE) {
+        sd_records_dropped++;
+      }
     }
   } else {
     Serial.println("[CALIB] Mutex timeout 2s: calibration aborted!");

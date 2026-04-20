@@ -76,8 +76,12 @@ extern bool mqtt_enabled;
 
 // ── Atomic Flags (cross-core thread safety) ────────────────────────────────
 extern std::atomic<bool> wifi_enabled;      // written by loop() (triple click)
-extern std::atomic<bool> sd_write_error;    // true if SD write fails at runtime
-extern std::atomic<uint32_t> sd_records_written; // records-written counter (MQTT heartbeat)
+extern std::atomic<bool> sd_write_error;          // true if SD write fails at runtime
+extern std::atomic<uint32_t> sd_records_written;  // records successfully written
+extern std::atomic<uint32_t> sd_records_dropped;  // records dropped (queue full)
+extern std::atomic<uint32_t> sd_flush_worst_us;   // worst-case flush() duration [us]
+extern std::atomic<uint32_t> sd_flush_count;      // total flush() calls
+extern std::atomic<uint32_t> sd_queue_hwm;        // queue high-water mark [records]
 extern std::atomic<bool> gps_stale;         // true if last GPS fix > 5 s ago
 extern std::atomic<int> system_state;       // 0=idle, 1=countdown, 2=racing
 extern std::atomic<bool> recalibration_pending; // v1.3.2: set by calibrate_alignment(), cleared by Task_Filter

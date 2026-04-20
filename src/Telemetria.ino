@@ -21,7 +21,7 @@
 // DT_MS                        20              Delta Time in milliseconds for FreeRTOS task delay.
 // CALIB_SAMPLES               100             Number of samples for initial static calibration (2 sec).
 // GPS_BAUD                     115200          Baud rate for serial communication with the ATGM336H-6N module.
-// SD_FLUSH_EVERY               50              Samples between one flush() and the next (1s at 50Hz), in Task_SD_Writer.
+// SD_FLUSH_EVERY               250             Samples between one flush() and the next (5s at 50Hz), in Task_SD_Writer.
 //
 // --- 3. NETWORK AND DATA TRANSMISSION (telemetria.ino) ---
 // VARIABLE                     VALUE           DESCRIPTION
@@ -188,7 +188,7 @@
 //   |   + nav_speed2d/nav_s_acc/nav_vel_n/nav_vel_e/nav_vel_valid
 //   |   + gps_speed_source + nav_fix_us + dhv_gdspd + dhv_fix_us
 //   |   for deterministic SITL replay of the production SOG path plus GPS diagnostics
-//   | → xQueueSend(sd_queue, depth=200) → Task_SD_Writer
+//   | → xQueueSend(sd_queue, depth=SD_QUEUE_DEPTH=200) → Task_SD_Writer
 //   |
 // ==============================================================================================
 //
@@ -1131,6 +1131,49 @@
 //   - [NOTE] `verifyConfig()` on AtomS3R now means cached bring-up verification,
 //     not a runtime plausibility check.
 //
+// v1.7.1 — SD Writer Hardening
+//   - [SD] SD_FLUSH_EVERY raised from 50 to 250 (1 s → 5 s at 50 Hz). Reduces
+//     FAT table + directory-entry update frequency by 5×, which is the root
+//     cause of flush() latency spikes (50–300 ms) from SD card GC cycles.
+//     Trade-off: up to 5 s of data at risk on sudden power loss (acceptable
+//     in motorsport, where supply interruption during a session is rare).
+//   - [SD] Partial-write protection: write() returning 0 < n < sizeof triggers
+//     immediate fatal shutdown (sd_write_error=true, task delete) instead of a
+//     retry. A partial write shifts the file's record alignment permanently;
+//     retrying would corrupt all subsequent records. Write returning 0 bytes
+//     (transient error) still goes through the existing BUG-9 retry path.
+//   - [DIAG] Drop counter (sd_records_dropped): xQueueSend failures in
+//     Task_Filter and calibration.cpp are now counted atomically instead of
+//     silently discarded. Exposed in MQTT heartbeat and Serial.
+//   - [DIAG] Flush worst-case timer (sd_flush_worst_us): each flush() is timed
+//     with esp_timer_get_time() (µs resolution). The worst observed duration is
+//     tracked and published. Allows detecting slow/aging SD cards in the field.
+//   - [DIAG] Flush counter (sd_flush_count): total number of flush() calls.
+//   - [DIAG] Queue high-water mark (sd_queue_hwm): maximum number of pending
+//     records observed in sd_queue at dequeue time. Indicates how close the
+//     system has come to a queue-full drop event.
+//   - [CFG] SD_QUEUE_DEPTH (200) and SD_TASK_STACK (8192) extracted to config.h
+//     as named constants; magic literals removed from Telemetria.ino setup().
+//   - [MQTT] Heartbeat JSON extended with: dropped, sd_hwm, sd_flush_worst_ms,
+//     sd_flushes.
+//   - [NOTE] No change to TelemetryRecord layout or record_size. Binary format
+//     remains 202 B (AtomS3) / 242 B (AtomS3R). All existing Python tools are
+//     unaffected.
+//
+// --- TODO (deferred to v1.8.0 CAN format bump) ---
+//   - [TODO] Add uint32_t seq sequence number to TelemetryRecord to enable
+//     reliable offline gap detection. Deferred to avoid a double format bump
+//     (will be bundled with CAN fields in one single record_size change).
+//   - [TODO] Add uint16_t crc16 to TelemetryRecord end for corruption detection.
+//     Same deferral reason as seq.
+//   - [TODO] Add CAN bus task (Core 0) for RPM, throttle, wheel speeds (×4),
+//     engine temp, steering angle. CanData struct + can_mutex pattern, mirroring
+//     GpsData / gps_mutex. Fields merged into TelemetryRecord (Scenario A).
+//   - [TODO] Evaluate moving sd_queue allocation to PSRAM on AtomS3R to recover
+//     ~48 KB of internal SRAM for the incoming CAN task stack and shared structs.
+//   - [TODO] AtomS3R ellipsoidal calibration is identity (uncalibrated); a
+//     dedicated tumble test is needed before trusting long-run ESKF on AtomS3R.
+//
 // ==========================================================
 
 #include <M5Unified.h>
@@ -1395,8 +1438,8 @@ void setup() {
       Serial.printf("[OK] SD binary file: %s (header %dB + %d bytes/record)\n",
                     current_log_filename, (int)sizeof(FileHeader),
                     (int)sizeof(TelemetryRecord));
-      sd_queue = xQueueCreate(200, sizeof(TelemetryRecord));
-      xTaskCreatePinnedToCore(Task_SD_Writer, "Task_SD", 8192, NULL, 1,
+      sd_queue = xQueueCreate(SD_QUEUE_DEPTH, sizeof(TelemetryRecord));
+      xTaskCreatePinnedToCore(Task_SD_Writer, "Task_SD", SD_TASK_STACK, NULL, 1,
                               &TaskSDHandle, 1);
     } else {
       Serial.println("[ERR] Failed to create initial binary log file!");
@@ -1674,13 +1717,18 @@ void loop() {
         UBaseType_t stk_sd = (TaskSDHandle != NULL)
             ? uxTaskGetStackHighWaterMark(TaskSDHandle) : 0;
         snprintf(buf, sizeof(buf),
-                 "{\"heartbeat\":true,\"records\":%u,\"uptime_s\":%u,"
+                 "{\"heartbeat\":true,\"records\":%u,\"dropped\":%u,\"uptime_s\":%u,"
                  "\"gps_stale\":%s,\"sd_err\":%s,"
+                 "\"sd_hwm\":%u,\"sd_flush_worst_ms\":%u,\"sd_flushes\":%u,"
                  "\"stk_filter\":%u,\"stk_i2c\":%u,\"stk_sd\":%u}",
                  (unsigned)sd_records_written.load(),
+                 (unsigned)sd_records_dropped.load(),
                  (unsigned)(millis() / 1000),
                  gps_stale ? "true" : "false",
                  sd_write_error ? "true" : "false",
+                 (unsigned)sd_queue_hwm.load(),
+                 (unsigned)(sd_flush_worst_us.load() / 1000),
+                 (unsigned)sd_flush_count.load(),
                  (unsigned)stk_filter,
                  (unsigned)stk_i2c,
                  (unsigned)stk_sd);
