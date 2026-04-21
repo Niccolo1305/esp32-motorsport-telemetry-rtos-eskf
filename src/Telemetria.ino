@@ -64,7 +64,7 @@
 //
 //
 // ==============================================================================================
-// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.7.0
+// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.7.2
 // ==============================================================================================
 //
 // Architecture: "End-of-Pipe EMA" + "ZARU-to-Madgwick"
@@ -1159,6 +1159,25 @@
 //   - [NOTE] No change to TelemetryRecord layout or record_size. Binary format
 //     remains 202 B (AtomS3) / 242 B (AtomS3R). All existing Python tools are
 //     unaffected.
+//
+// v1.7.2 — AtomS3R Bosch FIFO + SD Partial-Advance Fix
+//   - [IMU] Bosch BMI2 FIFO positive return codes are now treated as warnings,
+//     not fatal errors. `BMI2_W_FIFO_EMPTY`, `BMI2_W_PARTIAL_READ`, and other
+//     non-negative warnings can occur while valid FIFO frames have still been
+//     extracted. The provider now discards samples only on negative Bosch error
+//     codes.
+//   - [IMU] Fixes the v1.7.0/v1.7.1 AtomS3R regression where `bmi_raw_*`,
+//     `bmi_acc/gyr_*`, `bmm_raw_*`, and `bmm_ut_*` remained zero because valid
+//     Bosch FIFO/AUX frames were rejected after warning-status extraction.
+//   - [SD] Write validation now checks both `File.write()` return value and the
+//     actual file-position advance. If `write()` reports zero bytes but the file
+//     position advanced, the writer treats it as an unrecoverable partial write
+//     and stops instead of retrying into a permanently misaligned binary stream.
+//   - [VALIDATION] Short AtomS3R v5 log (`tel_59`) confirms non-zero BMI270 and
+//     BMM150 raw/physical fields, 25 Hz BMM freshness on the 50 Hz host loop,
+//     monotonic timestamps, and `(file_size - 80) % 242 == 0`.
+//   - [NOTE] No TelemetryRecord/FileHeader format change. Binary layout remains
+//     v5 / 242 B for AtomS3R and legacy parsers remain unaffected.
 //
 // --- TODO (deferred to v1.8.0 CAN format bump) ---
 //   - [TODO] Add uint32_t seq sequence number to TelemetryRecord to enable

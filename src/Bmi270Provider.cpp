@@ -32,6 +32,10 @@ bool bmm150_raw_overflow(int16_t raw_x, int16_t raw_y, int16_t raw_z) {
            (raw_z == BMM150_OVERFLOW_ADCVAL_ZAXIS_HALL);
 }
 
+bool bmi2_failed(int8_t rslt) {
+    return rslt < BMI2_OK;
+}
+
 } // namespace
 
 void Bmi270Provider::begin() {
@@ -297,7 +301,7 @@ bool Bmi270Provider::read_fifo_sample(ImuRawData& out) {
 
     rslt = bmi2_read_fifo_data(&_fifo, &_bmi);
     const bool partial_read = (rslt == BMI2_W_PARTIAL_READ);
-    if ((rslt != BMI2_OK) && !partial_read) {
+    if (bmi2_failed(rslt)) {
         Serial.printf("[IMU] WARN: bmi2_read_fifo_data failed (%d)\n", rslt);
         out.fifo_overrun = true;
         flush_fifo("read error");
@@ -315,7 +319,7 @@ bool Bmi270Provider::read_fifo_sample(ImuRawData& out) {
     const int8_t gyr_rslt = bmi2_extract_gyro(_gyr_frames, &gyr_len, &gyr_fifo, &_bmi);
     const int8_t aux_rslt = bmi2_extract_aux(_aux_frames, &aux_len, &aux_fifo, &_bmi);
 
-    if ((acc_rslt != BMI2_OK) || (gyr_rslt != BMI2_OK) || (aux_rslt != BMI2_OK)) {
+    if (bmi2_failed(acc_rslt) || bmi2_failed(gyr_rslt) || bmi2_failed(aux_rslt)) {
         Serial.printf("[IMU] WARN: FIFO extract failed acc=%d gyr=%d aux=%d\n", acc_rslt, gyr_rslt, aux_rslt);
         out.fifo_overrun = true;
         flush_fifo("extract error");
