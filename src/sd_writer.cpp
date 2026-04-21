@@ -47,9 +47,13 @@ void Task_SD_Writer(void *pvParameters) {
     if ((uint32_t)pending > prev_hwm)
       sd_queue_hwm.store((uint32_t)pending, std::memory_order_relaxed);
 
-    size_t written = logFile.write((const uint8_t *)&rec, sizeof(TelemetryRecord));
+    const size_t expected = sizeof(TelemetryRecord);
+    const size_t pos_before = logFile.position();
+    size_t written = logFile.write((const uint8_t *)&rec, expected);
+    const size_t pos_after = logFile.position();
+    const size_t advanced = (pos_after >= pos_before) ? (pos_after - pos_before) : 0;
 
-    if (written == sizeof(TelemetryRecord)) {
+    if ((written == expected) && (advanced == expected)) {
       // ── SUCCESS ──────────────────────────────────────────────────────────
       write_fail_count = 0;
       sd_records_written++;
@@ -65,13 +69,13 @@ void Task_SD_Writer(void *pvParameters) {
         unsaved_packets = 0;
       }
 
-    } else if (written > 0) {
+    } else if ((written > 0) || (advanced > 0)) {
       // ── PARTIAL WRITE — unrecoverable ────────────────────────────────────
       // Some bytes were written but not all: the file's record alignment is
       // permanently broken. Any subsequent writes would start at a wrong
       // offset, making the rest of the file unparseable. Declare fatal.
-      Serial.printf("[SD] FATAL: partial write (%d/%d bytes). File corrupted.\n",
-                    (int)written, (int)sizeof(TelemetryRecord));
+      Serial.printf("[SD] FATAL: partial write reported=%d advanced=%d expected=%d. File corrupted.\n",
+                    (int)written, (int)advanced, (int)expected);
       sd_write_error = true;
       logFile.close();
       vTaskDelete(NULL);

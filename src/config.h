@@ -5,7 +5,7 @@
 #include <math.h>
 
 #ifdef USE_BMI270
-const char *const FIRMWARE_VERSION = "v1.7.0-atoms3r";
+const char *const FIRMWARE_VERSION = "v1.7.2-atoms3r";
 #else
 const char *const FIRMWARE_VERSION = "v1.5.2-clean";
 #endif
