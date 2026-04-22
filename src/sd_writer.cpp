@@ -5,9 +5,11 @@
 // Pure binary writes; flushes every SD_FLUSH_EVERY packets (5 s at 50 Hz).
 //
 // Write outcome handling:
-//   written == sizeof  → success, normal path
-//   written == 0       → transient error (card removed?): close/reopen, retry up to 3x
-//   0 < written < size → partial write: file alignment corrupted, unrecoverable → fatal
+//   full record written  → success, normal path
+//   partial progress     → continue from the next byte of the same record
+//   zero progress        → transient error: close/reopen and retry remaining bytes
+//   over-reported write  → impossible API result: count it, clamp to remaining
+//   sustained no-progress→ SD declared lost after SD_WRITE_STALL_TIMEOUT_MS
 //
 // Diagnostics exposed via globals (readable from loop() / MQTT heartbeat):
 //   sd_records_written  — total records successfully written
@@ -15,6 +17,7 @@
 //   sd_flush_worst_us   — worst-case flush() duration in microseconds
 //   sd_flush_count      — total flush() calls
 //   sd_queue_hwm        — queue high-water mark (max pending records observed)
+//   sd_write_overreport_count — impossible write() over-report diagnostics
 #include "sd_writer.h"
 
 #include <SD.h>
@@ -26,20 +29,15 @@ void Task_SD_Writer(void *pvParameters) {
   File logFile = SD.open(current_log_filename, FILE_APPEND);
   if (!logFile) {
     Serial.println("[ERR] SD Task: failed to open file in APPEND mode!");
+    sd_write_error = true;
     vTaskDelete(NULL);
   }
 
   TelemetryRecord rec;
   int unsaved_packets = 0;
-  int write_fail_count = 0;
-  bool pending_retry = false; // true if rec holds a failed zero-write to retry
 
   for (;;) {
-    // Only dequeue a new record if we don't have a pending zero-write retry.
-    if (!pending_retry) {
-      if (!xQueueReceive(sd_queue, &rec, portMAX_DELAY)) continue;
-    }
-    pending_retry = false;
+    if (!xQueueReceive(sd_queue, &rec, portMAX_DELAY)) continue;
 
     // Track queue depth high-water mark (one sample per iteration, not per drain).
     UBaseType_t pending = uxQueueMessagesWaiting(sd_queue);
@@ -48,59 +46,77 @@ void Task_SD_Writer(void *pvParameters) {
       sd_queue_hwm.store((uint32_t)pending, std::memory_order_relaxed);
 
     const size_t expected = sizeof(TelemetryRecord);
-    const size_t pos_before = logFile.position();
-    size_t written = logFile.write((const uint8_t *)&rec, expected);
-    const size_t pos_after = logFile.position();
-    const size_t advanced = (pos_after >= pos_before) ? (pos_after - pos_before) : 0;
+    const uint8_t *record_bytes = reinterpret_cast<const uint8_t *>(&rec);
+    size_t offset = 0;
+    uint32_t no_progress_start_ms = 0;
 
-    if ((written == expected) && (advanced == expected)) {
-      // ── SUCCESS ──────────────────────────────────────────────────────────
-      write_fail_count = 0;
-      sd_records_written++;
-      unsaved_packets++;
-      if (unsaved_packets >= SD_FLUSH_EVERY) {
-        uint64_t t0 = esp_timer_get_time();
-        logFile.flush();
-        uint32_t dt_us = (uint32_t)(esp_timer_get_time() - t0);
-        sd_flush_count++;
-        uint32_t prev_worst = sd_flush_worst_us.load(std::memory_order_relaxed);
-        if (dt_us > prev_worst)
-          sd_flush_worst_us.store(dt_us, std::memory_order_relaxed);
-        unsaved_packets = 0;
+    while (offset < expected) {
+      const size_t remaining = expected - offset;
+      size_t written = logFile.write(record_bytes + offset, remaining);
+
+      if (written > remaining) {
+        sd_write_overreport_count++;
+        Serial.printf("[SD] WARN: write() over-reported %d/%d bytes; clamping to complete record.\n",
+                      (int)written, (int)remaining);
+        written = remaining;
       }
 
-    } else if ((written > 0) || (advanced > 0)) {
-      // ── PARTIAL WRITE — unrecoverable ────────────────────────────────────
-      // Some bytes were written but not all: the file's record alignment is
-      // permanently broken. Any subsequent writes would start at a wrong
-      // offset, making the rest of the file unparseable. Declare fatal.
-      Serial.printf("[SD] FATAL: partial write reported=%d advanced=%d expected=%d. File corrupted.\n",
-                    (int)written, (int)advanced, (int)expected);
-      sd_write_error = true;
-      logFile.close();
-      vTaskDelete(NULL);
-
-    } else {
-      // ── ZERO WRITE — transient error, safe to retry ──────────────────────
-      // Zero bytes written: no alignment damage. Close, wait, reopen, retry.
-      write_fail_count++;
-      if (write_fail_count <= 3) {
-        Serial.printf("[SD] Write failed (%d/3), attempting reopen...\n", write_fail_count);
-        logFile.close();
-        vTaskDelay(pdMS_TO_TICKS(100));
-        logFile = SD.open(current_log_filename, FILE_APPEND);
-        if (!logFile) {
-          Serial.println("[SD] Reopen failed: SD removed?");
-          sd_write_error = true;
-          vTaskDelete(NULL);
+      if (written > 0) {
+        if (written < remaining) {
+          sd_partial_write_count++;
+          Serial.printf("[SD] Partial write recovered: progress=%d remaining=%d\n",
+                        (int)written, (int)remaining);
         }
-        pending_retry = true; // retry the same rec on next iteration
-      } else {
-        Serial.println("[SD] 3 consecutive write failures: SD declared lost.");
+        offset += written;
+        no_progress_start_ms = 0;
+        continue;
+      }
+
+      sd_stall_count++;
+      const uint32_t now_ms = millis();
+      if (no_progress_start_ms == 0) {
+        no_progress_start_ms = now_ms;
+      }
+      const uint32_t stalled_ms = now_ms - no_progress_start_ms;
+      uint32_t prev_worst_stall = sd_stall_worst_ms.load(std::memory_order_relaxed);
+      if (stalled_ms > prev_worst_stall) {
+        sd_stall_worst_ms.store(stalled_ms, std::memory_order_relaxed);
+      }
+
+      if (stalled_ms >= (uint32_t)SD_WRITE_STALL_TIMEOUT_MS) {
+        Serial.printf("[SD] FATAL: no write progress for %lu ms with %d bytes remaining. SD declared lost.\n",
+                      (unsigned long)stalled_ms, (int)remaining);
         sd_write_error = true;
         logFile.close();
         vTaskDelete(NULL);
       }
+
+      Serial.printf("[SD] Write stalled for %lu ms, reopening and retrying %d remaining bytes...\n",
+                    (unsigned long)stalled_ms, (int)remaining);
+      logFile.close();
+      unsaved_packets = 0; // close() flushes completed records already accepted by FS.
+      vTaskDelay(pdMS_TO_TICKS(SD_WRITE_RETRY_DELAY_MS));
+      sd_reopen_count++;
+      logFile = SD.open(current_log_filename, FILE_APPEND);
+      if (!logFile) {
+        Serial.println("[SD] Reopen failed: SD removed?");
+        sd_write_error = true;
+        vTaskDelete(NULL);
+      }
+    }
+
+    // ── SUCCESS: one complete, aligned TelemetryRecord appended ─────────────
+    sd_records_written++;
+    unsaved_packets++;
+    if (unsaved_packets >= SD_FLUSH_EVERY) {
+      uint64_t t0 = esp_timer_get_time();
+      logFile.flush();
+      uint32_t dt_us = (uint32_t)(esp_timer_get_time() - t0);
+      sd_flush_count++;
+      uint32_t prev_worst = sd_flush_worst_us.load(std::memory_order_relaxed);
+      if (dt_us > prev_worst)
+        sd_flush_worst_us.store(dt_us, std::memory_order_relaxed);
+      unsaved_packets = 0;
     }
   }
 }
