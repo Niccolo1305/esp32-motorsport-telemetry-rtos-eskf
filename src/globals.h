@@ -82,6 +82,11 @@ extern std::atomic<uint32_t> sd_records_dropped;  // records dropped (queue full
 extern std::atomic<uint32_t> sd_flush_worst_us;   // worst-case flush() duration [us]
 extern std::atomic<uint32_t> sd_flush_count;      // total flush() calls
 extern std::atomic<uint32_t> sd_queue_hwm;        // queue high-water mark [records]
+extern std::atomic<uint32_t> sd_partial_write_count; // partial-write events recovered/attempted
+extern std::atomic<uint32_t> sd_stall_count;      // zero-progress write stalls
+extern std::atomic<uint32_t> sd_reopen_count;     // SD file reopen attempts after stalls
+extern std::atomic<uint32_t> sd_stall_worst_ms;   // worst per-record stall window [ms]
+extern std::atomic<uint32_t> sd_write_overreport_count; // write() returned more bytes than requested
 extern std::atomic<bool> gps_stale;         // true if last GPS fix > 5 s ago
 extern std::atomic<int> system_state;       // 0=idle, 1=countdown, 2=racing
 extern std::atomic<bool> recalibration_pending; // v1.3.2: set by calibrate_alignment(), cleared by Task_Filter
