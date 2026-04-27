@@ -4,6 +4,9 @@
 
 #include <stdint.h>
 
+static constexpr uint32_t TELEMETRY_RECORD_MAGIC = 0x364C4554UL; // "TEL6" little-endian
+static constexpr uint16_t TELEMETRY_ENDIAN_MARKER = 0x1234;
+
 // Wifi credentials loaded from /wifi_config.txt on SD.
 struct WifiCredential {
   char ssid[33];     // max 32 chars + null terminator
@@ -21,10 +24,11 @@ enum GpsSpeedSource : uint8_t {
 // Binary SD record written by Task_Filter to sd_queue.
 // Compact packed struct:
 //   - AtomS3   : 202 bytes/sample (legacy stable layout)
-//   - AtomS3R  : 242 bytes/sample (v5 raw/FIFO layout)
+//   - AtomS3R  : 256 bytes/sample (v6 sector-aligned raw/FIFO layout)
 //
-// AtomS3R v5 replaces the old ambiguous provider-frame block with acquisition
-// truth: native BMI270 raw, converted BMI270 physical channels, native BMM150
+// AtomS3R v5+ logs the BMI270 FIFO signal explicitly as the post-LPF,
+// pre-pipeline acquisition truth used by the current vehicle-dynamics path.
+// The payload also carries converted BMI270 physical channels, native BMM150
 // raw + RHALL, Bosch-compensated BMM150 uT, and explicit freshness/overflow
 // diagnostics.
 struct __attribute__((packed)) TelemetryRecord {
@@ -65,8 +69,8 @@ struct __attribute__((packed)) TelemetryRecord {
   float tbias_gz;        // 4
 
 #ifdef USE_BMI270
-  int16_t bmi_raw_ax, bmi_raw_ay, bmi_raw_az; // 6
-  int16_t bmi_raw_gx, bmi_raw_gy, bmi_raw_gz; // 6
+  int16_t bmi_post_lpf20_prepipe_ax, bmi_post_lpf20_prepipe_ay, bmi_post_lpf20_prepipe_az; // 6
+  int16_t bmi_post_lpf20_prepipe_gx, bmi_post_lpf20_prepipe_gy, bmi_post_lpf20_prepipe_gz; // 6
   float bmi_acc_x_g, bmi_acc_y_g, bmi_acc_z_g; // 12
   float bmi_gyr_x_dps, bmi_gyr_y_dps, bmi_gyr_z_dps; // 12
   int16_t bmm_raw_x, bmm_raw_y, bmm_raw_z; // 6
@@ -79,7 +83,7 @@ struct __attribute__((packed)) TelemetryRecord {
   uint8_t fifo_frames_drained; // 1
   uint8_t fifo_backlog; // 1
   uint8_t fifo_overrun; // 1
-  uint8_t reserved0; // 1
+  uint8_t sd_queue_hwm; // 1, saturated snapshot
 #else
   // Legacy AtomS3 provider-frame channels retained to keep the 202-byte format
   // stable and backwards-compatible.
@@ -101,9 +105,20 @@ struct __attribute__((packed)) TelemetryRecord {
 
   float dhv_gdspd;       // 4
   uint64_t dhv_fix_us;   // 8
+
+#ifdef USE_BMI270
+  // Sector-aligned tail: record magic + seq + compact SD diagnostics + CRC16.
+  uint32_t record_magic; // 4
+  uint32_t seq; // 4
+  uint8_t sd_records_dropped; // 1, saturated snapshot
+  uint8_t sd_partial_write_count; // 1, saturated snapshot
+  uint8_t sd_stall_count; // 1, saturated snapshot
+  uint8_t sd_reopen_count; // 1, saturated snapshot
+  uint16_t crc16; // 2, CRC over all prior record bytes
+#endif
 };
 #ifdef USE_BMI270
-static_assert(sizeof(TelemetryRecord) == 242, "TelemetryRecord must be 242 bytes (AtomS3R v5 raw/FIFO)");
+static_assert(sizeof(TelemetryRecord) == 256, "TelemetryRecord must be 256 bytes (AtomS3R v6 sector-aligned)");
 #else
 static_assert(sizeof(TelemetryRecord) == 202, "TelemetryRecord must be 202 bytes");
 #endif
@@ -129,6 +144,60 @@ struct __attribute__((packed)) FileHeader {
 };
 static_assert(sizeof(FileHeader) == 80, "FileHeader must be 80 bytes");
 
+#ifdef USE_BMI270
+enum FileHeaderV6BuildFlags : uint32_t {
+  FILE_HEADER_V6_FLAG_USE_BMI270 = 0x00000001,
+  FILE_HEADER_V6_FLAG_BOARD_HAS_PSRAM = 0x00000002,
+  FILE_HEADER_V6_FLAG_BMM150_FLOAT = 0x00000004,
+};
+
+enum FileHeaderBoardId : uint8_t {
+  FILE_HEADER_BOARD_ATOMS3 = 1,
+  FILE_HEADER_BOARD_ATOMS3R = 2,
+};
+
+enum FileHeaderImuId : uint8_t {
+  FILE_HEADER_IMU_MPU6886 = 1,
+  FILE_HEADER_IMU_BMI270 = 2,
+};
+
+enum FileHeaderMagId : uint8_t {
+  FILE_HEADER_MAG_NONE = 0,
+  FILE_HEADER_MAG_BMM150 = 1,
+};
+
+// Header v6 keeps the first 80 bytes byte-for-byte compatible with FileHeader,
+// then extends to 256 bytes so data records start on a sector-friendly offset.
+struct __attribute__((packed)) FileHeaderV6 {
+  FileHeader base; // 80
+  uint16_t header_size; // 2
+  uint16_t data_offset; // 2
+  uint16_t endian_marker; // 2
+  uint16_t header_crc16; // 2, computed with this field zeroed
+  uint32_t build_flags; // 4
+  uint32_t sd_spi_hz; // 4
+  uint32_t imu_i2c_hz; // 4
+  uint16_t sd_queue_depth; // 2
+  uint16_t imu_queue_depth; // 2
+  uint16_t sd_flush_every; // 2
+  uint16_t record_magic_offset; // 2
+  uint16_t record_crc_offset; // 2
+  uint8_t reset_reason_cpu0; // 1
+  uint8_t reset_reason_cpu1; // 1
+  uint8_t board_id; // 1
+  uint8_t imu_id; // 1
+  uint8_t mag_id; // 1
+  uint8_t gps_enabled; // 1
+  uint8_t bmi_chip_id; // 1
+  uint8_t bmm_chip_id; // 1
+  uint8_t bmi_cfg_regs[32]; // selected BMI270 bring-up registers
+  uint8_t bmm_cfg_regs[16]; // selected BMM150 bring-up registers
+  char log_filename[32];
+  uint8_t reserved[58];
+};
+static_assert(sizeof(FileHeaderV6) == 256, "FileHeaderV6 must be 256 bytes");
+#endif
+
 // IMU sample forwarded from Task_I2C to Task_Filter.
 // temp_c is captured in the exclusive I2C context to avoid cross-task bus races.
 // NOTE: not packed; sizeof depends on compiler alignment.
@@ -137,8 +206,8 @@ struct ImuRawData {
   float bmi_gyr_x_dps, bmi_gyr_y_dps, bmi_gyr_z_dps;
   float temp_c;
   uint64_t timestamp_us;
-  int16_t bmi_raw_ax, bmi_raw_ay, bmi_raw_az;
-  int16_t bmi_raw_gx, bmi_raw_gy, bmi_raw_gz;
+  int16_t bmi_post_lpf20_prepipe_ax, bmi_post_lpf20_prepipe_ay, bmi_post_lpf20_prepipe_az;
+  int16_t bmi_post_lpf20_prepipe_gx, bmi_post_lpf20_prepipe_gy, bmi_post_lpf20_prepipe_gz;
   int16_t bmm_raw_x, bmm_raw_y, bmm_raw_z;
   uint16_t bmm_rhall;
   float bmm_ut_x, bmm_ut_y, bmm_ut_z;

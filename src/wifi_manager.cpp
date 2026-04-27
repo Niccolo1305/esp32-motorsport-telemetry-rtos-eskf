@@ -119,17 +119,6 @@ void connect_wifi() {
         snprintf(buf, sizeof(buf), "Attempt %d/12", i + 1);
         setLabel(30, buf);
         M5.update();
-        if (M5.BtnA.wasPressed()) {
-          // Wi-Fi bypass: airplane mode (SD-only offline)
-          WiFi.disconnect(true);
-          WiFi.mode(WIFI_OFF);
-          wifi_enabled = false;
-          Serial.println("[WIFI] BtnA bypass: radio off, SD-only mode.");
-          setLabel(10, "WiFi BYPASS", WHITE, BLACK);
-          setLabel(30, "SD-only mode");
-          vTaskDelay(pdMS_TO_TICKS(1500));
-          return;
-        }
         vTaskDelay(pdMS_TO_TICKS(500));
       }
       WiFi.disconnect();

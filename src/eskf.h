@@ -126,8 +126,11 @@ public:
 
         float cos_th = cosf(theta);
         float sin_th = sinf(theta);
-        float ax_enu = ax_ms2 * cos_th - ay_ms2 * sin_th;
-        float ay_enu = ax_ms2 * sin_th + ay_ms2 * cos_th;
+        // Vehicle-frame convention:
+        //   X = lateral/right, Y = longitudinal/forward.
+        // theta is the forward heading from ENU east (same convention as GPS COG).
+        float ax_enu = ax_ms2 * sin_th + ay_ms2 * cos_th;
+        float ay_enu = -ax_ms2 * cos_th + ay_ms2 * sin_th;
 
         float vx_new = vx + ax_enu * dt;
         float vy_new = vy + ay_enu * dt;
@@ -137,8 +140,8 @@ public:
         X(3) = vy_new;
         X(4) = theta_new;
 
-        float dax_dth = -ax_ms2 * sin_th - ay_ms2 * cos_th;
-        float day_dth =  ax_ms2 * cos_th - ay_ms2 * sin_th;
+        float dax_dth = ax_ms2 * cos_th - ay_ms2 * sin_th;
+        float day_dth = ax_ms2 * sin_th + ay_ms2 * cos_th;
 
         Matrix<5, 5> Fj;
         Fj.Fill(0.0f);
@@ -341,16 +344,16 @@ public:
         float vx_ = X(2), vy_ = X(3), th = X(4);
         float sin_th = sinf(th), cos_th = cosf(th);
 
-        // Predicted lateral velocity in body frame
-        float v_lat = -vx_ * sin_th + vy_ * cos_th;
+        // Predicted lateral/right velocity in body frame.
+        float v_lat = vx_ * sin_th - vy_ * cos_th;
         float y = 0.0f - v_lat;  // innovation (measurement z = 0)
 
         // Jacobian H = d(v_lat)/dX
         Matrix<1, 5> H;
         H.Fill(0.0f);
-        H(0, 2) = -sin_th;                          // d/dvx
-        H(0, 3) =  cos_th;                          // d/dvy
-        H(0, 4) = -(vx_ * cos_th + vy_ * sin_th);  // d/dθ
+        H(0, 2) = sin_th;                          // d/dvx
+        H(0, 3) = -cos_th;                         // d/dvy
+        H(0, 4) = vx_ * cos_th + vy_ * sin_th;     // d/dtheta
 
         // Scalar Kalman update (same pattern as UPDATE 2: speed)
         Matrix<1, 1> S_mat = H * P * (~H);
@@ -477,8 +480,11 @@ public:
 
         float cos_th = cosf(theta);
         float sin_th = sinf(theta);
-        float ax_enu = ax_ms2 * cos_th - ay_ms2 * sin_th;
-        float ay_enu = ax_ms2 * sin_th + ay_ms2 * cos_th;
+        // Vehicle-frame convention:
+        //   X = lateral/right, Y = longitudinal/forward.
+        // theta is the forward heading from ENU east (same convention as GPS COG).
+        float ax_enu = ax_ms2 * sin_th + ay_ms2 * cos_th;
+        float ay_enu = -ax_ms2 * cos_th + ay_ms2 * sin_th;
 
         float vx_new = vx + ax_enu * dt;
         float vy_new = vy + ay_enu * dt;
@@ -489,8 +495,8 @@ public:
         X(4) = theta_new;
         // X(5) = bgz — random walk, unchanged in predict
 
-        float dax_dth = -ax_ms2 * sin_th - ay_ms2 * cos_th;
-        float day_dth =  ax_ms2 * cos_th - ay_ms2 * sin_th;
+        float dax_dth = ax_ms2 * cos_th - ay_ms2 * sin_th;
+        float day_dth = ax_ms2 * sin_th + ay_ms2 * cos_th;
 
         Matrix<6, 6> Fj;
         Fj.Fill(0.0f);
@@ -713,14 +719,14 @@ public:
         float vx_ = X(2), vy_ = X(3), th = X(4);
         float sin_th = sinf(th), cos_th = cosf(th);
 
-        float v_lat = -vx_ * sin_th + vy_ * cos_th;
+        float v_lat = vx_ * sin_th - vy_ * cos_th;
         float y = 0.0f - v_lat;
 
         Matrix<1, 6> H;
         H.Fill(0.0f);
-        H(0, 2) = -sin_th;
-        H(0, 3) =  cos_th;
-        H(0, 4) = -(vx_ * cos_th + vy_ * sin_th);
+        H(0, 2) = sin_th;
+        H(0, 3) = -cos_th;
+        H(0, 4) = vx_ * cos_th + vy_ * sin_th;
         // H(0, 5) = 0: bias does not appear in lateral velocity
 
         Matrix<1, 1> S_mat = H * P * (~H);

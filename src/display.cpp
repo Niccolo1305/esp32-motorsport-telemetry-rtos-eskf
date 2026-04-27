@@ -8,6 +8,9 @@
 
 void setLabel(int y, const char *text, uint16_t txtColor,
               uint16_t bgColor) {
+  if (text == nullptr) {
+    text = "";
+  }
   M5.Lcd.fillRect(0, y, M5.Lcd.width(), 16, bgColor);
   M5.Lcd.setTextColor(txtColor, bgColor);
   M5.Lcd.setCursor(2, y);

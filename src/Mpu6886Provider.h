@@ -99,12 +99,12 @@ public:
         M5.Imu.getGyroData(&out.bmi_gyr_x_dps, &out.bmi_gyr_y_dps, &out.bmi_gyr_z_dps);
         out.temp_c = 0.0f;
         M5.Imu.getTemp(&out.temp_c);
-        out.bmi_raw_ax = 0;
-        out.bmi_raw_ay = 0;
-        out.bmi_raw_az = 0;
-        out.bmi_raw_gx = 0;
-        out.bmi_raw_gy = 0;
-        out.bmi_raw_gz = 0;
+    out.bmi_post_lpf20_prepipe_ax = 0;
+    out.bmi_post_lpf20_prepipe_ay = 0;
+    out.bmi_post_lpf20_prepipe_az = 0;
+    out.bmi_post_lpf20_prepipe_gx = 0;
+    out.bmi_post_lpf20_prepipe_gy = 0;
+    out.bmi_post_lpf20_prepipe_gz = 0;
         out.bmm_raw_x = 0;
         out.bmm_raw_y = 0;
         out.bmm_raw_z = 0;

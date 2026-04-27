@@ -26,6 +26,7 @@ extern SemaphoreHandle_t gps_mutex;
 extern TaskHandle_t TaskI2CHandle;
 extern TaskHandle_t TaskFilterHandle;
 extern TaskHandle_t TaskSDHandle;
+extern TaskHandle_t TaskGPSHandle;
 
 // ── Shared Telemetry Data ──────────────────────────────────────────────────
 extern FilteredTelemetry shared_telemetry;
@@ -87,6 +88,7 @@ extern std::atomic<uint32_t> sd_stall_count;      // zero-progress write stalls
 extern std::atomic<uint32_t> sd_reopen_count;     // SD file reopen attempts after stalls
 extern std::atomic<uint32_t> sd_stall_worst_ms;   // worst per-record stall window [ms]
 extern std::atomic<uint32_t> sd_write_overreport_count; // write() returned more bytes than requested
+extern std::atomic<uint32_t> gps_mutex_timeout_count; // Task_Filter GPS snapshot lock timeouts
 extern std::atomic<bool> gps_stale;         // true if last GPS fix > 5 s ago
 extern std::atomic<int> system_state;       // 0=idle, 1=countdown, 2=racing
 extern std::atomic<bool> recalibration_pending; // v1.3.2: set by calibrate_alignment(), cleared by Task_Filter

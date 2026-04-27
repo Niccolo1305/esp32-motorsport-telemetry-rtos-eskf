@@ -19,8 +19,14 @@ void Task_I2C(void *pvParameters) {
   for (;;) {
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
     imu->update(data);
-    // xQueueOverwrite: if Task_Filter is behind, discard old data and
-    // insert the new one (real-time data, not FIFO).
-    xQueueOverwrite(imuQueue, &data);
+    if (IMU_QUEUE_DEPTH == 1) {
+      // Mailbox mode: always keep the latest sample for realtime display/control.
+      xQueueOverwrite(imuQueue, &data);
+    } else if (xQueueSend(imuQueue, &data, 0) != pdTRUE) {
+      // Diagnostic FIFO mode: if full, discard the oldest sample and keep going.
+      ImuRawData dropped;
+      (void)xQueueReceive(imuQueue, &dropped, 0);
+      (void)xQueueSend(imuQueue, &data, 0);
+    }
   }
 }

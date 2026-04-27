@@ -30,6 +30,10 @@ import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import socket
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 1.  INTERACTIVE CSV SELECTOR & DATA LOADING
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -132,6 +136,12 @@ COL_MAP = {
     "raw_gx":        "raw_gx (°/s)",
     "raw_gy":        "raw_gy (°/s)",
     "raw_gz":        "raw_gz (°/s)",
+    "pipe_lin_ax":   "raw_ax (G)",     # legacy dashboard name: post-pipeline, pre-EMA
+    "pipe_lin_ay":   "raw_ay (G)",
+    "pipe_lin_az":   "raw_az (G)",
+    "pipe_body_gx":  "raw_gx (°/s)",   # legacy dashboard name: post-pipeline, pre-EMA
+    "pipe_body_gy":  "raw_gy (°/s)",
+    "pipe_body_gz":  "raw_gz (°/s)",
     "kf6_x":         "kf6_x (m)",
     "kf6_y":         "kf6_y (m)",
     "kf6_vel":       "kf6_vel (m/s)",
@@ -143,6 +153,12 @@ COL_MAP = {
     "sensor_gx":     "sensor_gx (°/s)",
     "sensor_gy":     "sensor_gy (°/s)",
     "sensor_gz":     "sensor_gz (°/s)",
+    "bmi_acc_x_g":    "bmi_acc_x_g (G)",
+    "bmi_acc_y_g":    "bmi_acc_y_g (G)",
+    "bmi_acc_z_g":    "bmi_acc_z_g (G)",
+    "bmi_gyr_x_dps":  "bmi_gyr_x_dps (°/s)",
+    "bmi_gyr_y_dps":  "bmi_gyr_y_dps (°/s)",
+    "bmi_gyr_z_dps":  "bmi_gyr_z_dps (°/s)",
 }
 
 REQUIRED_COLS = [
@@ -221,10 +237,23 @@ def load_and_prepare(path: str) -> pd.DataFrame:
                        if c.split(" (", 1)[0].strip() == "raw_gz"), None)
     raw_gx_col = next((c for c in df.columns
                        if c.split(" (", 1)[0].strip() == "raw_gx"), None)
+    prepipe_acc_cols = {
+        axis: next((c for c in df.columns
+                    if c.split(" (", 1)[0].strip() == f"bmi_acc_{axis}_g"), None)
+        for axis in ("x", "y", "z")
+    }
+    prepipe_gyr_cols = {
+        axis: next((c for c in df.columns
+                    if c.split(" (", 1)[0].strip() == f"bmi_gyr_{axis}_dps"), None)
+        for axis in ("x", "y", "z")
+    }
     if t_us_col is not None:
         numeric_cols.add(t_us_col)
     if t_ms_col is not None:
         numeric_cols.add(t_ms_col)
+    for col in list(prepipe_acc_cols.values()) + list(prepipe_gyr_cols.values()):
+        if col is not None:
+            numeric_cols.add(col)
 
     for col in numeric_cols:
         if col in df.columns:
@@ -259,12 +288,30 @@ def load_and_prepare(path: str) -> pd.DataFrame:
     df["distance_m"] = np.cumsum(np.abs(df["kf_vel (m/s)"].values) * dt)
 
     # Short-name acceleration aliases for internal use.
+    #
+    # Naming note:
+    # - bmi_post_lpf20_prepipe_* are Bosch/BMI270 acquisition snapshots in LSB.
+    # - bmi_acc_*_g / bmi_gyr_*_dps are the physical pre-pipeline chip-frame values.
+    # - pipe_lin_* / pipe_body_* are zero-latency vehicle-frame pipeline outputs
+    #   after axis remap, 3D rotation, mounting-bias removal, and Madgwick gravity
+    #   removal for accel; ESKF/Kalman is a separate navigation branch.
+    # - ax/ay/az and gx/gy/gz are final post-pipeline EMA outputs.
+    # This dashboard keeps the historical "raw_*" internal names for the
+    # pre-EMA pipeline channels because those are the useful vehicle-dynamics
+    # signals for G-G, yaw, brake/accel thresholding.
     df["ax_g"] = df["ax (G)"]
     df["ay_g"] = df["ay (G)"]
     df["az_g"] = df["az (G)"]
     df["raw_ax_g"] = df["raw_ax (G)"]
     df["raw_ay_g"] = df["raw_ay (G)"]
     df["raw_az_g"] = df["raw_az (G)"]
+
+    for axis, col in prepipe_acc_cols.items():
+        if col is not None:
+            df[f"prepipe_acc_{axis}_g"] = df[col]
+    for axis, col in prepipe_gyr_cols.items():
+        if col is not None:
+            df[f"prepipe_gyr_{axis}_dps"] = df[col]
 
     # 2-D acceleration magnitude (lateral + longitudinal) -> Grip metric.
     df["acc_mag"] = np.sqrt(df["ax_g"] ** 2 + df["ay_g"] ** 2)
@@ -577,27 +624,37 @@ def build_gg(sub: pd.DataFrame, use_raw: bool, use_3d: bool,
 
     mag_min, mag_max = sub[mag_c].min(), sub[mag_c].max()
     cd = _cd4(sub)
+    # Keep the G-G tooltip tied to the same dashboard-only remap used for the
+    # plotted coordinates: customdata[4]=Lat/X, customdata[5]=Long/Y. This avoids
+    # accidental Long/Lat label swaps if Plotly traces are later rearranged.
+    cd_gg = np.column_stack((cd, sub[ax_c].values, sub[ay_c].values))
 
+    # Dashboard-only visual remap.
+    # The firmware/log convention after the frame fix is ax=lateral and
+    # ay=longitudinal. For the G-G plot we deliberately present the automotive
+    # convention: lateral acceleration on X, longitudinal acceleration on Y.
+    # This is not a firmware-frame correction: it only changes plotted
+    # coordinates and labels.
     if use_3d:
         az_c = "raw_az_g" if use_raw else "az_g"
         fig.add_trace(go.Scatter3d(
-            x=sub[ay_c].values, y=sub[ax_c].values, z=sub[az_c].values,
+            x=sub[ax_c].values, y=sub[ay_c].values, z=sub[az_c].values,
             mode="markers",
             marker=dict(size=2, color=sub[mag_c].values, colorscale=COLORSCALE,
                         cmin=mag_min, cmax=mag_max, opacity=0.5,
                         colorbar=dict(title="G", len=0.5, thickness=12)),
-            customdata=cd,
+            customdata=cd_gg,
             hovertemplate=(
-                "Ay=%{x:.3f}G Ax=%{y:.3f}G Az=%{z:.3f}G<br>"
+                "Lat(X)=%{customdata[4]:.3f}G Long(Y)=%{customdata[5]:.3f}G Az=%{z:.3f}G<br>"
                 "t=%{customdata[1]:.1f}s d=%{customdata[2]:.0f}m<extra></extra>"
             ),
             name="G-G",
         ))
         fig.add_trace(_c3d("hov", HOVER_COL)); fig.add_trace(_c3d("clk", CLICK_COL))
         scene_kw = dict(
-            xaxis=dict(title="Ay (G)", gridcolor=GRID_COLOR, backgroundcolor=BG_PLOT),
-            yaxis=dict(title="Ax (G)", gridcolor=GRID_COLOR, backgroundcolor=BG_PLOT),
-            zaxis=dict(title="Az (G)", gridcolor=GRID_COLOR, backgroundcolor=BG_PLOT,
+            xaxis=dict(title="Lateral (G)", gridcolor=GRID_COLOR, backgroundcolor=BG_PLOT),
+            yaxis=dict(title="Longitudinal (G)", gridcolor=GRID_COLOR, backgroundcolor=BG_PLOT),
+            zaxis=dict(title="Vertical (G)", gridcolor=GRID_COLOR, backgroundcolor=BG_PLOT,
                        autorange="reversed"),
             bgcolor=BG_PLOT, aspectmode="cube",
         )
@@ -616,13 +673,13 @@ def build_gg(sub: pd.DataFrame, use_raw: bool, use_3d: bool,
         )
     else:
         fig.add_trace(go.Scattergl(
-            x=sub[ay_c].values, y=sub[ax_c].values, mode="markers",
+            x=sub[ax_c].values, y=sub[ay_c].values, mode="markers",
             marker=dict(size=2, color=sub[mag_c].values, colorscale=COLORSCALE,
                         cmin=mag_min, cmax=mag_max, opacity=0.5,
                         colorbar=dict(title="G", len=0.5, thickness=12)),
-            customdata=cd,
+            customdata=cd_gg,
             hovertemplate=(
-                "Ay=%{x:.3f}G Ax=%{y:.3f}G<br>"
+                "Lat(X)=%{customdata[4]:.3f}G Long(Y)=%{customdata[5]:.3f}G<br>"
                 "t=%{customdata[1]:.1f}s d=%{customdata[2]:.0f}m<extra></extra>"
             ),
             name="G-G",
@@ -631,13 +688,29 @@ def build_gg(sub: pd.DataFrame, use_raw: bool, use_3d: bool,
         if fixed_range is not None:
             mr = fixed_range
         else:
-            mr = max(sub[ay_c].abs().max(), sub[ax_c].abs().max(), 0.01) * 1.15
+            mr = max(sub[ax_c].abs().max(), sub[ay_c].abs().max(), 0.01) * 1.15
+        cardinal_font = dict(size=12, color=TEXT_COLOR, family="Inter,sans-serif")
+        cardinal_bg = "rgba(10,18,38,0.70)"
         fig.update_layout(**_base(
             title=dict(text="G-G Diagram" + (" [Fixed]" if fixed_range else ""),
                        font=dict(size=13)),
-            xaxis=dict(title="Ay – Lat (G)", range=[-mr, mr], gridcolor=GRID_COLOR,
+            xaxis=dict(title="Lateral (G)", range=[-mr, mr], gridcolor=GRID_COLOR,
                        scaleanchor="y", scaleratio=1),
-            yaxis=dict(title="Ax – Long (G)", range=[-mr, mr], gridcolor=GRID_COLOR),
+            yaxis=dict(title="Longitudinal (G)", range=[-mr, mr], gridcolor=GRID_COLOR),
+            annotations=[
+                dict(text="ACCEL", x=0.5, y=0.98, xref="paper", yref="paper",
+                     showarrow=False, xanchor="center", yanchor="top",
+                     font=cardinal_font, bgcolor=cardinal_bg),
+                dict(text="BRAKING", x=0.5, y=0.02, xref="paper", yref="paper",
+                     showarrow=False, xanchor="center", yanchor="bottom",
+                     font=cardinal_font, bgcolor=cardinal_bg),
+                dict(text="LEFT", x=0.02, y=0.5, xref="paper", yref="paper",
+                     showarrow=False, xanchor="left", yanchor="middle",
+                     font=cardinal_font, bgcolor=cardinal_bg),
+                dict(text="RIGHT", x=0.98, y=0.5, xref="paper", yref="paper",
+                     showarrow=False, xanchor="right", yanchor="middle",
+                     font=cardinal_font, bgcolor=cardinal_bg),
+            ],
             uirevision="gg",
         ))
     return fig
@@ -796,7 +869,7 @@ def build_timeline(full_df: pd.DataFrame, use_raw: bool, use_distance: bool,
     Returns:
         A ``plotly.graph_objects.Figure``.
     """
-    ax_c = "raw_ax_g" if use_raw else "ax_g"
+    long_c = "raw_ay_g" if use_raw else "ay_g"
     x_col = "distance_m" if use_distance else "t_s"
     x_tit = "Distance (m)" if use_distance else "Time (s)"
     fig = go.Figure()
@@ -809,11 +882,11 @@ def build_timeline(full_df: pd.DataFrame, use_raw: bool, use_distance: bool,
         return fig
 
     vel = full_df["vel_kmh"].values
-    ax_vals = full_df[ax_c].values
+    long_vals = full_df[long_c].values
     cd_all = _cd4(full_df)
 
-    m_brake = ax_vals < BRAKE_TH
-    m_accel = ax_vals > ACCEL_TH
+    m_brake = long_vals < BRAKE_TH
+    m_accel = long_vals > ACCEL_TH
     m_coast = ~m_brake & ~m_accel
 
     ht = "<b>%{y:.1f} km/h</b><br>t=%{customdata[1]:.1f}s d=%{customdata[2]:.0f}m<extra></extra>"
@@ -918,7 +991,7 @@ app.layout = html.Div(style={
     html.Div(style={**CARD_S, "textAlign": "left", "marginBottom": "14px",
                     "display": "flex", "flexWrap": "wrap",
                     "alignItems": "center", "gap": "20px"}, children=[
-        dbc.Switch(id="sw-raw",    label="Raw Data",       value=False),
+        dbc.Switch(id="sw-raw",    label="Vehicle-Frame Pipe", value=False),
         dbc.Switch(id="sw-3d",     label="3D G-G",         value=False),
         dbc.Switch(id="sw-xaxis",  label="X-Axis: Distance", value=False),
         dbc.Switch(id="sw-roll",   label="Show Roll Rate", value=False),
@@ -926,12 +999,12 @@ app.layout = html.Div(style={
         dbc.Switch(id="sw-gg-fix", label="G-G Fixed Scale", value=False),
         html.Div(style={"borderLeft": f"1px solid {GRID_COLOR}", "paddingLeft": "16px",
                          "display": "flex", "alignItems": "center", "gap": "8px"}, children=[
-            html.Span("Sector:", style={"fontWeight": "600", "fontSize": "12px"}),
-            dcc.Input(id="in-start", type="number", placeholder="Start",
+            html.Span("Sector (s):", style={"fontWeight": "600", "fontSize": "12px"}),
+            dcc.Input(id="in-start", type="number", placeholder="Start s",
                       style={"width": "80px", "backgroundColor": BG_CARD, "color": "#fff",
                              "border": f"1px solid {GRID_COLOR}", "borderRadius": "6px",
                              "padding": "4px 8px", "fontSize": "12px"}),
-            dcc.Input(id="in-end", type="number", placeholder="End",
+            dcc.Input(id="in-end", type="number", placeholder="End s",
                       style={"width": "80px", "backgroundColor": BG_CARD, "color": "#fff",
                              "border": f"1px solid {GRID_COLOR}", "borderRadius": "6px",
                              "padding": "4px 8px", "fontSize": "12px"}),
@@ -996,8 +1069,11 @@ def sector_click(click_data, _reset, sel, use_dist):
     if not pts:
         return no_update, no_update, no_update
 
-    # Extract the x-value (time or distance) of the clicked point
-    x_val = pts[0].get("x")
+    # Sector values are stored in seconds, regardless of whether the timeline
+    # is currently plotted against time or distance. Plotly x is distance when
+    # "X-Axis: Distance" is enabled, so customdata[1] (t_s) is canonical.
+    cd = pts[0].get("customdata")
+    x_val = cd[1] if cd is not None and len(cd) > 1 else pts[0].get("x")
     if x_val is None:
         return no_update, no_update, no_update
     x_val = float(x_val)
@@ -1029,7 +1105,7 @@ def sector_click(click_data, _reset, sel, use_dist):
     prevent_initial_call=True,
 )
 def apply_sector(_nz, _nr, man_s, man_e):
-    """Commit the manual sector inputs to the shared x-range store.
+    """Commit the manual sector inputs, always in seconds, to the range store.
 
     Triggered by the 'Apply Sector' button or the 'Reset' button.
     """
@@ -1043,6 +1119,27 @@ def apply_sector(_nz, _nr, man_s, man_e):
                 s, e = e, s
             return [s, e]
     return no_update
+
+
+def _axis_value_from_time(t_sec, use_distance: bool):
+    """Convert a canonical sector time to the currently displayed x-axis unit."""
+    if t_sec is None:
+        return None
+    t_sec = float(t_sec)
+    if not use_distance:
+        return t_sec
+    return float(np.interp(t_sec, DF["t_s"].values, DF["distance_m"].values))
+
+
+def _axis_range_from_time_range(time_range, use_distance: bool):
+    """Convert a stored [start_s, end_s] range into time or distance axis units."""
+    if time_range is None:
+        return None
+    start_s, end_s = sorted((float(time_range[0]), float(time_range[1])))
+    return [
+        _axis_value_from_time(start_s, use_distance),
+        _axis_value_from_time(end_s, use_distance),
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1073,40 +1170,45 @@ def heavy(xrange, sel, use_raw, use_3d, use_dist, show_roll, show_grip, gg_fixed
     whenever a toggle or sector range changes.  The lighter hover/click
     callbacks use ``Patch()`` to avoid this cost on every mouse move.
     """
-    x_col = "distance_m" if use_dist else "t_s"
-
     if xrange is not None:
-        mask = (DF[x_col] >= xrange[0]) & (DF[x_col] <= xrange[1])
+        start_s, end_s = sorted((float(xrange[0]), float(xrange[1])))
+        mask = (DF["t_s"] >= start_s) & (DF["t_s"] <= end_s)
         sub = DF.loc[mask]
     else:
         sub = DF
+    axis_range = _axis_range_from_time_range(xrange, use_dist)
 
     # Compute KPIs for the active sector
     if sub.empty:
         kv, kl, kg = "–", "–", "–"
     else:
-        ac = "raw_ax_g" if use_raw else "ax_g"
-        lc = "raw_ay_g" if use_raw else "ay_g"
+        lat_c = "raw_ax_g" if use_raw else "ax_g"
+        long_c = "raw_ay_g" if use_raw else "ay_g"
         kv = f"{sub['vel_kmh'].max():.1f}"
-        kl = f"{sub[lc].abs().max():.4f}"
-        kg = f"{sub[ac].abs().max():.4f}"
+        kl = f"{sub[lat_c].abs().max():.4f}"
+        kg = f"{sub[long_c].abs().max():.4f}"
 
-    # Retrieve sector-selection anchors from store
-    sel = sel or {"start": None, "end": None}
-    sel_s = sel.get("start")
-    sel_e = sel.get("end")
+    # Timeline markers are drawn in the active x-axis unit, while sector state
+    # is stored in seconds. A committed manual sector takes precedence over
+    # any stale click anchors.
+    if axis_range is not None:
+        sel_s, sel_e = axis_range
+    else:
+        sel = sel or {"start": None, "end": None}
+        sel_s = _axis_value_from_time(sel.get("start"), use_dist)
+        sel_e = _axis_value_from_time(sel.get("end"), use_dist)
 
     # G-G fixed scale: compute axis range from the full dataset envelope
     gg_fr = None
     if gg_fixed:
-        ac_full = "raw_ax_g" if use_raw else "ax_g"
-        lc_full = "raw_ay_g" if use_raw else "ay_g"
-        gg_fr = max(DF[lc_full].abs().max(), DF[ac_full].abs().max(), 0.01) * 1.15
+        lat_full = "raw_ax_g" if use_raw else "ax_g"
+        long_full = "raw_ay_g" if use_raw else "ay_g"
+        gg_fr = max(DF[lat_full].abs().max(), DF[long_full].abs().max(), 0.01) * 1.15
 
     fig_map = build_map(sub)
     fig_gg  = build_gg(sub, use_raw, use_3d, gg_fr)
-    fig_yaw = build_yaw(sub, use_raw, use_dist, show_roll, show_grip, xrange)
-    fig_tl  = build_timeline(DF, use_raw, use_dist, xrange, sel_s, sel_e)
+    fig_yaw = build_yaw(sub, use_raw, use_dist, show_roll, show_grip, axis_range)
+    fig_tl  = build_timeline(DF, use_raw, use_dist, axis_range, sel_s, sel_e)
 
     return fig_map, fig_gg, fig_yaw, fig_tl, kv, kl, kg
 
@@ -1150,7 +1252,7 @@ def _coords(idx, use_raw, use_3d, use_dist):
     return {
         "lat": lat if lat != 0 else None,
         "lon": lon if lon != 0 else None,
-        "gg_x": r[ay_c], "gg_y": r[ax_c],
+        "gg_x": r[ax_c], "gg_y": r[ay_c],
         "gg_z": r["raw_az_g" if use_raw else "az_g"],
         "lx": x_v,
         "yaw_y": r["gz_raw" if use_raw else "gz_filt"],

@@ -21,7 +21,7 @@
 //    the mathematical horizon from tilting under MPU-6886 electronic drift
 //    (-4.7 °/s/hr on gx). Without this, the tilted gravity vector projects
 //    ~0.08g per degree into lin_ax/lin_ay, poisoning ESKF velocity and
-//    permanently blocking the Straight-Line ZARU lateral gate (|lin_ay|<0.05g).
+//    permanently blocking the Straight-Line ZARU lateral gate (|lin_ax|<0.05g).
 //    Raw values are preserved as gz_rad_raw for ESKF 6D shadow comparison.
 //
 // 3. Straight-Line ZARU zero-latency gate: gz_gate uses raw corrected
@@ -36,6 +36,9 @@ void Task_Filter(void *pvParameters) {
   ImuRawData data;
   uint32_t last_eskf_epoch = 0; // last GPS epoch processed by the ESKF
   uint64_t last_timestamp_us = 0;
+#ifdef USE_BMI270
+  uint32_t record_seq = 0;
+#endif
 
   // ── v1.3.2: function-scope state (was static inside loop) ─────────────────
   // Moved here so calibrate_alignment() can trigger a full reset via
@@ -105,7 +108,7 @@ void Task_Filter(void *pvParameters) {
       float gx_rad_raw, gy_rad_raw, gz_rad_raw;  // uncorrected [rad/s] → ESKF 6D shadow, variance buf
       float lin_ax, lin_ay, lin_az;
 
-      if (xSemaphoreTake(telemetry_mutex, portMAX_DELAY) == pdTRUE) {
+      if (xSemaphoreTake(telemetry_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
 
         // ── RECALIBRATION RESET (v1.3.2) ────────────────────────────────────
         // calibrate_alignment() sets this flag under telemetry_mutex after
@@ -190,7 +193,7 @@ void Task_Filter(void *pvParameters) {
         // ω_bias/(2·β·Fs) ≈ 2.35°/s / (2×0.005×50) ≈ 4.7° after 30 min,
         // projecting sin(4.7°)×1g ≈ 0.082g phantom acceleration into
         // lin_ax/lin_ay. This poisons the ESKF velocity estimate and
-        // permanently blocks the Straight-Line ZARU gate (|lin_ay|<0.05g).
+        // permanently blocks the Straight-Line ZARU gate (|lin_ax|<0.05g).
         gx_rad_raw = gx_r * DEG2RAD;
         gy_rad_raw = gy_r * DEG2RAD;
         gz_rad_raw = gz_r * DEG2RAD;
@@ -351,6 +354,8 @@ void Task_Filter(void *pvParameters) {
       if (xSemaphoreTake(gps_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
         last_gps = shared_gps_data;
         xSemaphoreGive(gps_mutex);
+      } else {
+        gps_mutex_timeout_count++;
       }
 
       // ── GPS Velocity Source Selection (v1.5.2) ────────────────────────────
@@ -409,7 +414,7 @@ void Task_Filter(void *pvParameters) {
       // consistency with the static ZARU path.
       //
       // Previous version (v0.9.7): only lat + gz gates, no COG.
-      // BUG-3 fixes preserved: speed 40 km/h, lin_ay (not ema_ay).
+      // BUG-3 fixes preserved: speed 40 km/h, lin_ax (not ema_ax).
       // v1.3.2: cog_ref_east/north/prev_cog_rad/has_cog_ref/cog_variation
       // are now function-scope (moved for recalibration reset support).
       // v1.3.5: gz_gate uses RAW corrected data (gz_r - thermal_bias_gz) for
@@ -424,7 +429,7 @@ void Task_Filter(void *pvParameters) {
       bool straight_zaru_active = false;
       if (!is_stationary && last_gps.valid &&
           gps_speed_kmh_used > STRAIGHT_MIN_SPEED_KMH) {
-        bool lat_gate = fabsf(lin_ay) < STRAIGHT_MAX_LAT_G;
+        bool lat_gate = fabsf(lin_ax) < STRAIGHT_MAX_LAT_G;
         bool gz_gate  = fabsf(gz_r - thermal_bias_gz) < 2.0f;  // RAW corrected, zero latency
         bool cog_gate = fabsf(cog_variation) < STRAIGHT_COG_MAX_RAD;
 
@@ -459,10 +464,10 @@ void Task_Filter(void *pvParameters) {
       // ── NHC: Non-Holonomic Constraint (v1.3.1) ────────────────────────────
       // v_lateral = 0 pseudo-measurement: constrains heading drift
       // continuously while in motion (> 5 km/h). Disabled during
-      // extreme lateral dynamics (|lin_ay| > 0.5 g).
+      // extreme lateral dynamics (|lin_ax| > 0.5 g).
       bool nhc_active = false;
       if (eskf.speed_ms() > NHC_MIN_SPEED_MS &&
-          fabsf(lin_ay) < NHC_MAX_LAT_G) {
+          fabsf(lin_ax) < NHC_MAX_LAT_G) {
         eskf.correct_nhc(NHC_R);
         eskf6.correct_nhc(NHC_R);
         nhc_active = true;
@@ -642,12 +647,12 @@ void Task_Filter(void *pvParameters) {
         rec.zaru_flags = flags;
         rec.tbias_gz = tb_gz; // post-ZARU snapshot (consistent with EMA correction)
 #ifdef USE_BMI270
-        rec.bmi_raw_ax = data.bmi_raw_ax;
-        rec.bmi_raw_ay = data.bmi_raw_ay;
-        rec.bmi_raw_az = data.bmi_raw_az;
-        rec.bmi_raw_gx = data.bmi_raw_gx;
-        rec.bmi_raw_gy = data.bmi_raw_gy;
-        rec.bmi_raw_gz = data.bmi_raw_gz;
+        rec.bmi_post_lpf20_prepipe_ax = data.bmi_post_lpf20_prepipe_ax;
+        rec.bmi_post_lpf20_prepipe_ay = data.bmi_post_lpf20_prepipe_ay;
+        rec.bmi_post_lpf20_prepipe_az = data.bmi_post_lpf20_prepipe_az;
+        rec.bmi_post_lpf20_prepipe_gx = data.bmi_post_lpf20_prepipe_gx;
+        rec.bmi_post_lpf20_prepipe_gy = data.bmi_post_lpf20_prepipe_gy;
+        rec.bmi_post_lpf20_prepipe_gz = data.bmi_post_lpf20_prepipe_gz;
         rec.bmi_acc_x_g = data.bmi_acc_x_g;
         rec.bmi_acc_y_g = data.bmi_acc_y_g;
         rec.bmi_acc_z_g = data.bmi_acc_z_g;
@@ -668,7 +673,7 @@ void Task_Filter(void *pvParameters) {
         rec.fifo_frames_drained = data.fifo_frames_drained;
         rec.fifo_backlog = data.fifo_backlog;
         rec.fifo_overrun = data.fifo_overrun ? 1 : 0;
-        rec.reserved0 = 0;
+        rec.sd_queue_hwm = 0; // filled with a fresh snapshot in Task_SD_Writer
 #else
         // Legacy AtomS3 provider-frame channels retained for 202-byte format.
         rec.sensor_ax = data.bmi_acc_x_g;
@@ -695,6 +700,9 @@ void Task_Filter(void *pvParameters) {
         rec.nav_fix_us      = last_gps.nav_fix_us;
         rec.dhv_gdspd       = last_gps.dhv_gdspd;
         rec.dhv_fix_us      = last_gps.dhv_fix_us;
+#ifdef USE_BMI270
+        rec.seq = record_seq++;
+#endif
         if (xQueueSend(sd_queue, &rec, 0) != pdTRUE) {
           sd_records_dropped++;
         }

@@ -64,7 +64,7 @@
 //
 //
 // ==============================================================================================
-// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.7.5
+// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.7.6
 // ==============================================================================================
 //
 // Architecture: "End-of-Pipe EMA" + "ZARU-to-Madgwick"
@@ -75,7 +75,7 @@
 //
 //                          PHASE 1: telemetry_mutex
 // ┌──────────────────────────────────────────────────────────────────────────────┐
-// │ Raw ImuRawData from xQueueOverwrite queue (Task_I2C, Core 0)                │
+// │ Raw ImuRawData from IMU queue policy (Task_I2C, Core 0)                    │
 // │   |                                                                         │
 // │   | STEP 0: Dynamic dt from hardware timestamp                              │
 // │   |   dt_real_sec = delta(timestamp_us) / 1e6                               │
@@ -145,7 +145,7 @@
 //   |
 //   | STEP 11b: Straight-Line ZARU (v1.3.5)
 //   |   Triple gate, zero latency:
-//   |     gate 1: |lin_ay| < 0.05g                   (no lateral load)
+//   |     gate 1: |lin_ax| < 0.05g                   (no lateral load)
 //   |     gate 2: |gz_r - thermal_bias_gz| < 2.0°/s  (RAW corrected, instant)
 //   |     gate 3: |cog_variation| < 0.10 rad          (COG stable, >15m baseline)
 //   |   thermal_bias += 0.01 * (mean - bias)  [slow EMA learning]
@@ -159,7 +159,7 @@
 //   |   If is_stationary: eskf6.correct_bias(gz_rad_raw, 0.001)
 //   |
 //   | STEP 13: NHC — v_lateral=0 pseudo-measurement (v1.3.1, 50Hz)
-//   |   Active: speed > 1.4 m/s AND |lin_ay| < 0.5g; R_nhc = 0.5 (m/s)^2
+//   |   Active: speed > 1.4 m/s AND |lin_ax| < 0.5g; R_nhc = 0.5 (m/s)^2
 //   |
 //   | STEP 14: ESKF Correct (on fresh GPS epoch, ~10Hz)
 //   |   WGS84 -> ENU, 3-stage sequential (pos/speed/COG), Joseph form
@@ -204,7 +204,7 @@
 // v0.2.0 — FreeRTOS Multi-Core Architecture
 //   - Task_I2C on Core 0 (priority 3): IMU read every 20 ms with vTaskDelayUntil
 //   - Task_Filter on Core 1 (priority 2): full math pipeline
-//   - Inter-task communication via xQueueOverwrite (depth 1, always fresh data)
+//   - Inter-task communication via IMU_QUEUE_DEPTH mailbox/FIFO policy
 //   - telemetry_mutex to protect shared_telemetry between Task_Filter and loop()
 //
 // v0.2.1 — Critical fixes and optimisations
@@ -655,9 +655,9 @@
 //     (a) Speed threshold raised 20 → 40 km/h. At 20 km/h (5.5 m/s),
 //         ω = 2°/s corresponds to R = 157 m — a real curve, not a straight.
 //         At 40 km/h (11.1 m/s), R = 318 m: a genuine highway straight.
-//     (b) Lateral gate changed from ema_ay to lin_ay (raw post-Madgwick).
+//     (b) Lateral gate changed from ema_ax to lin_ax (raw post-Madgwick).
 //         EMA τ ≈ 313 ms smooths a rapid lane change (100 ms) below the
-//         0.02 g threshold, making the gate too permeable. Raw lin_ay
+//         0.02 g threshold, making the gate too permeable. Raw lin_ax
 //         captures instantaneous lateral load without phase delay.
 //
 //   BUG-4 (MINOR, Documentation) — ESKF_6D predict comment misleading:
@@ -760,7 +760,7 @@
 //     the same loop pass, zero extra iteration cost.
 //   - thermal_bias_gx/gy learned when is_stationary (same condition as gz).
 //     Also updated via slow EMA (α=0.01) in the straight-line ZARU block
-//     (speed > 40 km/h, |lin_ay| < 0.02 g): on a fast straight roll≈0
+//     (speed > 40 km/h, |lin_ax| < 0.02 g): on a fast straight roll≈0
 //     and pitch≈0, so ema_gx/gy residuals are pure thermal bias.
 //   - Correction subtracted at EMA output only (shared_telemetry, SD rec.gx/gy/gz).
 //     Buffers read pre-correction EMA values → no feedback loop.
@@ -794,12 +794,12 @@
 // v1.3.1 — NHC, Enhanced Straight-Line ZARU, Diagnostic Logging
 //   - Non-Holonomic Constraint (NHC): lateral velocity pseudo-measurement
 //     v_lat = 0 added to both ESKF2D and ESKF_6D via correct_nhc().
-//     Active above 5 km/h, disabled when |lin_ay| > 0.5 g (drifting).
+//     Active above 5 km/h, disabled when |lin_ax| > 0.5 g (drifting).
 //     Constrains heading drift continuously while in motion.
 //   - Enhanced Straight-Line ZARU: triple gate replaces the previous
 //     dual gate (v0.9.7). New COG-variation gate computed over a long
 //     baseline (>15 m displacement) rejects curved roads that happen to
-//     have low lin_ay. Lateral threshold raised 0.02→0.05 g for track
+//     have low lin_ax. Lateral threshold raised 0.02→0.05 g for track
 //     vibrations. Bias learning uses mean from variance buffer (not EMA).
 //     Config constants: STRAIGHT_COG_MAX_RAD, STRAIGHT_MAX_LAT_G,
 //     COG_MIN_BASELINE_M.
@@ -840,7 +840,7 @@
 //     · Stack overflow auto-guard (CROSS-INFO-5): Telemetria.ino heartbeat
 //     · norm_q_sq exact-zero comparison (CROSS-INFO-6): madgwick.h:93
 //     · wgs84_to_enu float32 precision (CROSS-MINOR-2): eskf.h:70
-//     · xQueueOverwrite depth=1 comment (CROSS-MINOR-4): Telemetria.ino:908
+//     · IMU queue policy comment (CROSS-MINOR-4): Telemetria.ino setup()
 //
 // v1.3.3 — GPS Hardware Abstraction Layer (HAL)
 //   - [ARCH] Introduced IGpsProvider pure interface (IGpsProvider.h) with
@@ -914,7 +914,7 @@
 //     VGPL_BETA_FLOOR=0.005, the equilibrium horizon tilt reached ~4.7° after
 //     30 min, projecting sin(4.7°)×1g ≈ 0.082g phantom acceleration into
 //     lin_ax/lin_ay. This poisoned the ESKF velocity estimate and permanently
-//     blocked the Straight-Line ZARU lateral gate (|lin_ay| < 0.05g).
+//     blocked the Straight-Line ZARU lateral gate (|lin_ax| < 0.05g).
 //   - [FIX] ZARU-to-Madgwick: thermal_bias_gx/gy/gz from the previous cycle
 //     is subtracted BEFORE computing g_rad. Madgwick and VGPL receive
 //     corrected gyro; raw values preserved as gz_rad_raw for ESKF 6D shadow.
@@ -1224,12 +1224,63 @@
 //     (`(file_size - 80) % 242 == 0`), `sd_err=false`, `dropped=0`, and stable
 //     `Task_SD_Writer` stack, confirming the `File.position()` failure mode.
 //
+// v1.7.6 — SD Alignment, Partial-Write Continuation, Offline Drop Diagnostics
+//   - [FIX] Task_SD_Writer no longer retries the whole record after a partial
+//     `File.write()`. It keeps the current byte offset in RAM and writes only
+//     the remaining bytes; zero-progress stalls close/reopen the file and
+//     continue from the same offset. This prevents persisted partial fragments
+//     from creating byte-level resync events such as 176 stray bytes.
+//   - [FORMAT] AtomS3R FileHeader v6 is expanded from 80 B to 256 B. The
+//     first 80 B stay compatible with the old header, while the extension adds
+//     `header_size`, `data_offset`, `header_crc16`, build flags, reset reason,
+//     SD/IMU queue configuration, SD SPI speed, and BMI/BMM startup register
+//     diagnostics. Data records now start at offset 256 instead of 80.
+//   - [FORMAT] AtomS3R TelemetryRecord remains 256 B and now carries
+//     `record_magic` + `crc16`, plus `seq` and compact SD diagnostics. The old
+//     `reserved0` byte is reused as `sd_queue_hwm`. This enables deterministic
+//     resync and CRC-based rejection instead of relying only on plausibility.
+//   - [SD] Boot header write now checked: if newFile.write() returns less than
+//     sizeof(FileHeader), SD logging is not started. flush() before close()
+//     guarantees durability. xQueueCreate and xTaskCreatePinnedToCore return
+//     values are guarded; on failure the queue is deleted and nulled.
+//   - [IMU] `IMU_QUEUE_DEPTH` selects mailbox mode (1) or a short diagnostic
+//     FIFO (>1). AtomS3R/BMI270 defaults to depth 4 to absorb occasional
+//     Task_Filter scheduling latency during bench/logging tests; legacy AtomS3
+//     keeps depth 1 for realtime freshest-sample behavior.
+//   - [IMU] BMI270 FIFO now runs in explicit filtered/post-LPF mode at the
+//     native 50 Hz ODR (acc_down=0, gyr_down=0). Register readback verification
+//     added, and FIFO_DOWNS register (0x45) exposed in the bring-up report.
+//   - [IMU] AtomS3R FIFO acquisition fields renamed from `bmi_raw_*` to
+//     `bmi_post_lpf20_prepipe_*` to make the semantics explicit: post-LPF,
+//     pre-remap/calibration/Madgwick/pipeline. The earlier unfiltered FIFO mode
+//     remains only as a commented reference path for bench characterization.
+//   - [WIFI] Boot-time opt-in: 3-second countdown with button prompt replaces
+//     the always-on WiFi + mid-connection BtnA bypass. No press = WiFi skipped
+//     entirely, boot continues to SD/IMU/GPS immediately.
+//   - [TOOL] bin_to_csv.py: added plausibility checks and automatic binary
+//     resync. When byte-level misalignment is detected, scans up to 4096 bytes
+//     for the next valid record alignment (8 consecutive plausible records).
+//     Fallback: if no resync found, skips one record and retries.
+//   - [TOOL] bin_to_csv.py / motec_exporter.py: updated the 256 B registry for
+//     both header v5 legacy tails and header v6 magic/CRC tails. Legacy 242 B
+//     and existing v5 256 B files remain supported.
+//   - [TOOL] telemetry_server.py, sitl_replay.py, and static_bench_validator.py
+//     now pass `header_version` into the shared bin_to_csv format registry, so
+//     legacy 256 B header-v5 logs are not parsed as header-v6 magic/CRC records.
+//     telemetry_server.py also passes raw record bytes into the plausibility
+//     guard, enabling CRC validation for v6 logs during server-side resync.
+//   - [TOOL] Added schema_compat.py: v5 column aliases for SITL replay and
+//     static bench validator. schema_guard integrated into analysis scripts.
+//   - [VALIDATION] Re-tested legacy `tel_119.bin`: detected header v5,
+//     selected the old 256 B tail (`seq` + uint16 SD snapshots), recovered
+//     357,397 rows, and preserved the known single 176-byte resync report.
+//   - [VALIDATION] PlatformIO builds pass for both `m5stack-atoms3r` and
+//     `m5stack-atoms3`, covering the BMI270/v6 path and the legacy AtomS3 path.
+//   - [VALIDATION] Resync tested on tel_81 (3 events, 337782/337783 recovered),
+//     tel_82 (7 events, 310355/320245 recovered), tel_83 (4 events,
+//     357197/357199 recovered).
+//
 // --- TODO (deferred to v1.8.0 CAN format bump) ---
-//   - [TODO] Add uint32_t seq sequence number to TelemetryRecord to enable
-//     reliable offline gap detection. Deferred to avoid a double format bump
-//     (will be bundled with CAN fields in one single record_size change).
-//   - [TODO] Add uint16_t crc16 to TelemetryRecord end for corruption detection.
-//     Same deferral reason as seq.
 //   - [TODO] Add CAN bus task (Core 0) for RPM, throttle, wheel speeds (×4),
 //     engine temp, steering angle. CanData struct + can_mutex pattern, mirroring
 //     GpsData / gps_mutex. Fields merged into TelemetryRecord (Scenario A).
@@ -1237,6 +1288,32 @@
 //     ~48 KB of internal SRAM for the incoming CAN task stack and shared structs.
 //   - [TODO] AtomS3R ellipsoidal calibration is identity (uncalibrated); a
 //     dedicated tumble test is needed before trusting long-run ESKF on AtomS3R.
+//   - [TODO] Add a navigation-only anti-spike branch before ESKF prediction:
+//     keep pipe_lin_* as zero-latency diagnostic output, but feed ESKF with
+//     nav_lin_ax/nav_lin_ay after a short causal anti-spike filter, e.g. a
+//     3-sample median. Do not use a fixed G clamp: real roundabouts can sustain
+//     high lateral acceleration, so the discriminator should be spike duration
+//     rather than absolute acceleration amplitude.
+//   - [TODO] Estimate and compensate GPS/IMU time alignment in the navigation
+//     path. gps_fix_us is already logged in the IMU timebase; use SITL to measure
+//     the effective latency, then apply GPS corrections against the state epoch
+//     they belong to instead of the current 50 Hz sample.
+//   - [TODO] Add a mount-yaw calibration stage as a pre-pipeline parameter, not
+//     as a mid-run correction. Estimate sensor-to-vehicle yaw offline from
+//     high-confidence straight/accel/brake windows, persist it in the calibration
+//     metadata/header, and rotate lin_ax/lin_ay into vehicle frame before ZARU,
+//     NHC, and ESKF. Validation must compare independent sectors, not only the
+//     windows used for fitting.
+//   - [TODO] Replace HDOP-only GPS position trust with a robust policy tested in
+//     SITL: keep HDOP as the baseline, but add innovation diagnostics, freshness
+//     checks, and a soft innovation limiter/gate so isolated GPS shifts do not
+//     create sawtooth corrections. Avoid map snap in the filter; road geometry is
+//     a visualization/debug reference unless a future map-aware mode is explicit.
+//   - [TODO] Keep AT6668 DHV/NAV-PV as diagnostics only. The tested module gives
+//     DHV at ~1 Hz and NACKs periodic NAV-PV enable, so production should remain
+//     on NMEA SOG for this hardware. If a future GNSS provider exposes real
+//     high-rate velN/velE/sAcc/cAcc, add provider capability flags and switch the
+//     ESKF speed/heading update to that vector source through the GPS HAL.
 //
 // ==========================================================
 
@@ -1244,8 +1321,11 @@
 #include <SD.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <esp_system.h>
+#include <stddef.h>
 
 #include "globals.h"
+#include "crc16.h"
 #include "display.h"
 #include "calibration.h"
 #include "wifi_manager.h"
@@ -1273,6 +1353,86 @@ static Bmi270Provider imuProvider;
 static Mpu6886Provider imuProvider;
 #endif
 
+static void fill_base_file_header(FileHeader &hdr, uint8_t header_version) {
+  memset(&hdr, 0, sizeof(hdr));
+  hdr.magic[0] = 0x54; hdr.magic[1] = 0x45; hdr.magic[2] = 0x4C; // "TEL"
+  hdr.header_version = header_version;
+  strncpy(hdr.firmware_version, FIRMWARE_VERSION, sizeof(hdr.firmware_version) - 1);
+  hdr.record_size = sizeof(TelemetryRecord);
+  hdr.start_time_ms = millis();
+  hdr.cal_sin_phi = sin_phi;       hdr.cal_cos_phi = cos_phi;
+  hdr.cal_sin_theta = sin_theta;   hdr.cal_cos_theta = cos_theta;
+  hdr.cal_bias_ax = bias_ax;       hdr.cal_bias_ay = bias_ay;       hdr.cal_bias_az = bias_az;
+  hdr.cal_bias_gx = bias_gx;       hdr.cal_bias_gy = bias_gy;       hdr.cal_bias_gz = bias_gz;
+  hdr.header_flags = mag_ref_valid ? FILE_HEADER_FLAG_MAG_REF_VALID : 0;
+  hdr.mag_ref_ut_x = mag_ref_ut_x;
+  hdr.mag_ref_ut_y = mag_ref_ut_y;
+  hdr.mag_ref_ut_z = mag_ref_ut_z;
+}
+
+static bool write_all_file(File &file, const uint8_t *data, size_t len) {
+  size_t offset = 0;
+  while (offset < len) {
+    const size_t written = file.write(data + offset, len - offset);
+    if (written == 0) return false;
+    offset += written;
+  }
+  return true;
+}
+
+static bool wait_for_boot_wifi_request() {
+  const uint16_t boot_bg = BLACK;
+  fillScreen(boot_bg);
+  M5.Lcd.setTextSize(1);
+  M5.Lcd.setTextColor(WHITE, boot_bg);
+  M5.Lcd.setCursor(8, 18);
+  M5.Lcd.print("Click to turn");
+  M5.Lcd.setCursor(22, 34);
+  M5.Lcd.print("on the WiFi");
+  M5.Lcd.setCursor(8, 104);
+  M5.Lcd.print("No click: skip");
+
+  bool requested = false;
+  for (int seconds_left = 3; seconds_left > 0 && !requested; seconds_left--) {
+    M5.Lcd.fillRect(0, 58, M5.Lcd.width(), 32, boot_bg);
+    M5.Lcd.setTextSize(3);
+    M5.Lcd.setTextColor(GREEN, boot_bg);
+    M5.Lcd.setCursor(55, 60);
+    M5.Lcd.print(seconds_left);
+    M5.Lcd.setTextSize(1);
+
+    const uint32_t second_start_ms = millis();
+    while ((millis() - second_start_ms) < 1000U) {
+      M5.update();
+      if (M5.BtnA.wasPressed() || M5.BtnA.isPressed()) {
+        requested = true;
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(20));
+    }
+  }
+
+  if (requested) {
+    Serial.println("[WIFI] Boot request: WiFi scan enabled.");
+    fillScreen(0x00A5FF);
+    setLabel(10, "WiFi ON", WHITE, (uint16_t)0x00A5FF);
+    setLabel(30, "Scanning...", WHITE, (uint16_t)0x00A5FF);
+    while (M5.BtnA.isPressed()) {
+      M5.update();
+      vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    return true;
+  }
+
+  Serial.println("[WIFI] Boot request timeout: WiFi skipped.");
+  wifi_enabled = false;
+  fillScreen(BLACK);
+  setLabel(10, "WiFi OFF");
+  setLabel(30, "Boot continues");
+  vTaskDelay(pdMS_TO_TICKS(750));
+  return false;
+}
+
 // ==========================================================
 // --- SETUP ---
 // ==========================================================
@@ -1299,6 +1459,9 @@ void setup() {
   M5.Lcd.print(FIRMWARE_VERSION);
   vTaskDelay(pdMS_TO_TICKS(1000));
 
+  const bool boot_wifi_requested = wait_for_boot_wifi_request();
+  wifi_enabled = boot_wifi_requested;
+
   fillScreen(BLACK);
   setLabel(10, "System Init...");
   setLabel(30, "");
@@ -1320,7 +1483,7 @@ void setup() {
   // SPI is initialized here once. Full logging setup (file creation, queue,
   // task) happens later after calibration.
   SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, CS_PIN);
-  if (SD.begin(CS_PIN, SPI, 25000000)) {
+  if (SD.begin(CS_PIN, SPI, SD_SPI_HZ)) {
     sd_mounted = true;
     load_wifi_config(); // populates wifi_networks[], cfg_mqtt_*, mqtt_enabled
   } else {
@@ -1329,15 +1492,15 @@ void setup() {
   }
   // ─────────────────────────────────────────────────────────────────────────
 
-  connect_wifi();
+  if (wifi_enabled) {
+    connect_wifi();
+  }
 
   telemetry_mutex = xSemaphoreCreateMutex();
-  // AUDIT-NOTE (CROSS-MINOR-4, not applied): depth=1 is intentional —
-  // xQueueOverwrite() requires a queue of length exactly 1 (mailbox pattern).
-  // This is correct per FreeRTOS docs. A comment was suggested but not added
-  // since the pairing of depth=1 + xQueueOverwrite is self-documenting to
-  // FreeRTOS practitioners and adding it risks diverging again.
-  imuQueue = xQueueCreate(1, sizeof(ImuRawData));
+  // IMU queue policy:
+  // IMU_QUEUE_DEPTH selects mailbox mode (1) or a short diagnostic FIFO (>1).
+  // Task_I2C switches between xQueueOverwrite() and bounded FIFO enqueue.
+  imuQueue = xQueueCreate(IMU_QUEUE_DEPTH, sizeof(ImuRawData));
 
   if (telemetry_mutex == NULL || imuQueue == NULL) {
     setLabel(10, "FreeRTOS Memory");
@@ -1369,7 +1532,7 @@ void setup() {
   // ── SETUP LOGGING SD ─────────────────────────────────────────────────────
   // SPI already initialized during early boot. If early mount succeeded
   // (sd_mounted = true), skip health gate and go straight to logging setup.
-  if (!sd_mounted && !SD.begin(CS_PIN, SPI, 25000000)) {
+  if (!sd_mounted && !SD.begin(CS_PIN, SPI, SD_SPI_HZ)) {
     Serial.println("[ERR] SD Card not found or defective!");
     // ── SD HEALTH GATE (v0.9.10) ──────────────────────────────────────────
     // Fixed red screen + retry every 2 s. Blocks calibration and task start
@@ -1387,7 +1550,7 @@ void setup() {
     while (!sd_mounted && !sd_bypass) {
       // Retry mount every 2 s (dirty contacts → reinsert → recovers)
       SD.end();
-      if (SD.begin(CS_PIN, SPI, 25000000)) {
+    if (SD.begin(CS_PIN, SPI, SD_SPI_HZ)) {
         Serial.println("[SD] Card detected after retry!");
         sd_mounted = true;
         break;
@@ -1478,33 +1641,67 @@ void setup() {
       // Write FileHeader as the first block of the .bin file.
       // The Python converter detects the "TEL" magic and uses record_size
       // from the header to parse subsequent records.
-      FileHeader hdr = {};
-      hdr.magic[0] = 0x54; hdr.magic[1] = 0x45; hdr.magic[2] = 0x4C; // "TEL"
 #ifdef USE_BMI270
-      hdr.header_version = 5; // v5: AtomS3R raw/FIFO record format
-#else
-      hdr.header_version = 3; // v3: adds boot calibration params for SITL
+      FileHeaderV6 hdr = {};
+      fill_base_file_header(hdr.base, 6); // v6: 256 B startup diagnostics header
+      hdr.header_size = sizeof(FileHeaderV6);
+      hdr.data_offset = sizeof(FileHeaderV6);
+      hdr.endian_marker = TELEMETRY_ENDIAN_MARKER;
+      hdr.build_flags = FILE_HEADER_V6_FLAG_USE_BMI270;
+#ifdef BOARD_HAS_PSRAM
+      hdr.build_flags |= FILE_HEADER_V6_FLAG_BOARD_HAS_PSRAM;
 #endif
-      strncpy(hdr.firmware_version, FIRMWARE_VERSION, sizeof(hdr.firmware_version) - 1);
-      hdr.record_size = sizeof(TelemetryRecord);
-      hdr.start_time_ms = millis();
-      // v3: boot calibration for SITL reconstruction
-      hdr.cal_sin_phi = sin_phi;       hdr.cal_cos_phi = cos_phi;
-      hdr.cal_sin_theta = sin_theta;   hdr.cal_cos_theta = cos_theta;
-      hdr.cal_bias_ax = bias_ax;       hdr.cal_bias_ay = bias_ay;       hdr.cal_bias_az = bias_az;
-      hdr.cal_bias_gx = bias_gx;       hdr.cal_bias_gy = bias_gy;       hdr.cal_bias_gz = bias_gz;
-      hdr.header_flags = mag_ref_valid ? FILE_HEADER_FLAG_MAG_REF_VALID : 0;
-      hdr.mag_ref_ut_x = mag_ref_ut_x;
-      hdr.mag_ref_ut_y = mag_ref_ut_y;
-      hdr.mag_ref_ut_z = mag_ref_ut_z;
-      newFile.write((const uint8_t *)&hdr, sizeof(FileHeader));
+#ifdef BMM150_USE_FLOATING_POINT
+      hdr.build_flags |= FILE_HEADER_V6_FLAG_BMM150_FLOAT;
+#endif
+      hdr.sd_spi_hz = SD_SPI_HZ;
+      hdr.imu_i2c_hz = ATOMS3R_IMU_I2C_FREQ;
+      hdr.sd_queue_depth = SD_QUEUE_DEPTH;
+      hdr.imu_queue_depth = IMU_QUEUE_DEPTH;
+      hdr.sd_flush_every = SD_FLUSH_EVERY;
+      hdr.record_magic_offset = offsetof(TelemetryRecord, record_magic);
+      hdr.record_crc_offset = offsetof(TelemetryRecord, crc16);
+      hdr.reset_reason_cpu0 = (uint8_t)esp_reset_reason();
+      hdr.reset_reason_cpu1 = 0;
+      hdr.board_id = FILE_HEADER_BOARD_ATOMS3R;
+      hdr.imu_id = FILE_HEADER_IMU_BMI270;
+      hdr.mag_id = FILE_HEADER_MAG_BMM150;
+      hdr.gps_enabled = 1;
+      strncpy(hdr.log_filename, current_log_filename, sizeof(hdr.log_filename) - 1);
+      imuProvider.fillStartupDiagnostics(hdr.bmi_cfg_regs, sizeof(hdr.bmi_cfg_regs),
+                                         hdr.bmm_cfg_regs, sizeof(hdr.bmm_cfg_regs),
+                                         hdr.bmi_chip_id, hdr.bmm_chip_id);
+      hdr.header_crc16 = 0;
+      hdr.header_crc16 = telemetry_crc16_ccitt((const uint8_t *)&hdr, sizeof(hdr));
+#else
+      FileHeader hdr = {};
+      fill_base_file_header(hdr, 3); // v3: adds boot calibration params for SITL
+#endif
+      const size_t header_size = sizeof(hdr);
+      const bool hdr_ok = write_all_file(newFile, (const uint8_t *)&hdr, header_size);
+      newFile.flush();
       newFile.close();
-      Serial.printf("[OK] SD binary file: %s (header %dB + %d bytes/record)\n",
-                    current_log_filename, (int)sizeof(FileHeader),
-                    (int)sizeof(TelemetryRecord));
-      sd_queue = xQueueCreate(SD_QUEUE_DEPTH, sizeof(TelemetryRecord));
-      xTaskCreatePinnedToCore(Task_SD_Writer, "Task_SD", SD_TASK_STACK, NULL, 1,
-                              &TaskSDHandle, 1);
+      if (!hdr_ok) {
+        Serial.printf("[ERR] SD header short write: expected %u bytes\n",
+                      (unsigned)header_size);
+      } else {
+        Serial.printf("[OK] SD binary file: %s (header %dB + %d bytes/record)\n",
+                      current_log_filename, (int)header_size,
+                      (int)sizeof(TelemetryRecord));
+        sd_queue = xQueueCreate(SD_QUEUE_DEPTH, sizeof(TelemetryRecord));
+        if (!sd_queue) {
+          Serial.println("[ERR] SD queue allocation failed!");
+        } else {
+          BaseType_t rc = xTaskCreatePinnedToCore(
+              Task_SD_Writer, "Task_SD", SD_TASK_STACK, NULL, 1,
+              &TaskSDHandle, 1);
+          if (rc != pdPASS) {
+            Serial.println("[ERR] Task_SD_Writer creation failed!");
+            vQueueDelete(sd_queue);
+            sd_queue = NULL;
+          }
+        }
+      }
     } else {
       Serial.println("[ERR] Failed to create initial binary log file!");
     }
@@ -1520,21 +1717,38 @@ void setup() {
   //   - $PCAS03 sentence selection (GGA/RMC/DHV only)
   //   - passive CASIC listener only in the clean production build
   gps_mutex = xSemaphoreCreateMutex();
+  if (gps_mutex == NULL) {
+    Serial.println("[ERR] GPS mutex allocation failed!");
+    setLabel(10, "FreeRTOS Memory");
+    setLabel(30, "GPS Mutex Fail");
+    while (true)
+      vTaskDelay(pdMS_TO_TICKS(100));
+  }
   setLabel(30, "GPS: init...");
   gpsWrapper.begin();
   setLabel(30, "");
   // ─────────────────────────────────────────────────────────────────────────
 
-  xTaskCreatePinnedToCore(Task_I2C, "I2C", 4096, &imuProvider, 3, &TaskI2CHandle, 0);
+  BaseType_t task_i2c_rc = xTaskCreatePinnedToCore(
+      Task_I2C, "I2C", 4096, &imuProvider, 3, &TaskI2CHandle, 0);
   // Stack 16 KB: ESKF 6D uses temporary 6×6 matrices (~2.5 KB per full correct())
   // + ESKF 5D (~1.5 KB) + 12-step IMU pipeline + static variables.
   // Increased from 12288 to 16384 to prevent stack overflow at ~570 s (v0.9.12).
-  xTaskCreatePinnedToCore(Task_Filter, "Filter", 16384, NULL, 2,
-                          &TaskFilterHandle, 1);
+  BaseType_t task_filter_rc = xTaskCreatePinnedToCore(
+      Task_Filter, "Filter", 16384, NULL, 2, &TaskFilterHandle, 1);
   // Task_GPS on Core 0 alongside Task_I2C: both lightweight, no contention.
   // Priority 2: below Task_I2C (3) — IMU timing is never disturbed.
   // gpsWrapper is passed as pvParameters so Task_GPS is hardware-agnostic (IGpsProvider*).
-  xTaskCreatePinnedToCore(Task_GPS, "GPS", 4096, &gpsWrapper, 2, NULL, 0);
+  BaseType_t task_gps_rc = xTaskCreatePinnedToCore(
+      Task_GPS, "GPS", 4096, &gpsWrapper, 2, &TaskGPSHandle, 0);
+  if (task_i2c_rc != pdPASS || task_filter_rc != pdPASS || task_gps_rc != pdPASS) {
+    Serial.printf("[ERR] Task creation failed: I2C=%ld Filter=%ld GPS=%ld\n",
+                  (long)task_i2c_rc, (long)task_filter_rc, (long)task_gps_rc);
+    setLabel(10, "Task Create");
+    setLabel(30, "Failed!");
+    while (true)
+      vTaskDelay(pdMS_TO_TICKS(1000));
+  }
 }
 
 // ==========================================================
@@ -1785,7 +1999,7 @@ void loop() {
                  "\"gps_stale\":%s,\"sd_err\":%s,"
                  "\"sd_hwm\":%u,\"sd_flush_worst_ms\":%u,\"sd_flushes\":%u,"
                  "\"sd_partials\":%u,\"sd_stalls\":%u,\"sd_reopens\":%u,\"sd_stall_worst_ms\":%u,"
-                 "\"sd_overreports\":%u,"
+                 "\"sd_overreports\":%u,\"gps_mutex_timeouts\":%u,"
                  "\"stk_filter\":%u,\"stk_i2c\":%u,\"stk_sd\":%u}",
                  (unsigned)sd_records_written.load(),
                  (unsigned)sd_records_dropped.load(),
@@ -1800,6 +2014,7 @@ void loop() {
                  (unsigned)sd_reopen_count.load(),
                  (unsigned)sd_stall_worst_ms.load(),
                  (unsigned)sd_write_overreport_count.load(),
+                 (unsigned)gps_mutex_timeout_count.load(),
                  (unsigned)stk_filter,
                  (unsigned)stk_i2c,
                  (unsigned)stk_sd);

@@ -5,7 +5,7 @@
 #include <math.h>
 
 #ifdef USE_BMI270
-const char *const FIRMWARE_VERSION = "v1.7.5-atoms3r";
+const char *const FIRMWARE_VERSION = "v1.7.6-atoms3r";
 #else
 const char *const FIRMWARE_VERSION = "v1.5.2-clean";
 #endif
@@ -46,8 +46,17 @@ static constexpr float ZUPT_GPS_MAX_KMH = 2.0f; // [km/h] GPS speed threshold
 static constexpr int SD_FLUSH_EVERY  = 250;     // flush interval: 5 s at 50 Hz (reduces FAT/GC spikes)
 static constexpr int SD_QUEUE_DEPTH  = 200;     // record buffer depth (4 s at 50 Hz)
 static constexpr int SD_TASK_STACK   = 8192;    // Task_SD_Writer stack size (bytes)
+static constexpr uint32_t SD_SPI_HZ = 25000000;
 static constexpr int SD_WRITE_RETRY_DELAY_MS = 100;   // retry cadence for transient SD no-progress writes
 static constexpr int SD_WRITE_STALL_TIMEOUT_MS = 10000; // max per-record no-progress window before fatal
+#ifndef IMU_QUEUE_DEPTH_CFG
+#ifdef USE_BMI270
+#define IMU_QUEUE_DEPTH_CFG 4 // diagnostic FIFO: absorbs short Task_Filter stalls
+#else
+#define IMU_QUEUE_DEPTH_CFG 1 // legacy realtime mailbox
+#endif
+#endif
+static constexpr int IMU_QUEUE_DEPTH = IMU_QUEUE_DEPTH_CFG;
 
 // Non-holonomic constraint (NHC)
 static constexpr float NHC_R = 0.5f;            // [(m/s)^2] lateral vel measurement noise

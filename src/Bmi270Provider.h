@@ -7,6 +7,8 @@
 // Sensor APIs.
 #pragma once
 
+#include <stddef.h>
+
 #include <M5Unified.h>
 
 extern "C" {
@@ -22,6 +24,12 @@ public:
     void begin() override;
     void update(ImuRawData& out) override;
     bool verifyConfig() override { return _config_ok; }
+    void fillStartupDiagnostics(uint8_t* bmi_regs,
+                                size_t bmi_len,
+                                uint8_t* bmm_regs,
+                                size_t bmm_len,
+                                uint8_t& bmi_chip_id,
+                                uint8_t& bmm_chip_id) const;
 
 private:
     static constexpr uint8_t kPrimaryAddr = 0x69;
@@ -31,6 +39,8 @@ private:
     static constexpr float kGyroScaleDps = 2000.0f / 32768.0f;
     static constexpr uint16_t kFifoBufferSize = 2048;
     static constexpr uint16_t kMaxParsedFrames = 80;
+    static constexpr uint8_t kRawFifoAccDownsample = 5; // 1600 Hz / 2^5 = 50 Hz
+    static constexpr uint8_t kRawFifoGyrDownsample = 7; // 6400 Hz / 2^7 = 50 Hz
 
     bool probe_bmi_address();
     bool init_bmi270();
@@ -81,5 +91,6 @@ private:
     uint8_t _aux_if_conf = 0;
     uint8_t _aux_rd_addr = 0;
     uint8_t _pwr_ctrl = 0;
+    uint8_t _fifo_downs = 0;
     uint16_t _fifo_config = 0;
 };

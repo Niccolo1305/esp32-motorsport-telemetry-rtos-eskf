@@ -24,6 +24,9 @@ if hasattr(sys.stdout, "reconfigure"):
 # ── Configuration ─────────────────────────────────────────────────────────────
 CHUNK_SIZE_DEFAULT = 122          # record size v0.9.8 (no header, 122 bytes)
 HEADER_MAGIC = b'TEL'             # FileHeader magic bytes (v0.9.7+)
+HEADER_V6_SIZE = 256              # v6: sector-aligned startup diagnostics header
+RECORD_MAGIC_256_V6 = 0x364C4554  # "TEL6" little-endian
+ENDIAN_MARKER = 0x1234
 HEADER_V1_SIZE = 25               # v1: record_size is uint8_t  (25 bytes)
 HEADER_V2_SIZE = 26               # v2: record_size is uint16_t (26 bytes)
 HEADER_V3_SIZE = 66               # v3/v4: adds 40 bytes of calibration params
@@ -32,6 +35,10 @@ SENTINEL_CALIB = 0xFFFFFFFFFFFFFFFF  # uint64 max — CalibrationRecord marker
 PROGRESS_EVERY = 5000
 TEXT_ENCODING_WRITE = 'utf-8-sig'
 TEXT_ENCODINGS_READ = ('utf-8-sig', 'utf-8', 'latin1')
+RESYNC_SCAN_BYTES = 4096
+RESYNC_CONFIRM_RECORDS = 8
+MAX_TIMESTAMP_US = 7 * 24 * 60 * 60 * 1_000_000
+MAX_TIMESTAMP_GAP_US = 10_000_000
 
 # ── Format Registry ──────────────────────────────────────────────────────────
 # 122-byte record (v0.9.8 — v1.3.0)
@@ -170,7 +177,7 @@ HEADER_224 = HEADER_202 + [
 COL_FMT_224 = COL_FMT_202 + ['{:d}', '{:d}', '{:d}', '{:d}', '{:.6f}', '{:.6f}', '{:.6f}', '{:d}', '{:d}']
 assert struct.calcsize(FMT_224) == 224, f"FMT_224 mismatch: {struct.calcsize(FMT_224)}"
 
-# 242-byte record (v1.7.0+): AtomS3R v5 raw/FIFO layout with explicit acquisition truth.
+# 242-byte record (v1.7.0+): AtomS3R v5/v6 FIFO acquisition layout.
 FMT_242 = '<Q7fBddffBf4f6f5fBf6h6f3hH3f8BQB4fBBQfQ'
 HEADER_242 = [
     't_us (µs)',
@@ -185,8 +192,8 @@ HEADER_242 = [
     'pipe_body_gx (°/s)', 'pipe_body_gy (°/s)', 'pipe_body_gz (°/s)',
     'kf6_x (m)', 'kf6_y (m)', 'kf6_vel (m/s)', 'kf6_heading (rad)', 'kf6_bgz (rad/s)',
     'zaru_flags', 'tbias_gz (°/s)',
-    'bmi_raw_ax (LSB)', 'bmi_raw_ay (LSB)', 'bmi_raw_az (LSB)',
-    'bmi_raw_gx (LSB)', 'bmi_raw_gy (LSB)', 'bmi_raw_gz (LSB)',
+    'bmi_post_lpf20_prepipe_ax (LSB)', 'bmi_post_lpf20_prepipe_ay (LSB)', 'bmi_post_lpf20_prepipe_az (LSB)',
+    'bmi_post_lpf20_prepipe_gx (LSB)', 'bmi_post_lpf20_prepipe_gy (LSB)', 'bmi_post_lpf20_prepipe_gz (LSB)',
     'bmi_acc_x_g (G)', 'bmi_acc_y_g (G)', 'bmi_acc_z_g (G)',
     'bmi_gyr_x_dps (°/s)', 'bmi_gyr_y_dps (°/s)', 'bmi_gyr_z_dps (°/s)',
     'bmm_raw_x (LSB)', 'bmm_raw_y (LSB)', 'bmm_raw_z (LSB)',
@@ -230,13 +237,48 @@ COL_FMT_242 = [
 ]
 assert struct.calcsize(FMT_242) == 242, f"FMT_242 mismatch: {struct.calcsize(FMT_242)}"
 
+# 256-byte record (v1.7.6 header v5): sector-aligned tail with seq + uint16 SD diagnostics.
+FMT_256_V5 = FMT_242 + 'I5H'
+HEADER_256_V5 = HEADER_242 + [
+    'seq',
+    'sd_records_dropped',
+    'sd_partial_write_count',
+    'sd_stall_count',
+    'sd_reopen_count',
+    'sd_queue_hwm',
+]
+COL_FMT_256_V5 = COL_FMT_242 + ['{:d}'] * 6
+assert struct.calcsize(FMT_256_V5) == 256, f"FMT_256_V5 mismatch: {struct.calcsize(FMT_256_V5)}"
+
+# 256-byte record (header v6+): record magic + seq + compact SD diagnostics + CRC16.
+FMT_256 = FMT_242 + 'II4BH'
+HEADER_256_BASE = [
+    ('sd_queue_hwm' if col == 'reserved0' else col)
+    for col in HEADER_242
+]
+HEADER_256 = HEADER_256_BASE + [
+    'record_magic',
+    'seq',
+    'sd_records_dropped',
+    'sd_partial_write_count',
+    'sd_stall_count',
+    'sd_reopen_count',
+    'crc16',
+]
+COL_FMT_256 = COL_FMT_242 + ['{:d}'] * 7
+assert struct.calcsize(FMT_256) == 256, f"FMT_256 mismatch: {struct.calcsize(FMT_256)}"
+
 # Default aliases (used for legacy files without header)
 FMT_DEFAULT = FMT_122
 HEADER = HEADER_122
 COL_FMT = COL_FMT_122
 
-def get_format(record_size):
+def get_format(record_size, header_version=None):
     """Return (struct_fmt, header_list, col_fmt_list) for a given record size."""
+    if record_size == 256:
+        if header_version is not None and header_version < 6:
+            return FMT_256_V5, HEADER_256_V5, COL_FMT_256_V5
+        return FMT_256, HEADER_256, COL_FMT_256
     if record_size == 242:
         return FMT_242, HEADER_242, COL_FMT_242
     if record_size == 224:
@@ -276,6 +318,18 @@ def banner():
 ║        .bin (header+record) → split .csv             ║
 ╚══════════════════════════════════════════════════════╝{RESET}
 """)
+
+
+def crc16_ccitt(data):
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
+    return crc
 
 
 def ask(prompt, default=None):
@@ -367,7 +421,57 @@ def read_file_header(bin_path):
 
         hdr_ver = preamble[3]
 
-        if hdr_ver >= 5:
+        if hdr_ver >= 6:
+            hdr_size = HEADER_V6_SIZE
+            f.seek(0)
+            raw = f.read(hdr_size)
+            if len(raw) < hdr_size:
+                return None, 0
+            parts = struct.unpack('<3sB16sHI10fH3f', raw[:HEADER_V5_SIZE])
+            magic_, hdr_ver_, fw_ver, rec_size, start_ms = parts[:5]
+            cal_params = parts[5:15]
+            header_flags = parts[15]
+            mag_ref = parts[16:19]
+            ext = struct.unpack('<HHHHIIIHHHHH8B32s16s32s58s',
+                                raw[HEADER_V5_SIZE:HEADER_V6_SIZE])
+            (header_size, data_offset, endian_marker, header_crc16,
+             build_flags, sd_spi_hz, imu_i2c_hz,
+             sd_queue_depth, imu_queue_depth, sd_flush_every,
+             record_magic_offset, record_crc_offset,
+             reset_reason_cpu0, reset_reason_cpu1, board_id, imu_id,
+             mag_id, gps_enabled, bmi_chip_id, bmm_chip_id,
+             bmi_cfg_regs, bmm_cfg_regs, log_filename, _reserved) = ext
+            crc_raw = bytearray(raw)
+            crc_raw[HEADER_V5_SIZE + 6:HEADER_V5_SIZE + 8] = b'\x00\x00'
+            header_crc_ok = crc16_ccitt(crc_raw) == header_crc16
+            hdr_size = data_offset if data_offset else header_size
+            v6_extension = {
+                'header_size': header_size,
+                'data_offset': data_offset,
+                'endian_marker': endian_marker,
+                'header_crc16': header_crc16,
+                'header_crc_ok': header_crc_ok,
+                'build_flags': build_flags,
+                'sd_spi_hz': sd_spi_hz,
+                'imu_i2c_hz': imu_i2c_hz,
+                'sd_queue_depth': sd_queue_depth,
+                'imu_queue_depth': imu_queue_depth,
+                'sd_flush_every': sd_flush_every,
+                'record_magic_offset': record_magic_offset,
+                'record_crc_offset': record_crc_offset,
+                'reset_reason_cpu0': reset_reason_cpu0,
+                'reset_reason_cpu1': reset_reason_cpu1,
+                'board_id': board_id,
+                'imu_id': imu_id,
+                'mag_id': mag_id,
+                'gps_enabled': gps_enabled,
+                'bmi_chip_id': bmi_chip_id,
+                'bmm_chip_id': bmm_chip_id,
+                'bmi_cfg_regs': bmi_cfg_regs,
+                'bmm_cfg_regs': bmm_cfg_regs,
+                'log_filename': log_filename.split(b'\x00')[0].decode('ascii', errors='replace'),
+            }
+        elif hdr_ver >= 5:
             hdr_size = HEADER_V5_SIZE
             f.seek(0)
             raw = f.read(hdr_size)
@@ -378,6 +482,7 @@ def read_file_header(bin_path):
             cal_params = parts[5:15]
             header_flags = parts[15]
             mag_ref = parts[16:19]
+            v6_extension = None
         elif hdr_ver >= 3:
             # v3/v4: 3s B 16s H I 10f = 3+1+16+2+4+40 = 66 bytes
             hdr_size = HEADER_V3_SIZE
@@ -390,6 +495,7 @@ def read_file_header(bin_path):
             cal_params = parts[5:]  # 10 float: sin_phi..bias_gz
             header_flags = 0
             mag_ref = None
+            v6_extension = None
         elif hdr_ver >= 2:
             # v2: 3s B 16s H I = 3+1+16+2+4 = 26 bytes
             hdr_size = HEADER_V2_SIZE
@@ -402,6 +508,7 @@ def read_file_header(bin_path):
             cal_params = None
             header_flags = 0
             mag_ref = None
+            v6_extension = None
         else:
             # v1: 3s B 16s B I = 3+1+16+1+4 = 25 bytes
             hdr_size = HEADER_V1_SIZE
@@ -414,6 +521,7 @@ def read_file_header(bin_path):
             cal_params = None
             header_flags = 0
             mag_ref = None
+            v6_extension = None
 
         fw_str = fw_ver.split(b'\x00')[0].decode('ascii', errors='replace')
         result = {
@@ -427,6 +535,8 @@ def read_file_header(bin_path):
             result['calibration'] = cal_params
         if mag_ref is not None:
             result['mag_ref_ut'] = mag_ref
+        if v6_extension is not None:
+            result['v6'] = v6_extension
         return result, hdr_size
 
 
@@ -475,7 +585,7 @@ def build_csv_preamble_lines(hdr):
             "# COLUMN_NOTE: mag_valid=1 means the compensated reading is valid; "
             "mag_fresh=1 means the BMI270 AUX interface reported a fresh mag sample."
         )
-    if hdr and hdr.get('record_size', 0) == 242:
+    if hdr and hdr.get('record_size', 0) in (242, 256):
         lines.append(
             "# COLUMN_NOTE: v5 AtomS3R schema. pipe_lin_* / pipe_body_* are zero-latency "
             "pipeline diagnostics; bmi_* / bmm_* are Bosch-direct acquisition truth."
@@ -484,6 +594,23 @@ def build_csv_preamble_lines(hdr):
             "# COLUMN_NOTE: mag_valid=1 means BMM150 compensation succeeded; "
             "mag_sample_fresh=1 means AUX delivered a fresh sample; mag_overflow/fifo_overrun flag sensor-side issues."
         )
+        if hdr.get('record_size', 0) == 256:
+            lines.append(
+                "# COLUMN_NOTE: 256B v5 logs use seq + uint16 SD snapshots; header v6 logs add record_magic/crc16 and compact SD snapshots."
+            )
+            if hdr.get('header_version', 0) >= 6 and 'v6' in hdr:
+                v6 = hdr['v6']
+                lines.append(
+                    f"# HEADER_V6: header_size={v6['header_size']} data_offset={v6['data_offset']} "
+                    f"crc_ok={int(v6['header_crc_ok'])} sd_spi_hz={v6['sd_spi_hz']} "
+                    f"sd_queue_depth={v6['sd_queue_depth']} imu_queue_depth={v6['imu_queue_depth']} "
+                    f"sd_flush_every={v6['sd_flush_every']}"
+                )
+                lines.append(
+                    f"# HEADER_V6_REGS: bmi_chip_id=0x{v6['bmi_chip_id']:02X} "
+                    f"bmm_chip_id=0x{v6['bmm_chip_id']:02X} reset_cpu0={v6['reset_reason_cpu0']} "
+                    f"build_flags=0x{v6['build_flags']:08X} log_filename={v6['log_filename']}"
+                )
         if hdr.get('header_flags', 0) & 0x0001 and 'mag_ref_ut' in hdr:
             mx, my, mz = hdr['mag_ref_ut']
             lines.append(
@@ -523,6 +650,164 @@ def read_csv_preamble_and_header(csv_path):
 
 # ── Binary → CSV row conversion ───────────────────────────────────────────────
 
+def _base_col_name(name):
+    return name.split(' (', 1)[0].strip()
+
+
+def _field_indices(header_cols):
+    return {_base_col_name(name): i for i, name in enumerate(header_cols)}
+
+
+def _field_value(vals, fields, name):
+    idx = fields.get(name)
+    return vals[idx] if idx is not None else None
+
+
+def _finite_abs_ok(value, limit):
+    return isinstance(value, (int, float)) and math.isfinite(value) and abs(value) <= limit
+
+
+def _range_ok(value, lo, hi):
+    return isinstance(value, (int, float)) and math.isfinite(value) and lo <= value <= hi
+
+
+def _timestamp_us(vals, fields):
+    if 't_us' in fields:
+        return int(vals[fields['t_us']])
+    if 'timestamp_us' in fields:
+        return int(vals[fields['timestamp_us']])
+    if 't_ms' in fields:
+        return int(vals[fields['t_ms']]) * 1000
+    return None
+
+
+def _record_plausible(vals, fields, prev_ts_us=None, raw=None):
+    """Heuristic guard used only to recover from byte-level SD log misalignment."""
+    value = _field_value(vals, fields, 'record_magic')
+    if value is not None and value != RECORD_MAGIC_256_V6:
+        return False
+
+    value = _field_value(vals, fields, 'crc16')
+    if value is not None and raw is not None:
+        if crc16_ccitt(raw[:-2]) != value:
+            return False
+
+    ts_us = _timestamp_us(vals, fields)
+    if ts_us == SENTINEL_CALIB:
+        return True
+    if ts_us is not None:
+        if not (0 <= ts_us <= MAX_TIMESTAMP_US):
+            return False
+        if prev_ts_us is not None:
+            dt_us = ts_us - prev_ts_us
+            if not (0 < dt_us <= MAX_TIMESTAMP_GAP_US):
+                return False
+
+    for name in ('ax', 'ay', 'az', 'raw_ax', 'raw_ay', 'raw_az',
+                 'pipe_lin_ax', 'pipe_lin_ay', 'pipe_lin_az',
+                 'sensor_ax', 'sensor_ay', 'sensor_az',
+                 'bmi_acc_x_g', 'bmi_acc_y_g', 'bmi_acc_z_g'):
+        value = _field_value(vals, fields, name)
+        if value is not None and not _finite_abs_ok(value, 20.0):
+            return False
+
+    for name in ('gx', 'gy', 'gz', 'raw_gx', 'raw_gy', 'raw_gz',
+                 'pipe_body_gx', 'pipe_body_gy', 'pipe_body_gz',
+                 'sensor_gx', 'sensor_gy', 'sensor_gz',
+                 'bmi_gyr_x_dps', 'bmi_gyr_y_dps', 'bmi_gyr_z_dps'):
+        value = _field_value(vals, fields, name)
+        if value is not None and not _finite_abs_ok(value, 5000.0):
+            return False
+
+    for name in ('mag_ut_x', 'mag_ut_y', 'mag_ut_z',
+                 'bmm_ut_x', 'bmm_ut_y', 'bmm_ut_z'):
+        value = _field_value(vals, fields, name)
+        if value is not None and not _finite_abs_ok(value, 10000.0):
+            return False
+
+    for name in ('nav_speed2d', 'nav_vel_n', 'nav_vel_e', 'dhv_gdspd'):
+        value = _field_value(vals, fields, name)
+        if value is not None and not _finite_abs_ok(value, 300.0):
+            return False
+
+    value = _field_value(vals, fields, 'nav_s_acc')
+    if value is not None and not _range_ok(value, 0.0, 1000.0):
+        return False
+
+    value = _field_value(vals, fields, 'temp_c')
+    if value is not None and not _range_ok(value, -40.0, 125.0):
+        return False
+
+    value = _field_value(vals, fields, 'gps_lat')
+    if value is not None and value != 0.0 and not _range_ok(value, -90.0, 90.0):
+        return False
+
+    value = _field_value(vals, fields, 'gps_lon')
+    if value is not None and value != 0.0 and not _range_ok(value, -180.0, 180.0):
+        return False
+
+    range_checks = (
+        ('gps_sog_kmh', 0.0, 500.0),
+        ('gps_alt_m', -1000.0, 10000.0),
+        ('gps_sats', 0, 80),
+        ('gps_hdop', 0.0, 100.0),
+        ('lap', 0, 255),
+        ('fifo_frames_drained', 0, 64),
+        ('fifo_backlog', 0, 255),
+    )
+    for name, lo, hi in range_checks:
+        value = _field_value(vals, fields, name)
+        if value is not None and not _range_ok(value, lo, hi):
+            return False
+
+    for name in ('mag_valid', 'mag_fresh', 'mag_valid_legacy',
+                 'mag_sample_fresh', 'mag_overflow', 'imu_sample_fresh',
+                 'fifo_overrun', 'gps_valid'):
+        value = _field_value(vals, fields, name)
+        if value is not None and value not in (0, 1):
+            return False
+
+    value = _field_value(vals, fields, 'reserved0')
+    if value is not None and value != 0:
+        return False
+
+    value = _field_value(vals, fields, 'nav_vel_valid')
+    if value is not None and value not in (0, 6, 7):
+        return False
+
+    value = _field_value(vals, fields, 'gps_speed_source')
+    if value is not None and value not in (0, 1, 2):
+        return False
+
+    return True
+
+
+def _find_resync_skip(fobj, start_pos, fmt, chunk_size, fields):
+    window_len = RESYNC_SCAN_BYTES + RESYNC_CONFIRM_RECORDS * chunk_size
+    fobj.seek(start_pos)
+    window = fobj.read(window_len)
+    max_skip = min(RESYNC_SCAN_BYTES, len(window) - RESYNC_CONFIRM_RECORDS * chunk_size)
+    if max_skip < 1:
+        return None
+
+    for skip in range(1, max_skip + 1):
+        prev_ts_us = None
+        ok = True
+        for i in range(RESYNC_CONFIRM_RECORDS):
+            off = skip + i * chunk_size
+            vals = struct.unpack_from(fmt, window, off)
+            raw = window[off:off + chunk_size]
+            if not _record_plausible(vals, fields, prev_ts_us, raw):
+                ok = False
+                break
+            ts_us = _timestamp_us(vals, fields)
+            if ts_us is not None and ts_us != SENTINEL_CALIB:
+                prev_ts_us = ts_us
+        if ok:
+            return skip
+    return None
+
+
 def bin_record_count(bin_path):
     hdr, offset = read_file_header(bin_path)
     chunk_size = hdr['record_size'] if hdr else CHUNK_SIZE_DEFAULT
@@ -534,28 +819,52 @@ def bin_to_csv_lines(bin_path, total=None):
     """Yield CSV rows from a binary telemetry file (with or without FileHeader)."""
     hdr, offset = read_file_header(bin_path)
     chunk_size = hdr['record_size'] if hdr else CHUNK_SIZE_DEFAULT
-    fmt, _, col_fmt = get_format(chunk_size)
+    fmt, hdr_cols, col_fmt = get_format(chunk_size, hdr.get('header_version') if hdr else None)
+    fields = _field_indices(hdr_cols)
 
     with open(bin_path, 'rb') as f:
         if offset > 0:
             f.seek(offset)
         count = 0
+        resync_count = 0
+        prev_ts_us = None
         while True:
+            record_pos = f.tell()
             chunk = f.read(chunk_size)
             if len(chunk) < chunk_size:
                 break
             vals = struct.unpack(fmt, chunk)
             if vals[0] == SENTINEL_CALIB:   # CalibrationRecord sentinel (uint64 max)
                 yield f"# CALIB_UPDATE: sin_phi={vals[1]:.5f} cos_phi={vals[2]:.5f} sin_theta={vals[3]:.5f} cos_theta={vals[4]:.5f} bias_ax={vals[5]:.5f} bias_ay={vals[6]:.5f} bias_az={vals[7]:.5f} bias_gx={vals[11]:.5f} bias_gy={vals[12]:.5f} bias_gz={vals[14]:.5f}"
+                prev_ts_us = None
+                continue
+            if not _record_plausible(vals, fields, prev_ts_us, chunk):
+                skip = _find_resync_skip(f, record_pos, fmt, chunk_size, fields)
+                if skip is None:
+                    # Fallback: skip one record worth of bytes and keep trying
+                    print(f"\n    {YELLOW}WARN:{RESET} no resync found at byte {record_pos:,}; "
+                          f"skipping {chunk_size} bytes")
+                    f.seek(record_pos + chunk_size)
+                    prev_ts_us = None
+                    continue
+                resync_count += 1
+                print(f"\n    {YELLOW}WARN:{RESET} resynced binary stream at byte {record_pos:,}; "
+                      f"skipped {skip} byte(s)")
+                f.seek(record_pos + skip)
+                prev_ts_us = None
                 continue
             line = ','.join(f.format(v) for f, v in zip(col_fmt, vals))
             yield line
+            prev_ts_us = _timestamp_us(vals, fields)
             count += 1
             if count % PROGRESS_EVERY == 0 and total:
                 pct = count * 100 // total
                 print(f"    Read {count:>10,} / {total:,}  ({pct}%)", end='\r')
+        if resync_count:
+            print(f"\n    {YELLOW}Resync events:{RESET} {resync_count}")
     if total:
-        print(f"    Read {count:>10,} / {total:,}  (100%)    ")
+        status = "100%" if count >= total else "done"
+        print(f"    Read {count:>10,} / {total:,}  ({status})    ")
 
 
 def csv_to_lines(csv_path):
@@ -767,7 +1076,7 @@ def main():
         hdr, _ = read_file_header(bin_file)
         if hdr:
             print(f"  Firmware: {hdr['firmware_version']}, record_size={hdr['record_size']}B")
-            _, hdr_cols, _ = get_format(hdr['record_size'])
+            _, hdr_cols, _ = get_format(hdr['record_size'], hdr.get('header_version'))
             HEADER_LINE = ','.join(hdr_cols) + '\n'
             CSV_PREAMBLE_LINES = build_csv_preamble_lines(hdr)
         print(f"  Direct conversion: {bin_file} → {csv_file}")
@@ -795,7 +1104,7 @@ def main():
                   f"header_v{hdr['header_version']}, "
                   f"start={hdr['start_time_ms']}ms")
             # Update HEADER_LINE for the detected record format
-            _, hdr_cols, _ = get_format(hdr['record_size'])
+            _, hdr_cols, _ = get_format(hdr['record_size'], hdr.get('header_version'))
             HEADER_LINE = ','.join(hdr_cols) + '\n'
             CSV_PREAMBLE_LINES = build_csv_preamble_lines(hdr)
         else:

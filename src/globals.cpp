@@ -16,6 +16,7 @@ SemaphoreHandle_t gps_mutex;
 TaskHandle_t TaskI2CHandle;
 TaskHandle_t TaskFilterHandle;
 TaskHandle_t TaskSDHandle;
+TaskHandle_t TaskGPSHandle;
 
 // ── Shared Telemetry Data ──────────────────────────────────────────────────
 FilteredTelemetry shared_telemetry;
@@ -72,6 +73,7 @@ std::atomic<uint32_t> sd_stall_count{0};
 std::atomic<uint32_t> sd_reopen_count{0};
 std::atomic<uint32_t> sd_stall_worst_ms{0};
 std::atomic<uint32_t> sd_write_overreport_count{0};
+std::atomic<uint32_t> gps_mutex_timeout_count{0};
 std::atomic<bool> gps_stale{false};
 std::atomic<int> system_state{0};
 std::atomic<bool> recalibration_pending{false}; // v1.3.2
