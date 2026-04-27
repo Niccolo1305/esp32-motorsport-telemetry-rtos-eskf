@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Offline SITL replay for Telemetria v1.4.x logs.
+Offline SITL replay for current Telemetria logs.
 
 This script replays the same IMU pipeline implemented in `src/filter_task.cpp`
-using the Level 1 sensor-frame channels logged in v1.4.0+:
+using the Level 1 sensor-frame channels logged by the firmware:
 
-  sensor_* -> ellipsoid -> rotate_3d -> mounting bias -> VGPL + Madgwick
+  bmi_acc/gyr physical pre-pipeline -> axis remap -> ellipsoid -> rotate_3d
+            -> mounting bias -> VGPL + Madgwick
             -> gravity removal -> ZARU -> ESKF 5D -> end-of-pipe EMA
 
 Input can be either:
   - a CSV produced by `Tool/bin_to_csv.py`
-  - a v1.4.x `.bin` file, converted on the fly through `bin_to_csv.py`
+  - a `.bin` file, converted on the fly through `bin_to_csv.py`
 
 Typical usage:
-  python Tool/sitl_replay.py Tool/tel_5_test.csv
-  python Tool/sitl_replay.py Tool/tel_5.bin --output Tool/tel_5_sitl.csv
+  python Tool/sitl_hal/sitl_replay.py Tool/tel_120.csv
+  python Tool/sitl_hal/sitl_replay.py Tool/tel_120.bin --output Tool/tel_120_sitl.csv
 """
 
 from __future__ import annotations
@@ -37,19 +38,30 @@ if str(TOOL_DIR) not in sys.path:
     sys.path.insert(0, str(TOOL_DIR))
 
 import bin_to_csv  # type: ignore  # local tool module
-from schema_compat import apply_runtime_aliases, expand_available_columns
-
-
-# Mirrors src/config.h / src/eskf.h
-CALIB_B = np.array([-0.00125, +0.00429, -0.06491], dtype=np.float64)
-CALIB_W = np.array(
-    [
-        [+1.000824, -0.000511, -0.001575],
-        [-0.000511, +1.000989, -0.000132],
-        [-0.001575, -0.000132, +1.003466],
-    ],
-    dtype=np.float64,
+from schema_compat import (
+    apply_runtime_aliases,
+    ellipsoid_calibration_for_columns,
+    expand_available_columns,
 )
+
+
+# Mirrors src/config.h. v5 AtomS3R/BMI270 logs use identity calibration;
+# legacy MPU-6886 logs use the tumble-test matrix.
+_LEGACY_B, _LEGACY_W = ellipsoid_calibration_for_columns(())
+CALIB_B = np.array(_LEGACY_B, dtype=np.float64)
+CALIB_W = np.array(_LEGACY_W, dtype=np.float64)
+_BMI270_B, _BMI270_W = ellipsoid_calibration_for_columns(
+    (
+        "bmi_acc_x_g",
+        "bmi_acc_y_g",
+        "bmi_acc_z_g",
+        "bmi_gyr_x_dps",
+        "bmi_gyr_y_dps",
+        "bmi_gyr_z_dps",
+    )
+)
+BMI270_CALIB_B = np.array(_BMI270_B, dtype=np.float64)
+BMI270_CALIB_W = np.array(_BMI270_W, dtype=np.float64)
 
 DEG2RAD = math.pi / 180.0
 RAD2DEG = 180.0 / math.pi
@@ -59,8 +71,10 @@ DT_DEFAULT = 0.02
 
 ALPHA = 0.06
 VAR_BUF_SIZE = 50
-VAR_STILLNESS_GZ_THRESHOLD = 0.25
-VAR_STILLNESS_GXY_THRESHOLD = 0.35
+LEGACY_VAR_STILLNESS_GZ_THRESHOLD = 0.25
+LEGACY_VAR_STILLNESS_GXY_THRESHOLD = 0.35
+BMI270_VAR_STILLNESS_GZ_THRESHOLD = 0.05
+BMI270_VAR_STILLNESS_GXY_THRESHOLD = 0.08
 ZUPT_GPS_MAX_KMH = 2.0
 
 NHC_R = 0.5
@@ -216,6 +230,16 @@ def rate_limit(value: float, prev: float, limit: float) -> float:
     return value
 
 
+def is_bmi270_row(row: Dict[str, float]) -> bool:
+    return "bmi_acc_x_g" in row
+
+
+def stillness_thresholds(row: Dict[str, float]) -> Tuple[float, float]:
+    if is_bmi270_row(row):
+        return BMI270_VAR_STILLNESS_GZ_THRESHOLD, BMI270_VAR_STILLNESS_GXY_THRESHOLD
+    return LEGACY_VAR_STILLNESS_GZ_THRESHOLD, LEGACY_VAR_STILLNESS_GXY_THRESHOLD
+
+
 def rotate_3d(x: float, y: float, z: float,
               calibration: CalibrationState) -> Tuple[float, float, float]:
     y1 = y * calibration.cos_phi - z * calibration.sin_phi
@@ -236,7 +260,9 @@ def wgs84_to_enu(lat: float, lon: float, lat0: float, lon0: float) -> Tuple[floa
 class ESKF2D:
     """Numpy port of src/eskf.h::ESKF2D."""
 
-    def __init__(self) -> None:
+    def __init__(self, gps_r_scale: float = 1.0, gps_soft_cap_m: float = 0.0) -> None:
+        self.gps_r_scale = max(0.01, float(gps_r_scale))
+        self.gps_soft_cap_m = max(0.0, float(gps_soft_cap_m))
         self.qd = np.zeros((5, 5), dtype=np.float64)
         self.qd[2, 2] = 1.0e-2
         self.qd[3, 3] = 1.0e-2
@@ -254,6 +280,9 @@ class ESKF2D:
         self.has_last_gps = False
         self.last_gps_east = 0.0
         self.last_gps_north = 0.0
+        self.gps_innov_raw_m = 0.0
+        self.gps_innov_eff_m = 0.0
+        self.gps_innov_soft_scale = 1.0
 
     def predict(self, ax_body: float, ay_body: float, gz_rad: float,
                 dt: float, is_stationary: bool) -> None:
@@ -269,8 +298,10 @@ class ESKF2D:
 
         cos_th = math.cos(theta)
         sin_th = math.sin(theta)
-        ax_enu = ax_ms2 * cos_th - ay_ms2 * sin_th
-        ay_enu = ax_ms2 * sin_th + ay_ms2 * cos_th
+        # Vehicle frame: X is lateral/right and Y is longitudinal/forward.
+        # theta follows GPS COG: forward heading from ENU east.
+        ax_enu = ax_ms2 * sin_th + ay_ms2 * cos_th
+        ay_enu = -ax_ms2 * cos_th + ay_ms2 * sin_th
 
         vx_new = vx + ax_enu * dt
         vy_new = vy + ay_enu * dt
@@ -280,8 +311,8 @@ class ESKF2D:
         self.x[3] = vy_new
         self.x[4] = theta_new
 
-        dax_dth = -ax_ms2 * sin_th - ay_ms2 * cos_th
-        day_dth = ax_ms2 * cos_th - ay_ms2 * sin_th
+        dax_dth = ax_ms2 * cos_th - ay_ms2 * sin_th
+        day_dth = ax_ms2 * sin_th + ay_ms2 * cos_th
 
         fj = np.eye(5, dtype=np.float64)
         fj[0, 2] = dt
@@ -303,12 +334,25 @@ class ESKF2D:
         if hdop < 0.5 or hdop > 50.0:
             hdop = 1.0
 
-        r_dynamic = 0.05 * (hdop * hdop)
+        # SITL sweep knob for GPS trust. A previous anisotropic/post-turn
+        # adaptive-R experiment on tel_122 produced only marginal road-distance
+        # gains and occasional regressions, so it was removed. Uniform scaling is
+        # easier to reason about when testing "more IMU freedom, less GPS pull".
+        r_dynamic = 0.05 * (hdop * hdop) * self.gps_r_scale
         r_pos = np.diag([r_dynamic, r_dynamic]).astype(np.float64)
 
         z = np.array([gps_east_m, gps_north_m], dtype=np.float64)
         hx = self.x[:2].copy()
         y = z - hx
+        raw_innov_m = math.sqrt(float(y @ y))
+        soft_scale = 1.0
+        if self.gps_soft_cap_m > 0.0 and raw_innov_m > 1e-9:
+            ratio = raw_innov_m / self.gps_soft_cap_m
+            soft_scale = math.tanh(ratio) / ratio
+            y *= soft_scale
+        self.gps_innov_raw_m = raw_innov_m
+        self.gps_innov_eff_m = math.sqrt(float(y @ y))
+        self.gps_innov_soft_scale = soft_scale
         s = self.p[:2, :2] + r_pos
         det = float(np.linalg.det(s))
         if abs(det) > 1e-10:
@@ -380,13 +424,13 @@ class ESKF2D:
         sin_th = math.sin(theta)
         cos_th = math.cos(theta)
 
-        v_lat = -vx * sin_th + vy * cos_th
+        v_lat = vx * sin_th - vy * cos_th
         y = -v_lat
 
         h = np.zeros((1, 5), dtype=np.float64)
-        h[0, 2] = -sin_th
-        h[0, 3] = cos_th
-        h[0, 4] = -(vx * cos_th + vy * sin_th)
+        h[0, 2] = sin_th
+        h[0, 3] = -cos_th
+        h[0, 4] = vx * cos_th + vy * sin_th
 
         s = float((h @ self.p @ h.T)[0, 0]) + r_nhc
         if abs(s) < 1e-10:
@@ -492,9 +536,18 @@ class MadgwickAHRS:
 
 
 class SITLReplayer:
-    def __init__(self, calibration: Optional[CalibrationState] = None) -> None:
+    def __init__(self, calibration: Optional[CalibrationState] = None,
+                 gps_r_scale: float = 1.0,
+                 gps_soft_cap_m: float = 0.0,
+                 nav_median3: bool = False) -> None:
         self.calibration = calibration
-        self.eskf = ESKF2D()
+        self.gps_r_scale = max(0.01, float(gps_r_scale))
+        self.gps_soft_cap_m = max(0.0, float(gps_soft_cap_m))
+        self.nav_median3 = nav_median3
+        self.eskf = ESKF2D(
+            gps_r_scale=self.gps_r_scale,
+            gps_soft_cap_m=self.gps_soft_cap_m,
+        )
         self.ahrs = MadgwickAHRS()
         self.reset_dynamic_state(seed_next_ema=False)
         self.total_rows = 0
@@ -531,6 +584,8 @@ class SITLReplayer:
         self.prev_ax = 0.0
         self.prev_ay = 0.0
         self.prev_az = 0.0
+        self.nav_ax_buf: List[float] = []
+        self.nav_ay_buf: List[float] = []
         self.prev_gx = 0.0
         self.prev_gy = 0.0
         self.prev_gz = 0.0
@@ -543,9 +598,22 @@ class SITLReplayer:
         self.eskf.reset()
         self.ahrs.reset()
 
+    def _nav_accel(self, lin_ax: float, lin_ay: float) -> Tuple[float, float]:
+        if not self.nav_median3:
+            return lin_ax, lin_ay
+        self.nav_ax_buf.append(lin_ax)
+        self.nav_ay_buf.append(lin_ay)
+        if len(self.nav_ax_buf) > 3:
+            self.nav_ax_buf.pop(0)
+            self.nav_ay_buf.pop(0)
+        return (
+            float(np.median(np.array(self.nav_ax_buf, dtype=np.float64))),
+            float(np.median(np.array(self.nav_ay_buf, dtype=np.float64))),
+        )
+
     def apply_calibration(self, calibration: CalibrationState, is_update: bool) -> None:
         self.calibration = calibration
-        if is_update:
+        if is_update or self.total_rows == 0:
             self.reset_dynamic_state(seed_next_ema=True)
 
     def process_row(self, row: Dict[str, float]) -> Dict[str, float]:
@@ -573,7 +641,9 @@ class SITLReplayer:
             dtype=np.float64,
         )
 
-        acc_cal = CALIB_W @ (sensor_acc - CALIB_B)
+        calib_b = BMI270_CALIB_B if is_bmi270_row(row) else CALIB_B
+        calib_w = BMI270_CALIB_W if is_bmi270_row(row) else CALIB_W
+        acc_cal = calib_w @ (sensor_acc - calib_b)
         ax_r_raw, ay_r_raw, az_r_raw = rotate_3d(
             acc_cal[0], acc_cal[1], acc_cal[2], self.calibration
         )
@@ -615,6 +685,7 @@ class SITLReplayer:
         lin_ax = ax_r - grav_x
         lin_ay = ay_r - grav_y
         lin_az = az_r - grav_z
+        nav_lin_ax, nav_lin_ay = self._nav_accel(lin_ax, lin_ay)
 
         self._ingest_gps_row(row, t_us)
         self._update_variance_buffers(gx_r, gy_r, gz_r)
@@ -629,11 +700,12 @@ class SITLReplayer:
 
         is_stationary = False
         if var_gz >= 0.0:
+            var_gz_threshold, var_gxy_threshold = stillness_thresholds(row)
             gps_slow = (not self.last_gps.valid) or (gps_speed_kmh_used < ZUPT_GPS_MAX_KMH)
             is_stationary = (
-                var_gz < VAR_STILLNESS_GZ_THRESHOLD
-                and var_gx < VAR_STILLNESS_GXY_THRESHOLD
-                and var_gy < VAR_STILLNESS_GXY_THRESHOLD
+                var_gz < var_gz_threshold
+                and var_gx < var_gxy_threshold
+                and var_gy < var_gxy_threshold
                 and gps_slow
                 and abs(mean_gz) < 2.5
             )
@@ -645,7 +717,7 @@ class SITLReplayer:
 
         straight_zaru_active = False
         if (not is_stationary) and self.last_gps.valid and gps_speed_kmh_used > STRAIGHT_MIN_SPEED_KMH:
-            lat_gate = abs(lin_ay) < STRAIGHT_MAX_LAT_G
+            lat_gate = abs(lin_ax) < STRAIGHT_MAX_LAT_G
             gz_gate = abs(gz_r - self.thermal_bias_gz) < 2.0
             cog_gate = abs(self.cog_variation) < STRAIGHT_COG_MAX_RAD
             if lat_gate and gz_gate and cog_gate:
@@ -660,10 +732,10 @@ class SITLReplayer:
                 )
                 straight_zaru_active = True
 
-        self.eskf.predict(lin_ax, lin_ay, gz_rad, dt_real_sec, is_stationary)
+        self.eskf.predict(nav_lin_ax, nav_lin_ay, gz_rad, dt_real_sec, is_stationary)
 
         nhc_active = False
-        if self.eskf.speed_ms() > NHC_MIN_SPEED_MS and abs(lin_ay) < NHC_MAX_LAT_G:
+        if self.eskf.speed_ms() > NHC_MIN_SPEED_MS and abs(nav_lin_ax) < NHC_MAX_LAT_G:
             self.eskf.correct_nhc(NHC_R)
             nhc_active = True
 
@@ -686,7 +758,12 @@ class SITLReplayer:
                 self.gps_origin_lat,
                 self.gps_origin_lon,
             )
-            self.eskf.correct(east_m, north_m, gps_speed_kmh_used, self.last_gps.hdop)
+            self.eskf.correct(
+                east_m,
+                north_m,
+                gps_speed_kmh_used,
+                self.last_gps.hdop,
+            )
             if self.using_logged_gps_timing:
                 self.last_processed_fix_us = self.last_gps.fix_us
             else:
@@ -756,6 +833,8 @@ class SITLReplayer:
             "sitl_raw_ax": lin_ax,
             "sitl_raw_ay": lin_ay,
             "sitl_raw_az": lin_az,
+            "sitl_nav_ax": nav_lin_ax,
+            "sitl_nav_ay": nav_lin_ay,
             "sitl_raw_gx": gx_r,
             "sitl_raw_gy": gy_r,
             "sitl_raw_gz": gz_r,
@@ -784,6 +863,9 @@ class SITLReplayer:
             "sitl_zaru_flags": float(sitl_flags),
             "sitl_cent_x": cent_x,
             "sitl_long_y": long_y,
+            "sitl_gps_innov_raw_m": self.eskf.gps_innov_raw_m,
+            "sitl_gps_innov_eff_m": self.eskf.gps_innov_eff_m,
+            "sitl_gps_innov_soft_scale": self.eskf.gps_innov_soft_scale,
         }
 
     def _ingest_gps_row(self, row: Dict[str, float], t_us: int) -> None:
@@ -1002,8 +1084,15 @@ def iter_input_events(path: Path) -> Iterator[Tuple[str, object]]:
 
     if suffix == ".bin":
         hdr, _ = bin_to_csv.read_file_header(str(path))
+        if hdr:
+            for comment in bin_to_csv.build_csv_preamble_lines(hdr):
+                parsed = parse_calibration_comment(comment)
+                if parsed is not None:
+                    yield ("calibration", parsed)
         record_size = hdr["record_size"] if hdr else bin_to_csv.CHUNK_SIZE_DEFAULT
-        _, header_cols, _ = bin_to_csv.get_format(record_size)
+        _, header_cols, _ = bin_to_csv.get_format(
+            record_size, hdr.get("header_version") if hdr else None
+        )
         header_line = ",".join(header_cols)
         yield from iter_csv_payload(header_line, bin_to_csv.bin_to_csv_lines(str(path)))
         return
@@ -1026,6 +1115,8 @@ def make_output_writer(path: Path) -> Tuple[TextIO, csv.writer]:
             "sitl_raw_ax",
             "sitl_raw_ay",
             "sitl_raw_az",
+            "sitl_nav_ax",
+            "sitl_nav_ay",
             "sitl_raw_gx",
             "sitl_raw_gy",
             "sitl_raw_gz",
@@ -1049,6 +1140,9 @@ def make_output_writer(path: Path) -> Tuple[TextIO, csv.writer]:
             "sitl_straight_zaru",
             "sitl_nhc",
             "sitl_zaru_flags",
+            "sitl_gps_innov_raw_m",
+            "sitl_gps_innov_eff_m",
+            "sitl_gps_innov_soft_scale",
             "err_raw_ax",
             "err_raw_ay",
             "err_raw_az",
@@ -1114,6 +1208,8 @@ def write_output_row(writer: csv.writer,
             replay["sitl_raw_ax"],
             replay["sitl_raw_ay"],
             replay["sitl_raw_az"],
+            replay["sitl_nav_ax"],
+            replay["sitl_nav_ay"],
             replay["sitl_raw_gx"],
             replay["sitl_raw_gy"],
             replay["sitl_raw_gz"],
@@ -1137,6 +1233,9 @@ def write_output_row(writer: csv.writer,
             int(replay["sitl_straight_zaru"]),
             int(replay["sitl_nhc"]),
             int(replay["sitl_zaru_flags"]),
+            replay["sitl_gps_innov_raw_m"],
+            replay["sitl_gps_innov_eff_m"],
+            replay["sitl_gps_innov_soft_scale"],
             replay["sitl_raw_ax"] - row["raw_ax"],
             replay["sitl_raw_ay"] - row["raw_ay"],
             replay["sitl_raw_az"] - row["raw_az"],
@@ -1212,9 +1311,9 @@ def print_summary(path: Path,
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Replay the Telemetria SITL pipeline from a v1.4.x CSV or BIN log."
+        description="Replay the Telemetria SITL pipeline from a CSV or BIN log."
     )
-    parser.add_argument("input", help="Path to a v1.4.x .csv or .bin file.")
+    parser.add_argument("input", help="Path to a Telemetria .csv or .bin file.")
     parser.add_argument(
         "--output",
         help="Optional CSV path for replayed SITL channels and per-sample errors.",
@@ -1225,13 +1324,49 @@ def main() -> None:
         default=0,
         help="Optional limit for quick debugging (0 = full file).",
     )
+    parser.add_argument(
+        "--gps-r-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Scale factor for GPS position variance R. Values >1 trust GPS "
+            "less and let the inertial prediction carry more of the trajectory."
+        ),
+    )
+    parser.add_argument(
+        "--gps-soft-cap-m",
+        type=float,
+        default=0.0,
+        help=(
+            "Smoothly saturate each GPS position innovation to this many meters "
+            "(0 disables). Useful for testing reduced per-fix snap/sawtooth."
+        ),
+    )
+    parser.add_argument(
+        "--nav-median3",
+        action="store_true",
+        help=(
+            "Feed ESKF/NHC with a causal 3-sample median of lin_ax/lin_ay while "
+            "keeping sitl_raw_* as the unfiltered diagnostic pipe output."
+        ),
+    )
     args = parser.parse_args()
 
     input_path = Path(args.input).resolve()
     if not input_path.exists():
         raise SystemExit(f"Input file not found: {input_path}")
 
-    replay = SITLReplayer()
+    replay = SITLReplayer(
+        gps_r_scale=args.gps_r_scale,
+        gps_soft_cap_m=args.gps_soft_cap_m,
+        nav_median3=args.nav_median3,
+    )
+    if abs(args.gps_r_scale - 1.0) > 1e-9:
+        print(f"[SITL] GPS position R scale: {args.gps_r_scale:g}x")
+    if args.gps_soft_cap_m > 0.0:
+        print(f"[SITL] GPS soft innovation cap: {args.gps_soft_cap_m:g} m")
+    if args.nav_median3:
+        print("[SITL] Navigation accel anti-spike: causal median3 enabled")
     stats = {key: RunningErrorStats() for key in [
         "raw_ax", "raw_ay", "raw_az",
         "raw_gx", "raw_gy", "raw_gz",

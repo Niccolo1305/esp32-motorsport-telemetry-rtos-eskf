@@ -1,4 +1,12 @@
 numpy
 pandas
+polars
 plotly
 dash
+fastapi
+uvicorn
+python-multipart
+scipy
+matplotlib
+allantools
+paho-mqtt

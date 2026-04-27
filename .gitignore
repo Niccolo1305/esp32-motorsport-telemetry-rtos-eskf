@@ -46,19 +46,55 @@ Tool/script/analyze_roundabout_deep.py
 Tool/script/analyze_roundabout_fix.py
 Tool/script/analyze_tbias_deep.py
 Tool/script/analyze_zaru.py
+Tool/script/analyze4.py
+Tool/script/bias_drift_report.py
+Tool/script/bosch_static_validator.py
+Tool/script/generate_atom_s3_vs_atom_s3r_whitepaper.py
+Tool/script/gps_speed_compare.py
+Tool/script/gsen_analysis.py
 Tool/script/simulate_vgpl.py
+Tool/script/tumble_test.py
 Tool/script/verify_vgpl_theory.py
 Tool/testdrive_fix_madgwick_2gate.csv
 claude.exe
 cross_domain_audit_report.md
 data_pipeline_audit.md
 CLAUDE.md
+/firmware/
+/test_fw/
 
 # =========================
 # Dati di test locali / CSV
 # =========================
 Tool/*.csv
+Tool/.telemetry_cache/
 Tool/sitl_hal/Bin_test_su_banco*/
+
+# =========================
+# Capture e dataset locali pesanti
+# =========================
+Reports/csv_termal_log/
+Tool/script/Reports bias/
+Tool/sitl_hal/tel_*_csv/
+
+# =========================
+# Output analisi/grafici generati
+# =========================
+Reports/tel_*_metrics.json
+Reports/tel_*_*.png
+Reports/*_assets/
+
+# =========================
+# Log/boot dump locali
+# =========================
+*.txtMi
+test_fw/**/atoms3*_psram_boot.txtMi
+
+# =========================
+# PDF generati da documenti markdown
+# =========================
+Docs/*.pdf
+Tool/can_bus/*.pdf
 
 # =========================
 # Tool SITL sperimentali locali
@@ -79,4 +115,7 @@ audit_v1.5.1.md
 whitepaper_at6668_dhv_navpv_findings.md
 whitepaper_at6668_dhv_navpv_findings.pdf
 img/
+/Docs/
+/Reports/*.md
+/Storico MARKDOWN/
 

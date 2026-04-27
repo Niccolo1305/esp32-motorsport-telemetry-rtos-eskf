@@ -50,6 +50,8 @@ from datetime import datetime
 #                            122 B  total
 
 HEADER_MAGIC  = b'TEL'
+RECORD_FMT_256_V5 = '<Q7fBddffBf4f6f5fBf6h6f3hH3f8BQB4fBBQfQI5H'  # 256-byte header v5 record
+RECORD_FMT_256 = '<Q7fBddffBf4f6f5fBf6h6f3hH3f8BQB4fBBQfQII4BH'  # 256-byte header v6 record
 RECORD_FMT_242 = '<Q7fBddffBf4f6f5fBf6h6f3hH3f8BQB4fBBQfQ'  # 242-byte record (v1.7.0+, AtomS3R v5 raw/FIFO)
 RECORD_FMT_224 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3hH3fBB'  # 224-byte record (v1.6.1+, Bosch-direct mag)
 RECORD_FMT_215 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3fB'  # 215-byte record (v1.6.0 legacy, M5Unified mag)
@@ -60,6 +62,8 @@ RECORD_FMT_155 = '<Q7fBddffBf4f6f5fBf6f'  # 155-byte record (v1.4.0, uint64 ts +
 RECORD_FMT_127 = '<I7fBddffBf4f6f5fBf'  # 127-byte record (v1.3.1+, + zaru_flags + tbias_gz)
 RECORD_FMT_122 = '<I7fBddffBf4f6f5f'  # 122-byte record (v0.9.8+, raw IMU + 6D)
 RECORD_FMT_78  = '<I7fBddffBf4f'       # 78-byte record (v0.8.0–v0.9.7, EMA only)
+RECORD_SIZE_256_V5 = struct.calcsize(RECORD_FMT_256_V5)
+RECORD_SIZE_256 = struct.calcsize(RECORD_FMT_256)
 RECORD_SIZE_242 = struct.calcsize(RECORD_FMT_242)
 RECORD_SIZE_224 = struct.calcsize(RECORD_FMT_224)
 RECORD_SIZE_215 = struct.calcsize(RECORD_FMT_215)
@@ -102,8 +106,8 @@ FIELD_NAMES_242 = [
     'pipe_body_gx', 'pipe_body_gy', 'pipe_body_gz',
     'kf6_x', 'kf6_y', 'kf6_vel', 'kf6_heading', 'kf6_bgz',
     'zaru_flags', 'tbias_gz',
-    'bmi_raw_ax', 'bmi_raw_ay', 'bmi_raw_az',
-    'bmi_raw_gx', 'bmi_raw_gy', 'bmi_raw_gz',
+    'bmi_post_lpf20_prepipe_ax', 'bmi_post_lpf20_prepipe_ay', 'bmi_post_lpf20_prepipe_az',
+    'bmi_post_lpf20_prepipe_gx', 'bmi_post_lpf20_prepipe_gy', 'bmi_post_lpf20_prepipe_gz',
     'bmi_acc_x_g', 'bmi_acc_y_g', 'bmi_acc_z_g',
     'bmi_gyr_x_dps', 'bmi_gyr_y_dps', 'bmi_gyr_z_dps',
     'bmm_raw_x', 'bmm_raw_y', 'bmm_raw_z',
@@ -115,6 +119,23 @@ FIELD_NAMES_242 = [
     'nav_speed2d', 'nav_s_acc', 'nav_vel_n', 'nav_vel_e',
     'nav_vel_valid', 'gps_speed_source', 'nav_fix_us',
     'dhv_gdspd', 'dhv_fix_us',
+]
+FIELD_NAMES_256 = FIELD_NAMES_242 + [
+    'record_magic',
+    'seq',
+    'sd_records_dropped',
+    'sd_partial_write_count',
+    'sd_stall_count',
+    'sd_reopen_count',
+    'crc16',
+]
+FIELD_NAMES_256_V5 = FIELD_NAMES_242 + [
+    'seq',
+    'sd_records_dropped',
+    'sd_partial_write_count',
+    'sd_stall_count',
+    'sd_reopen_count',
+    'sd_queue_hwm',
 ]
 FIELD_NAMES_224 = FIELD_NAMES_202 + [
     'mag_raw_x', 'mag_raw_y', 'mag_raw_z', 'mag_rhall',
@@ -228,7 +249,11 @@ def _read_bin_file_header(path):
             return None, 0
         hdr_ver = struct.unpack('<B', hdr_ver_byte)[0]
         
-        if hdr_ver >= 5:
+        if hdr_ver >= 6:
+            rest = f.read(252)  # 256 - 4 already read
+            fw_ver_b, rec_size, start_ms = struct.unpack('<16sHI', rest[:22])
+            data_offset = 256
+        elif hdr_ver >= 5:
             rest = f.read(76)  # 80 - 4 already read
             fw_ver_b, rec_size, start_ms = struct.unpack('<16sHI', rest[:22])
             data_offset = 80
@@ -250,7 +275,8 @@ def _read_bin_file_header(path):
             data_offset = 25
             
         fw_str = fw_ver_b.split(b'\x00')[0].decode('ascii', errors='replace')
-        return {'firmware_version': fw_str, 'record_size': rec_size, 'start_ms': start_ms}, data_offset
+        return {'firmware_version': fw_str, 'record_size': rec_size, 'start_ms': start_ms,
+                'header_version': hdr_ver}, data_offset
 
 
 def read_bin(path):
@@ -270,7 +296,15 @@ def read_bin(path):
         fw_version  = 'unknown'
         print(f'        No FileHeader (legacy file) — assuming {record_size}B record size')
 
-    if record_size == RECORD_SIZE_242:
+    if record_size == RECORD_SIZE_256:
+        if hdr and hdr.get('header_version', 0) < 6:
+            fmt        = RECORD_FMT_256_V5
+            fields     = FIELD_NAMES_256_V5
+        else:
+            fmt        = RECORD_FMT_256
+            fields     = FIELD_NAMES_256
+        has_raw    = True
+    elif record_size == RECORD_SIZE_242:
         fmt        = RECORD_FMT_242
         fields     = FIELD_NAMES_242
         has_raw    = True
@@ -517,8 +551,8 @@ def export_motec_ld(records, has_raw, output_path, venue, fw_version, input_name
     channels_def = [
         # (name,           short,     unit,    Hz,  extractor)
         ('Ground Speed',   'GndSpd',  'km/h',  50,  lambda r: r.get('kf_vel', 0.0) * 3.6),
-        ('G Force Long',   'GFrcLng', 'G',     50,  lambda r, k=ax_key: r.get(k, 0.0)),
-        ('G Force Lat',    'GFrcLat', 'G',     50,  lambda r, k=ay_key: r.get(k, 0.0)),
+        ('G Force Long',   'GFrcLng', 'G',     50,  lambda r, k=ay_key: r.get(k, 0.0)),
+        ('G Force Lat',    'GFrcLat', 'G',     50,  lambda r, k=ax_key: r.get(k, 0.0)),
         ('G Force Vert',   'GFrcVrt', 'G',     50,  lambda r, k=az_key: r.get(k, 0.0)),
         ('Yaw Rate',       'YawRt',   'deg/s', 50,  lambda r, k=gz_key: r.get(k, 0.0)),
         ('Roll Rate',      'RollRt',  'deg/s', 50,  lambda r, k=gx_key: r.get(k, 0.0)),

@@ -5,6 +5,7 @@
 
 #include <Arduino.h>
 #include <esp_timer.h>
+#include <string.h>
 
 namespace {
 
@@ -149,11 +150,16 @@ bool Bmi270Provider::init_bmi270() {
         return false;
     }
 
+    // DATA-register filtered path: ODR 50 Hz + normal filter mode yields the
+    // BMI270 native post-LPF signal (~22 Hz accel, ~20 Hz gyro). The FIFO raw
+    // path is selected separately in init_fifo().
     cfg[0].cfg.acc.odr = BMI2_ACC_ODR_50HZ;
     cfg[0].cfg.acc.range = BMI2_ACC_RANGE_8G;
     cfg[0].cfg.acc.bwp = BMI2_ACC_NORMAL_AVG4;
     cfg[0].cfg.acc.filter_perf = BMI2_PERF_OPT_MODE;
 
+    // DATA-register filtered path for gyro. For FIFO unfiltered data the
+    // pre-filtered gyro scale follows ois_range, kept at +/-2000 dps.
     cfg[1].cfg.gyr.odr = BMI2_GYR_ODR_50HZ;
     cfg[1].cfg.gyr.range = BMI2_GYR_RANGE_2000;
     cfg[1].cfg.gyr.bwp = BMI2_GYR_NORMAL_MODE;
@@ -266,6 +272,73 @@ bool Bmi270Provider::init_fifo() {
         return false;
     }
 
+    // Current schema contract:
+    //   bmi_post_lpf20_prepipe_* = BMI270 FIFO filtered/post-LPF LSB at the
+    //   50 Hz task rate. These channels stay pre remap/calibration/Madgwick and
+    //   represent the acquisition truth used by the current pipeline.
+    rslt = bmi2_set_fifo_filter_data(BMI2_ACCEL, BMI2_FIFO_FILTERED_DATA, &_bmi);
+    if (rslt != BMI2_OK) {
+        Serial.printf("[IMU] ERROR: bmi2_set_fifo_filter_data(acc filtered) failed (%d)\n", rslt);
+        return false;
+    }
+
+    rslt = bmi2_set_fifo_filter_data(BMI2_GYRO, BMI2_FIFO_FILTERED_DATA, &_bmi);
+    if (rslt != BMI2_OK) {
+        Serial.printf("[IMU] ERROR: bmi2_set_fifo_filter_data(gyr filtered) failed (%d)\n", rslt);
+        return false;
+    }
+
+    rslt = bmi2_set_fifo_down_sample(BMI2_ACCEL, 0, &_bmi);
+    if (rslt != BMI2_OK) {
+        Serial.printf("[IMU] ERROR: bmi2_set_fifo_down_sample(acc=0) failed (%d)\n",
+                      rslt);
+        return false;
+    }
+
+    rslt = bmi2_set_fifo_down_sample(BMI2_GYRO, 0, &_bmi);
+    if (rslt != BMI2_OK) {
+        Serial.printf("[IMU] ERROR: bmi2_set_fifo_down_sample(gyr=0) failed (%d)\n",
+                      rslt);
+        return false;
+    }
+
+    uint8_t acc_fifo_filter = 0xFF;
+    uint8_t gyr_fifo_filter = 0xFF;
+    uint8_t acc_fifo_downsample = 0xFF;
+    uint8_t gyr_fifo_downsample = 0xFF;
+    rslt = bmi2_get_fifo_filter_data(BMI2_ACCEL, &acc_fifo_filter, &_bmi);
+    rslt |= bmi2_get_fifo_filter_data(BMI2_GYRO, &gyr_fifo_filter, &_bmi);
+    rslt |= bmi2_get_fifo_down_sample(BMI2_ACCEL, &acc_fifo_downsample, &_bmi);
+    rslt |= bmi2_get_fifo_down_sample(BMI2_GYRO, &gyr_fifo_downsample, &_bmi);
+    if (rslt != BMI2_OK ||
+        acc_fifo_filter != BMI2_FIFO_FILTERED_DATA ||
+        gyr_fifo_filter != BMI2_FIFO_FILTERED_DATA ||
+        acc_fifo_downsample != 0 ||
+        gyr_fifo_downsample != 0) {
+        Serial.printf("[IMU] ERROR: FIFO filtered readback mismatch acc_filt=%u gyr_filt=%u acc_down=%u gyr_down=%u rslt=%d\n",
+                      acc_fifo_filter,
+                      gyr_fifo_filter,
+                      acc_fifo_downsample,
+                      gyr_fifo_downsample,
+                      rslt);
+        return false;
+    }
+
+    Serial.printf("[IMU] FIFO filtered mode: acc_filt=%u gyr_filt=%u acc_down=%u gyr_down=%u\n",
+                  acc_fifo_filter,
+                  gyr_fifo_filter,
+                  acc_fifo_downsample,
+                  gyr_fifo_downsample);
+
+    // Previous static-characterization path:
+    //   true raw FIFO acquisition at 50 Hz via pre-filtered FIFO source
+    //   downsampled from 1600 Hz accel / 6400 Hz gyro.
+    //
+    // rslt = bmi2_set_fifo_filter_data(BMI2_ACCEL, BMI2_FIFO_UNFILTERED_DATA, &_bmi);
+    // rslt |= bmi2_set_fifo_filter_data(BMI2_GYRO, BMI2_FIFO_UNFILTERED_DATA, &_bmi);
+    // rslt |= bmi2_set_fifo_down_sample(BMI2_ACCEL, kRawFifoAccDownsample, &_bmi);
+    // rslt |= bmi2_set_fifo_down_sample(BMI2_GYRO, kRawFifoGyrDownsample, &_bmi);
+
     rslt = bmi2_set_fifo_config(BMI2_FIFO_HEADER_EN | BMI2_FIFO_ACC_EN | BMI2_FIFO_GYR_EN | BMI2_FIFO_AUX_EN,
                                 BMI2_ENABLE,
                                 &_bmi);
@@ -343,12 +416,12 @@ bool Bmi270Provider::read_fifo_sample(ImuRawData& out) {
 
     const bmi2_sens_axes_data& acc = _acc_frames[acc_len - 1];
     const bmi2_sens_axes_data& gyr = _gyr_frames[gyr_len - 1];
-    out.bmi_raw_ax = acc.x;
-    out.bmi_raw_ay = acc.y;
-    out.bmi_raw_az = acc.z;
-    out.bmi_raw_gx = gyr.x;
-    out.bmi_raw_gy = gyr.y;
-    out.bmi_raw_gz = gyr.z;
+    out.bmi_post_lpf20_prepipe_ax = acc.x;
+    out.bmi_post_lpf20_prepipe_ay = acc.y;
+    out.bmi_post_lpf20_prepipe_az = acc.z;
+    out.bmi_post_lpf20_prepipe_gx = gyr.x;
+    out.bmi_post_lpf20_prepipe_gy = gyr.y;
+    out.bmi_post_lpf20_prepipe_gz = gyr.z;
     out.bmi_acc_x_g = acc.x * kAccelScaleG;
     out.bmi_acc_y_g = acc.y * kAccelScaleG;
     out.bmi_acc_z_g = acc.z * kAccelScaleG;
@@ -415,6 +488,7 @@ void Bmi270Provider::cache_register_report() {
     _aux_if_conf = read_reg8(BMI2_AUX_IF_CONF_ADDR);
     _aux_rd_addr = read_reg8(BMI2_AUX_RD_ADDR);
     _pwr_ctrl = read_reg8(BMI2_PWR_CTRL_ADDR);
+    _fifo_downs = read_reg8(BMI2_FIFO_DOWNS_ADDR);
     bmi2_get_fifo_config(&_fifo_config, &_bmi);
 }
 
@@ -422,12 +496,49 @@ void Bmi270Provider::log_bringup_report() const {
     Serial.printf("[IMU] BMI270 @ 0x%02X CHIP_ID=0x%02X\n", _bmi_addr, _chip_id);
     Serial.printf("[IMU] ACC_CONF=0x%02X ACC_RANGE=0x%02X GYR_CONF=0x%02X GYR_RANGE=0x%02X\n",
                   _acc_conf, _acc_range, _gyr_conf, _gyr_range);
-    Serial.printf("[IMU] AUX_CONF=0x%02X AUX_IF_CONF=0x%02X AUX_RD_ADDR=0x%02X PWR_CTRL=0x%02X FIFO_CFG=0x%04X\n",
-                  _aux_conf, _aux_if_conf, _aux_rd_addr, _pwr_ctrl, _fifo_config);
+    Serial.printf("[IMU] AUX_CONF=0x%02X AUX_IF_CONF=0x%02X AUX_RD_ADDR=0x%02X PWR_CTRL=0x%02X FIFO_DOWNS=0x%02X FIFO_CFG=0x%04X\n",
+                  _aux_conf, _aux_if_conf, _aux_rd_addr, _pwr_ctrl, _fifo_downs, _fifo_config);
     Serial.printf("[IMU] BMM150 CHIP_ID=0x%02X trim=%s aux_mode=%s\n",
                   _bmm.chip_id,
                   trim_data_present(_bmm.trim_data) ? "OK" : "MISSING",
                   (_aux_if_conf & BMI2_AUX_MAN_MODE_EN_MASK) ? "MANUAL" : "DATA");
+}
+
+void Bmi270Provider::fillStartupDiagnostics(uint8_t* bmi_regs,
+                                            size_t bmi_len,
+                                            uint8_t* bmm_regs,
+                                            size_t bmm_len,
+                                            uint8_t& bmi_chip_id,
+                                            uint8_t& bmm_chip_id) const {
+    if (bmi_regs && bmi_len > 0) {
+        memset(bmi_regs, 0xFF, bmi_len);
+        const uint8_t values[] = {
+            _chip_id,
+            _acc_conf,
+            _acc_range,
+            _gyr_conf,
+            _gyr_range,
+            _aux_conf,
+            _aux_if_conf,
+            _aux_rd_addr,
+            _pwr_ctrl,
+            _fifo_downs,
+            (uint8_t)(_fifo_config & 0xFF),
+            (uint8_t)(_fifo_config >> 8),
+        };
+        const size_t n = (bmi_len < sizeof(values)) ? bmi_len : sizeof(values);
+        memcpy(bmi_regs, values, n);
+    }
+
+    if (bmm_regs && bmm_len > 0) {
+        memset(bmm_regs, 0xFF, bmm_len);
+        bmm_regs[0] = _bmm.chip_id;
+        bmm_regs[1] = trim_data_present(_bmm.trim_data) ? 1 : 0;
+        bmm_regs[2] = (_aux_if_conf & BMI2_AUX_MAN_MODE_EN_MASK) ? 1 : 0;
+    }
+
+    bmi_chip_id = _chip_id;
+    bmm_chip_id = _bmm.chip_id;
 }
 
 bool Bmi270Provider::read_reg(uint8_t reg, uint8_t* data, uint32_t len) const {
