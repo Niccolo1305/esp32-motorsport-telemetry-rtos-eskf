@@ -88,6 +88,14 @@ extern std::atomic<uint32_t> sd_stall_count;      // zero-progress write stalls
 extern std::atomic<uint32_t> sd_reopen_count;     // SD file reopen attempts after stalls
 extern std::atomic<uint32_t> sd_stall_worst_ms;   // worst per-record stall window [ms]
 extern std::atomic<uint32_t> sd_write_overreport_count; // write() returned more bytes than requested
+extern std::atomic<uint32_t> sd_write_zero_count; // File.write() returned zero bytes
+extern std::atomic<uint32_t> sd_write_recovered_count; // batch writes recovered after zero-progress stalls
+extern std::atomic<uint32_t> sd_last_stall_seq;   // first seq in the batch that last hit zero-progress
+extern std::atomic<uint32_t> sd_last_written_seq; // last seq durably accepted by Task_SD_Writer
+extern std::atomic<uint32_t> sd_size_mismatch_count; // persistent file size did not match write return accounting
+extern std::atomic<uint32_t> sd_last_file_size;   // last file size observed after flush/reopen verification
+extern std::atomic<uint32_t> sd_enqueue_fail_count; // Task_Filter/Calibration failed to enqueue to SD queue
+extern std::atomic<uint32_t> imu_queue_drop_count; // Task_I2C dropped oldest sample in diagnostic FIFO mode
 extern std::atomic<uint32_t> gps_mutex_timeout_count; // Task_Filter GPS snapshot lock timeouts
 extern std::atomic<bool> gps_stale;         // true if last GPS fix > 5 s ago
 extern std::atomic<int> system_state;       // 0=idle, 1=countdown, 2=racing
@@ -110,4 +118,4 @@ extern int btn_click_count;
 extern bool display_off;
 extern bool display_confirm_pending;
 extern int display_confirm_cycles;
-extern char buf[512];
+extern char buf[768];

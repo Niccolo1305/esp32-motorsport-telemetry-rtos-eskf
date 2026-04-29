@@ -704,6 +704,7 @@ void Task_Filter(void *pvParameters) {
         rec.seq = record_seq++;
 #endif
         if (xQueueSend(sd_queue, &rec, 0) != pdTRUE) {
+          sd_enqueue_fail_count++;
           sd_records_dropped++;
         }
       }

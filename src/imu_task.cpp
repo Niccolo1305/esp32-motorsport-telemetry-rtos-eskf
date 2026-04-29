@@ -26,6 +26,7 @@ void Task_I2C(void *pvParameters) {
       // Diagnostic FIFO mode: if full, discard the oldest sample and keep going.
       ImuRawData dropped;
       (void)xQueueReceive(imuQueue, &dropped, 0);
+      imu_queue_drop_count++;
       (void)xQueueSend(imuQueue, &data, 0);
     }
   }

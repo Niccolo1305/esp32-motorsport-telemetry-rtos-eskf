@@ -1280,6 +1280,72 @@
 //     tel_82 (7 events, 310355/320245 recovered), tel_83 (4 events,
 //     357197/357199 recovered).
 //
+// v1.7.7 - SD Batch Writer and Gap Attribution Diagnostics
+//   - [SD] Task_SD_Writer now batches records before calling File.write().
+//     Default batch is 8 records: on AtomS3R this is 8 x 256 B = 2048 B, i.e.
+//     4 full 512-byte SD sectors. This cuts write calls from 50/s to 6.25/s.
+//   - [SD] Flush cadence is now batch-based: SD_FLUSH_EVERY_BATCHES=4, so the
+//     effective flush interval is 32 records, about 640 ms at 50 Hz, instead
+//     of the previous 250-record / 5 s window. Partial idle batches are written
+//     and flushed after SD_BATCH_IDLE_FLUSH_MS.
+//   - [SD] Batch writes keep byte-offset retry semantics from v1.7.6: partial
+//     progress continues from the remaining batch byte. Zero-progress writes
+//     now close/reopen immediately, read back the persistent File.size(), and
+//     retry from the byte offset that is actually present on SD. This replaces
+//     the same-handle retry experiment after tel_129 showed false successful
+//     writes: MQTT advanced to 362600 records while the physical .bin stopped
+//     at 3569 records.
+//   - [SD] After any zero-progress event, the completed batch is flush +
+//     reopen verified against the expected file size before
+//     sd_records_written/last_written_seq advance. Size mismatches are counted
+//     in `sd_size_mismatches` and the last observed persistent size is exported
+//     as `sd_last_file_size`.
+//   - [SD] `sd_stalls` counts zero-progress episodes, while `sd_write_zeros`
+//     counts individual zero-byte File.write() results. `sd_reopens` now
+//     includes recovery/verification reopens.
+//   - [DIAG] Added dedicated runtime counters for SD zero-progress events,
+//     recovered zero-progress writes, last stalled seq, last written seq,
+//     SD enqueue failures, and IMU diagnostic-FIFO drops. These are exported in
+//     the MQTT heartbeat to separate queue loss from writer/FS/card stalls.
+//     MQTT payload/buffer size was raised to 768 B to avoid truncating the
+//     expanded heartbeat JSON.
+//   - [DIAG] Task_Filter and calibration now increment sd_enqueue_fail_count
+//     whenever xQueueSend(sd_queue) fails. Task_I2C increments
+//     imu_queue_drop_count when diagnostic FIFO mode has to discard the oldest
+//     IMU sample before enqueueing a fresh one.
+//   - [TOOL] tools/bin_to_csv.py now reports direct sequence-gap warnings
+//     during conversion, including previous seq, next seq, missing count, byte
+//     offset, and dt when timestamps are available. This is independent of the
+//     existing timestamp plausibility/resync logic.
+//   - [TOOL] static_bench_validator.py now checks `seq` continuity directly
+//     for CSV and BIN-derived rows and reports gap count + missing records in
+//     both the human report and JSON metrics.
+//
+// v1.7.8 - SD Partial Idle Batch Persistence Verification
+//   - [FIX] tel_132 showed a false-success partial idle batch: the physical
+//     file stopped at seq=63152, while MQTT counters advanced through seq=63159.
+//     The next batch then detected `sd_err=true` with `sd_size_mismatches=1`.
+//   - [SD] Partial idle batches are now flush + reopen verified before
+//     sd_records_written/last_written_seq advance. If File.write() returned
+//     success but the persistent file size did not advance, the writer retries
+//     the missing tail from the in-RAM batch instead of discarding it.
+//   - [SD] SD_BATCH_IDLE_FLUSH_MS raised to 250 ms so the expensive
+//     persistence check is reserved for true producer idle/end-of-run cases,
+//     while steady 50 Hz logging still writes full 8-record batches.
+//
+// v1.7.9 - SD Full Batch Persistence Verification
+//   - [FIX] tel_133 reproduced the same failure on a full 8-record batch:
+//     the physical file stopped at seq=23888, while runtime counters advanced
+//     through seq=23895. This proves File.write() can return full-batch success
+//     even when only a prefix has become persistent.
+//   - [SD] SD_VERIFY_EVERY_BATCH now forces flush + reopen + persistent
+//     File.size() verification for every batch before writer counters advance.
+//     If only a prefix is present, the writer retries the missing tail while it
+//     still has the batch in RAM.
+//   - [SD] SD_SPI_HZ reduced from 25 MHz to 10 MHz for the next validation
+//     pass. The telemetry stream is only ~12.8 KB/s, so reliability is more
+//     important than raw SPI throughput.
+//
 // --- TODO (deferred to v1.8.0 CAN format bump) ---
 //   - [TODO] Add CAN bus task (Core 0) for RPM, throttle, wheel speeds (×4),
 //     engine temp, steering angle. CanData struct + can_mutex pattern, mirroring
@@ -1516,7 +1582,7 @@ void setup() {
   if (mqtt_enabled) {
     mqttClient.setServer(cfg_mqtt_broker, cfg_mqtt_port);
     mqttClient.setKeepAlive(60);
-    mqttClient.setBufferSize(512);
+    mqttClient.setBufferSize(768);
   }
 
   if (wifi_enabled && mqtt_enabled) {
@@ -1999,7 +2065,10 @@ void loop() {
                  "\"gps_stale\":%s,\"sd_err\":%s,"
                  "\"sd_hwm\":%u,\"sd_flush_worst_ms\":%u,\"sd_flushes\":%u,"
                  "\"sd_partials\":%u,\"sd_stalls\":%u,\"sd_reopens\":%u,\"sd_stall_worst_ms\":%u,"
-                 "\"sd_overreports\":%u,\"gps_mutex_timeouts\":%u,"
+                 "\"sd_overreports\":%u,\"sd_write_zeros\":%u,\"sd_write_recovered\":%u,"
+                 "\"sd_last_stall_seq\":%u,\"sd_last_written_seq\":%u,"
+                 "\"sd_size_mismatches\":%u,\"sd_last_file_size\":%u,"
+                 "\"sd_enqueue_fails\":%u,\"imu_queue_drops\":%u,\"gps_mutex_timeouts\":%u,"
                  "\"stk_filter\":%u,\"stk_i2c\":%u,\"stk_sd\":%u}",
                  (unsigned)sd_records_written.load(),
                  (unsigned)sd_records_dropped.load(),
@@ -2014,6 +2083,14 @@ void loop() {
                  (unsigned)sd_reopen_count.load(),
                  (unsigned)sd_stall_worst_ms.load(),
                  (unsigned)sd_write_overreport_count.load(),
+                 (unsigned)sd_write_zero_count.load(),
+                 (unsigned)sd_write_recovered_count.load(),
+                 (unsigned)sd_last_stall_seq.load(),
+                 (unsigned)sd_last_written_seq.load(),
+                 (unsigned)sd_size_mismatch_count.load(),
+                 (unsigned)sd_last_file_size.load(),
+                 (unsigned)sd_enqueue_fail_count.load(),
+                 (unsigned)imu_queue_drop_count.load(),
                  (unsigned)gps_mutex_timeout_count.load(),
                  (unsigned)stk_filter,
                  (unsigned)stk_i2c,

@@ -5,7 +5,7 @@
 #include <math.h>
 
 #ifdef USE_BMI270
-const char *const FIRMWARE_VERSION = "v1.7.6-atoms3r";
+const char *const FIRMWARE_VERSION = "v1.7.9-atoms3r";
 #else
 const char *const FIRMWARE_VERSION = "v1.5.2-clean";
 #endif
@@ -43,12 +43,16 @@ static constexpr float VAR_STILLNESS_GZ_THRESHOLD  = 0.25f; // [(deg/s)^2]
 static constexpr float VAR_STILLNESS_GXY_THRESHOLD = 0.35f; // [(deg/s)^2]
 #endif
 static constexpr float ZUPT_GPS_MAX_KMH = 2.0f; // [km/h] GPS speed threshold
-static constexpr int SD_FLUSH_EVERY  = 250;     // flush interval: 5 s at 50 Hz (reduces FAT/GC spikes)
+static constexpr int SD_WRITE_BATCH_RECORDS = 8;    // 8 x 256 B = 2048 B = 4 full SD sectors
+static constexpr int SD_FLUSH_EVERY_BATCHES = 4;    // 4 batches = 32 records ~= 640 ms at 50 Hz
+static constexpr int SD_BATCH_IDLE_FLUSH_MS = 250;  // write/verify a partial batch if producer goes idle
+static constexpr int SD_FLUSH_EVERY = SD_WRITE_BATCH_RECORDS * SD_FLUSH_EVERY_BATCHES;
 static constexpr int SD_QUEUE_DEPTH  = 200;     // record buffer depth (4 s at 50 Hz)
 static constexpr int SD_TASK_STACK   = 8192;    // Task_SD_Writer stack size (bytes)
-static constexpr uint32_t SD_SPI_HZ = 25000000;
-static constexpr int SD_WRITE_RETRY_DELAY_MS = 100;   // retry cadence for transient SD no-progress writes
-static constexpr int SD_WRITE_STALL_TIMEOUT_MS = 10000; // max per-record no-progress window before fatal
+static constexpr uint32_t SD_SPI_HZ = 10000000;
+static constexpr int SD_WRITE_RETRY_DELAY_MS = 20;      // delay before retry after close/reopen recovery
+static constexpr int SD_WRITE_STALL_TIMEOUT_MS = 10000; // max per-batch no-progress window before fatal
+static constexpr bool SD_VERIFY_EVERY_BATCH = true;     // diagnostic hardening: never trust File.write() alone
 #ifndef IMU_QUEUE_DEPTH_CFG
 #ifdef USE_BMI270
 #define IMU_QUEUE_DEPTH_CFG 4 // diagnostic FIFO: absorbs short Task_Filter stalls

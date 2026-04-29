@@ -143,6 +143,7 @@ void calibrate_alignment(IImuProvider* imu) {
       crec.gps_alt_m = bias_gy;
       crec.gps_hdop = bias_gz;
       if (xQueueSend(sd_queue, &crec, 0) != pdTRUE) {
+        sd_enqueue_fail_count++;
         sd_records_dropped++;
       }
     }
