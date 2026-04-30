@@ -1,0 +1,273 @@
+/* ==========================================================================
+   Telemetria Design System — Tokens
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;700&display=swap');
+
+:root {
+  /* ── Colour: base surfaces (asphalt/carbon) ──────────────────────────── */
+  --color-bg-0: #000000;              /* phosphor black — device LCD bg */
+  --color-bg-1: #0E0F11;              /* carbon — page background */
+  --color-bg-2: #1A1C20;              /* gravel — cards / panels */
+  --color-bg-3: #24272C;              /* raised — hover surfaces */
+
+  /* ── Colour: foreground ──────────────────────────────────────────────── */
+  --color-fg-1: #F5F6F7;              /* bone — primary text */
+  --color-fg-2: #B4B8BE;              /* aluminium — secondary text */
+  --color-fg-3: #7A7F87;              /* graphite — tertiary/labels */
+  --color-fg-4: #4A4E55;              /* disabled / dividers */
+
+  /* ── Colour: status (device-literal) ─────────────────────────────────── */
+  --color-signal:  #00E676;           /* go-green — OK / live / fresh fix */
+  --color-signal-dim: #00A86B;        /* dim go-green — idle lamp */
+  --color-alert:   #FF3B30;           /* hazard — SD error, GPS lost */
+  --color-warn:    #FFB300;           /* warn amber — SD low, caution */
+  --color-bypass:  #FF8800;           /* device bypass banner */
+  --color-accent:  #00A5FF;           /* instrument blue — links, focus */
+  --color-accent-dim: #0077B8;
+
+  /* ── Colour: semantic aliases ────────────────────────────────────────── */
+  --color-link: var(--color-accent);
+  --color-focus: var(--color-accent);
+  --color-border-1: rgba(255, 255, 255, 0.08);
+  --color-border-2: rgba(255, 255, 255, 0.16);
+  --color-grid: rgba(255, 255, 255, 0.04);
+
+  /* ── Type: families ──────────────────────────────────────────────────── */
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  --font-display: 'Space Grotesk', ui-sans-serif, system-ui, sans-serif;
+
+  /* ── Type: scale (4 pt step) ─────────────────────────────────────────── */
+  --fs-xs: 11px;   /* micro labels */
+  --fs-sm: 12px;   /* dense tables, caption */
+  --fs-md: 14px;   /* body default */
+  --fs-lg: 16px;   /* body emphasis */
+  --fs-xl: 20px;   /* h4 / overline */
+  --fs-2xl: 28px;  /* h3 */
+  --fs-3xl: 40px;  /* h2 */
+  --fs-4xl: 56px;  /* h1 / display */
+
+  --lh-tight: 1.1;
+  --lh-normal: 1.4;
+  --lh-loose: 1.6;
+
+  --ls-caps: 0.08em;
+  --ls-label: 0.02em;
+  --ls-display: -0.01em;
+
+  /* ── Space: 4 pt base ────────────────────────────────────────────────── */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --s-8: 64px;
+  --s-9: 80px;
+  --s-10: 96px;
+
+  /* ── Radius ──────────────────────────────────────────────────────────── */
+  --radius-0: 0px;
+  --radius-1: 2px;   /* default for controls */
+  --radius-2: 4px;   /* cards, buttons */
+  --radius-device: 12px; /* M5Stack physical corner */
+
+  /* ── Border widths ───────────────────────────────────────────────────── */
+  --bw-1: 1px;
+  --bw-2: 2px;
+
+  /* ── Shadow ──────────────────────────────────────────────────────────── */
+  --shadow-1: 0 1px 0 rgba(255, 255, 255, 0.04) inset,
+              0 1px 2px rgba(0, 0, 0, 0.6);
+  --shadow-2: 0 0 0 1px rgba(0, 0, 0, 0.8),
+              0 8px 24px rgba(0, 0, 0, 0.5);
+  --shadow-phosphor: 0 0 8px rgba(0, 230, 118, 0.4);
+
+  /* ── Motion ──────────────────────────────────────────────────────────── */
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast: 80ms;
+  --dur-hover: 150ms;
+  --dur-panel: 200ms;
+
+  /* ── Signature surface: oscilloscope grid ────────────────────────────── */
+  --grid-size: 16px;
+  --grid-bg:
+    linear-gradient(var(--color-grid) 1px, transparent 1px) 0 0 / var(--grid-size) var(--grid-size),
+    linear-gradient(90deg, var(--color-grid) 1px, transparent 1px) 0 0 / var(--grid-size) var(--grid-size),
+    var(--color-bg-1);
+}
+
+/* ==========================================================================
+   Base / reset
+   ========================================================================== */
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-bg-1);
+  color: var(--color-fg-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-md);
+  line-height: var(--lh-normal);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ==========================================================================
+   Semantic element roles
+   ========================================================================== */
+
+h1, .h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--fs-4xl);
+  line-height: var(--lh-tight);
+  letter-spacing: var(--ls-display);
+  margin: 0 0 var(--s-5);
+  color: var(--color-fg-1);
+}
+
+h2, .h2 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--fs-3xl);
+  line-height: var(--lh-tight);
+  letter-spacing: var(--ls-display);
+  margin: 0 0 var(--s-4);
+  color: var(--color-fg-1);
+}
+
+h3, .h3 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: var(--fs-2xl);
+  line-height: var(--lh-tight);
+  margin: 0 0 var(--s-3);
+  color: var(--color-fg-1);
+}
+
+h4, .h4 {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: var(--fs-xl);
+  line-height: var(--lh-normal);
+  margin: 0 0 var(--s-3);
+  color: var(--color-fg-1);
+}
+
+p, .p {
+  font-size: var(--fs-md);
+  line-height: var(--lh-normal);
+  margin: 0 0 var(--s-4);
+  color: var(--color-fg-2);
+}
+
+.overline, .label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--color-fg-3);
+}
+
+code, kbd, pre, .code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+pre {
+  background: var(--color-bg-0);
+  border: 1px solid var(--color-border-1);
+  border-radius: var(--radius-2);
+  padding: var(--s-3) var(--s-4);
+  overflow-x: auto;
+  color: var(--color-fg-1);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-normal);
+}
+
+a {
+  color: var(--color-link);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color var(--dur-hover) var(--ease-out);
+}
+a:hover { border-bottom-color: currentColor; }
+a:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+hr {
+  border: 0;
+  height: 1px;
+  background: var(--color-border-1);
+  margin: var(--s-6) 0;
+}
+
+/* ==========================================================================
+   Utility classes
+   ========================================================================== */
+
+.surface-grid { background: var(--grid-bg); }
+
+.card {
+  background: var(--color-bg-2);
+  border: 1px solid var(--color-border-2);
+  border-radius: var(--radius-2);
+  padding: var(--s-4);
+  box-shadow: var(--shadow-1);
+}
+
+.card-label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  letter-spacing: var(--ls-caps);
+  text-transform: uppercase;
+  color: var(--color-fg-3);
+  margin-bottom: var(--s-3);
+}
+
+.readout {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  font-size: var(--fs-2xl);
+  color: var(--color-fg-1);
+}
+
+.readout-unit {
+  font-size: 0.5em;
+  color: var(--color-fg-3);
+  margin-left: 0.3em;
+  font-weight: 400;
+}
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  vertical-align: middle;
+  margin-right: var(--s-2);
+}
+.status-dot.ok    { background: var(--color-signal); box-shadow: 0 0 4px var(--color-signal); }
+.status-dot.warn  { background: var(--color-warn); }
+.status-dot.alert { background: var(--color-alert); box-shadow: 0 0 4px var(--color-alert); }
+.status-dot.idle  { background: var(--color-fg-4); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

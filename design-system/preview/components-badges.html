@@ -1,0 +1,20 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Status & badges</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+body{padding:20px;background:var(--color-bg-1);display:flex;gap:10px;flex-wrap:wrap}
+.badge{font-family:var(--font-mono);font-size:11px;font-weight:500;letter-spacing:.06em;text-transform:uppercase;padding:4px 8px;border-radius:2px;border:1px solid var(--color-border-2);display:inline-flex;align-items:center;gap:6px}
+.badge.ok{color:var(--color-signal);border-color:var(--color-signal)}
+.badge.warn{color:var(--color-warn);border-color:var(--color-warn)}
+.badge.alert{color:var(--color-alert);border-color:var(--color-alert)}
+.badge.info{color:var(--color-accent);border-color:var(--color-accent)}
+.badge.solid-ok{background:var(--color-signal);color:var(--color-bg-0);border-color:var(--color-signal)}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor;box-shadow:0 0 4px currentColor}
+</style></head><body>
+<span class="badge ok"><span class="dot"></span>GPS · FIX</span>
+<span class="badge solid-ok">LIVE · 10 HZ</span>
+<span class="badge warn"><span class="dot"></span>SD · 42 MB</span>
+<span class="badge alert"><span class="dot"></span>GPS LOST</span>
+<span class="badge info">ZARU · ACTIVE</span>
+<span class="badge">EMA α = 0.06</span>
+<span class="badge">v1.7.6</span>
+</body></html>

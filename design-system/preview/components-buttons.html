@@ -1,0 +1,20 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Buttons</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+body{padding:20px;background:var(--color-bg-1);display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.btn{font-family:var(--font-mono);font-size:13px;font-weight:500;letter-spacing:.04em;text-transform:uppercase;padding:8px 14px;border-radius:2px;border:1px solid var(--color-border-2);background:var(--color-bg-2);color:var(--color-fg-1);cursor:pointer;transition:all 150ms cubic-bezier(.2,0,0,1);display:inline-flex;align-items:center;gap:8px}
+.btn:hover{background:var(--color-bg-3);border-color:var(--color-accent)}
+.btn.primary{background:var(--color-accent);color:var(--color-bg-0);border-color:var(--color-accent)}
+.btn.primary:hover{background:#2bb5ff}
+.btn.signal{background:var(--color-signal);color:var(--color-bg-0);border-color:var(--color-signal)}
+.btn.alert{background:transparent;color:var(--color-alert);border-color:var(--color-alert)}
+.btn.ghost{background:transparent}
+.btn .kbd{font-size:10px;padding:1px 4px;background:var(--color-bg-0);border:1px solid var(--color-border-1);border-radius:2px;color:var(--color-fg-3)}
+</style></head><body>
+<button class="btn primary">Connect Device</button>
+<button class="btn signal">Start Logging</button>
+<button class="btn">Export .bin</button>
+<button class="btn ghost">Cancel</button>
+<button class="btn alert">Stop · Force</button>
+<button class="btn">Replay <span class="kbd">R</span></button>
+</body></html>

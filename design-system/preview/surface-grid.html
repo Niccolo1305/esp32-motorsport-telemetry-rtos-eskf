@@ -1,0 +1,18 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Surface — Oscilloscope grid</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+body{margin:0;padding:20px;background:var(--color-bg-1);}
+.grid{background:var(--grid-bg);border:1px solid var(--color-border-2);border-radius:4px;height:200px;position:relative;padding:16px}
+.trace{position:absolute;top:50%;left:16px;right:16px;height:1px;background:linear-gradient(90deg, transparent 0%, rgba(0,230,118,0.2) 30%, var(--color-signal) 60%, rgba(0,230,118,0.8) 100%)}
+.trace-curve{position:absolute;top:16px;left:16px;right:16px;height:168px}
+.label{position:absolute;top:12px;left:16px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-fg-3)}
+.cursor{position:absolute;top:16px;bottom:16px;width:1px;background:var(--color-signal);box-shadow:0 0 4px var(--color-signal);right:20%}
+</style></head><body>
+<div class="grid surface-grid">
+  <span class="label">ACCEL-Y · 16 PX CELLS · −1 G … +1 G</span>
+  <svg class="trace-curve" viewBox="0 0 600 160" preserveAspectRatio="none">
+    <path d="M0 80 Q 60 40, 120 80 T 240 80 T 360 30 T 480 120 T 600 80" fill="none" stroke="#00E676" stroke-width="1.5" opacity="0.9"/>
+  </svg>
+  <div class="cursor"></div>
+</div>
+</body></html>

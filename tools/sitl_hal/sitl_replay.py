@@ -10,12 +10,12 @@ using the Level 1 sensor-frame channels logged by the firmware:
             -> gravity removal -> ZARU -> ESKF 5D -> end-of-pipe EMA
 
 Input can be either:
-  - a CSV produced by `Tool/bin_to_csv.py`
+  - a CSV produced by `tools/bin_to_csv.py`
   - a `.bin` file, converted on the fly through `bin_to_csv.py`
 
 Typical usage:
-  python Tool/sitl_hal/sitl_replay.py Tool/tel_120.csv
-  python Tool/sitl_hal/sitl_replay.py Tool/tel_120.bin --output Tool/tel_120_sitl.csv
+  python tools/sitl_hal/sitl_replay.py tools/tel_120.csv
+  python tools/sitl_hal/sitl_replay.py tools/tel_120.bin --output tools/tel_120_sitl.csv
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Schema compatibility helpers for Telemetria CSV/BIN tooling.
+Schema compatibility helpers for Telemetria data/samples/BIN tooling.
 
 v5 AtomS3R logs renamed the old mixed-semantics columns into explicit groups:
   - pipe_lin_* / pipe_body_*      : zero-latency pipeline diagnostics

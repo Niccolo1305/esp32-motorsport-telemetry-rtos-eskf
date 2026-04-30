@@ -1,0 +1,7 @@
+.pio/
+.vscode/
+__pycache__/
+tools/__pycache__/
+*.bin
+*.csv
+*_summary.json

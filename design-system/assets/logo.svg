@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 48" width="240" height="48">
+
+
+  <g transform="translate(4,8)">
+    <rect x="0" y="0" width="32" height="32" rx="4" fill="none" stroke="currentColor" stroke-width="1.5"></rect>
+    <text x="16" y="23" text-anchor="middle" fill="currentColor" class="wm" font-size="20">T</text>
+    <circle cx="28" cy="28" r="2" fill="currentColor"></circle>
+  </g>
+  <text x="46" y="30" fill="currentColor" class="wm">TELEMETRIA</text>
+  <text x="47" y="42" fill="currentColor" class="tag" opacity="0.6">V1.7.6 // 50 HZ</text>
+</svg>

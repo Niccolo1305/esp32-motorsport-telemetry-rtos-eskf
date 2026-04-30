@@ -34,5 +34,5 @@ def reject_v5_columns(columns: Iterable[str], path: str | Path) -> None:
     normalized = {_normalize(col) for col in columns}
     if any(col in normalized for col in V5_COLUMNS):
         raise SystemExit(
-            f"{path}: Telemetria v5 CSV detected. This legacy Tool/script analysis is intentionally limited to <= v4 logs."
+            f"{path}: Telemetria v5 CSV detected. This legacy tools/script analysis is intentionally limited to <= v4 logs."
         )

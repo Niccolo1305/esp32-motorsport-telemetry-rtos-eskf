@@ -11,7 +11,7 @@ Dual-core FreeRTOS telemetry firmware for ESP32-S3 with 50Hz ESKF sensor fusion 
 > Motorsport telemetry system for the **M5Stack AtomS3** and **AtomS3R** (ESP32-S3).
 > 50 Hz IMU · GPS fusion · Error-State Kalman Filter · SD logging · MoTeC i2 Pro export
 
-![Dashboard – full lap raw](img/Giro_completo_raw.jpeg)
+![Dashboard – full lap raw](assets/images/Giro_completo_raw.jpeg)
 
 ---
 
@@ -98,15 +98,15 @@ The entire project is designed to be affordable, modular, and extremely compact.
 
 | Fast corner · filtered + ESKF · 3D G-G | Tight corner (filtered) |
 |----------------------------------------|-------------------------|
-| ![Fast corner filtered ESKF dashboard](img/Curva_lunga_yaw_grip_eskf.png) | ![Curva stretta filtered](img/Curva_stretta_filtered.jpeg) |
+| ![Fast corner filtered ESKF dashboard](assets/images/Curva_lunga_yaw_grip_eskf.png) | ![Curva stretta filtered](assets/images/Curva_stretta_filtered.jpeg) |
 
 | Fast corner (raw) | Yaw · Roll · Grip |
 |-------------------|-------------------|
-| ![Curva veloce raw](img/Curva_veloce_raw.jpeg) | ![Yaw roll grip](img/Yaw_roll_grip_in_curva.jpeg) |
+| ![Curva veloce raw](assets/images/Curva_veloce_raw.jpeg) | ![Yaw roll grip](assets/images/Yaw_roll_grip_in_curva.jpeg) |
 
 | MoTeC i2 Pro |
 |--------------|
-| ![MoTeC](img/Motec.png) |
+| ![MoTeC](assets/images/Motec.png) |
 
 ---
 
@@ -118,7 +118,7 @@ The entire project is designed to be affordable, modular, and extremely compact.
 - Python ≥ 3.9
 
 ```bash
-pip install -r Tool/requirements.txt
+pip install -r tools/requirements.txt
 ```
 
 ### Build & Flash
@@ -251,7 +251,7 @@ Each session is saved as `tel_XX.bin` on the SD card, where `XX` increments at e
 ### 4 — Extract and convert
 
 ```bash
-python Tool/bin_to_csv.py tel_XX.bin
+python tools/bin_to_csv.py tel_XX.bin
 ```
 
 The converter detects the firmware version from the file header and launches an interactive split menu for large multi-lap files. Output: one or more `tel_XX_partN.csv` files, one row per 20 ms sample.
@@ -259,20 +259,20 @@ The converter detects the firmware version from the file header and launches an 
 ### 5 — Analyse
 
 ```bash
-python Tool/dashboard.py
-# or: python Tool/dashboard.py tel_XX_part1.csv
+python tools/dashboard.py
+# or: python tools/dashboard.py tel_XX_part1.csv
 ```
 
 ---
 
 ## Post-Processing Tools
 
-All tools are in `Tool/` and accept `.bin` files directly or `.csv` files from `bin_to_csv.py`.
+All tools are in `tools/` and accept `.bin` files directly or `.csv` files from `bin_to_csv.py`.
 
 ### 1 — Binary to CSV
 
 ```bash
-python Tool/bin_to_csv.py <file.bin>
+python tools/bin_to_csv.py <file.bin>
 ```
 
 Detects the record format automatically from the file header (supports 122 / 127 / 155 / 164 / 190 / 202 / 215 / 224 / 242-byte formats across all firmware versions). Launches an interactive lap-split menu for multi-lap sessions.
@@ -280,8 +280,8 @@ Detects the record format automatically from the file header (supports 122 / 127
 ### 2 — Offline SITL Replay
 
 ```bash
-python Tool/sitl_hal/sitl_replay.py <file.csv>
-python Tool/sitl_hal/sitl_replay.py <file.bin> --output <out_sitl.csv>
+python tools/sitl_hal/sitl_replay.py <file.csv>
+python tools/sitl_hal/sitl_replay.py <file.bin> --output <out_sitl.csv>
 ```
 
 Replays the exact firmware pipeline (`filter_task.cpp`) offline using the sensor-frame channels logged in the binary records. On AtomS3 this uses `sensor_ax/ay/az`, `sensor_gx/gy/gz`; on AtomS3R v5 logs it uses the native BMI270 physical channels (`bmi_acc_*_g`, `bmi_gyr_*_dps`). Produces a new CSV with re-computed EMA, ZARU, ESKF, and VGPL outputs — useful for tuning constants without reflashing.
@@ -291,7 +291,7 @@ The replay mirrors the on-device production GPS path (`gps_sog_kmh`) and preserv
 ### 3 — Interactive Dashboard
 
 ```bash
-python Tool/dashboard.py
+python tools/dashboard.py
 # Opens at http://127.0.0.1:8050
 ```
 
@@ -324,9 +324,9 @@ A WebGL-accelerated viewer for post-session analysis. All charts are linked: hov
 ### 3 — MoTeC i2 Pro Export
 
 ```bash
-python Tool/motec_exporter.py tel_XX.bin
-python Tool/motec_exporter.py tel_XX.bin --venue "Mugello"
-python Tool/motec_exporter.py tel_XX.csv -o session.ld
+python tools/motec_exporter.py tel_XX.bin
+python tools/motec_exporter.py tel_XX.bin --venue "Mugello"
+python tools/motec_exporter.py tel_XX.csv -o session.ld
 ```
 
 Produces a native `.ld` file openable in **i2 Pro** or **i2 Standard**:
@@ -394,7 +394,7 @@ flowchart LR
 <details>
 <summary>Detailed pipeline diagram — all nodes, all data paths (click to expand)</summary>
 
-![IMU and GPS Data Processing Pipeline v1.4.2](img/IMU%20and%20GPS%20Data%20Processing-v1.4.2.png)
+![IMU and GPS Data Processing Pipeline v1.4.2](assets/images/IMU%20and%20GPS%20Data%20Processing-v1.4.2.png)
 
 </details>
 
@@ -609,13 +609,13 @@ esp32-telemetry-clean/
 │   ├── display.h / .cpp         # LCD helper functions
 │   └── vendor/bosch/            # Vendored Bosch Sensor APIs (BMI270, BMM150)
 │
-├── test_fw/                     # Sensor bench test firmwares
+├── firmware/test/               # Sensor bench test firmwares
 │   ├── set_src.py               # PlatformIO pre-script for custom src_dir
 │   ├── shared/bench_common.h    # Shared bench utilities
 │   ├── atoms3_bench/main.cpp    # MPU-6886 characterization
 │   └── atoms3r_bench/main.cpp   # BMI270+BMM150 characterization
 │
-├── Tool/
+├── tools/
 │   ├── bin_to_csv.py            # Binary → CSV converter (all formats: 122–242B)
 │   ├── sitl_hal/
 │   │   ├── sitl_replay.py       # Offline SITL pipeline replay (production SOG path + diagnostics)
@@ -629,7 +629,7 @@ esp32-telemetry-clean/
 │
 ├── Pipeline/                    # Mermaid pipeline diagrams
 ├── Reports/                     # Technical documentation (PDF)
-├── img/                         # Screenshots used in this README
+├── assets/images/               # Screenshots used in this README
 │
 ├── platformio.ini
 ├── wifi_config.example.txt

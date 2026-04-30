@@ -1,0 +1,179 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<title>Telemetria · Device LCD</title>
+<link rel="stylesheet" href="../../colors_and_type.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<style>
+  body{min-height:100vh;margin:0;background:var(--grid-bg);display:flex;align-items:center;justify-content:center;padding:32px;gap:24px;flex-wrap:wrap}
+  .stage{display:flex;gap:32px;align-items:flex-start;flex-wrap:wrap;justify-content:center}
+  .side{max-width:300px}
+  .side h3{color:var(--color-fg-1);font-family:var(--font-display);margin:0 0 8px}
+  .side p{color:var(--color-fg-2);font-size:13px}
+  .screens{display:grid;grid-template-columns:repeat(2,auto);gap:20px}
+  .screen-label{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-fg-3);margin-top:6px;text-align:center;font-family:var(--font-mono)}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-type="module">
+/* M5Stack Atom S3 — 128×128 LCD, scaled ×2.2 for readability.
+   All device screens from the firmware (display.cpp + Telemetria.ino). */
+
+const SCALE = 2.2;
+const W = 128 * SCALE, H = 128 * SCALE;
+
+function Bezel({ children, labelTone = 'fg-3' }) {
+  return (
+    <div style={{
+      width: W + 40, padding: 20,
+      background: 'linear-gradient(180deg,#1a1c20 0%,#0a0b0c 100%)',
+      border: '1px solid #24272C',
+      borderRadius: 14,
+      boxShadow: '0 20px 40px rgba(0,0,0,0.4), 0 0 0 1px #000 inset'
+    }}>
+      <div style={{
+        width: W, height: H,
+        background: '#000',
+        border: '1px solid #2a2d33',
+        borderRadius: 4,
+        position: 'relative', overflow: 'hidden',
+        fontFamily: 'JetBrains Mono, monospace'
+      }}>{children}</div>
+      <div style={{
+        display:'flex', justifyContent:'space-between', alignItems:'center',
+        marginTop: 12, fontFamily:'JetBrains Mono, monospace',
+        fontSize: 9, letterSpacing:'.1em', textTransform:'uppercase',
+        color:'#4A4E55'
+      }}>
+        <span>M5STACK · ATOM S3</span>
+        <span style={{width:14,height:14,border:'1px solid #4A4E55',borderRadius:'50%'}}/>
+      </div>
+    </div>
+  );
+}
+
+/* Pixel-accurate reproductions of firmware draw calls.
+   Coordinates mirror display.cpp + Telemetria.ino (M5.Lcd.setCursor, fillScreen, etc.) */
+
+const Txt = ({x,y,children,color='#FFFFFF',bg,size=1}) => (
+  <div style={{
+    position:'absolute', left:x*SCALE, top:y*SCALE,
+    color, background: bg || 'transparent',
+    fontSize: (8 * size) * SCALE + 'px',
+    fontFamily:'JetBrains Mono, monospace', fontWeight:500,
+    lineHeight:1, letterSpacing: size>=2 ? '-0.02em' : 0
+  }}>{children}</div>
+);
+
+const WifiDot = ({on}) => (
+  <div style={{
+    position:'absolute', right: 7*SCALE, bottom: 7*SCALE,
+    width: 12*SCALE, height: 12*SCALE, borderRadius:'50%',
+    background: on ? '#00FF00' : '#FF3B30',
+    boxShadow: on ? '0 0 8px rgba(0,255,0,0.6)' : '0 0 8px rgba(255,59,48,0.5)'
+  }}/>
+);
+
+/* Screens */
+
+function BootSplash() {
+  return (
+    <div style={{width:'100%',height:'100%',background:'#222'}}>
+      <Txt x={12} y={15} color="#FFFFFF" bg="#222222">TELEMETRY</Txt>
+      <Txt x={28} y={40} color="#00FF00" bg="#222222">v1.7.6-atoms3r</Txt>
+      <Txt x={14} y={80} color="#7A7F87" bg="#222222" size={0.85}>BMI270 + BMM150</Txt>
+      <Txt x={14} y={95} color="#7A7F87" bg="#222222" size={0.85}>AT6668 @ 115200</Txt>
+    </div>
+  );
+}
+
+function WifiPrompt({count}) {
+  return (
+    <div style={{width:'100%',height:'100%',background:'#000'}}>
+      <Txt x={8} y={18}>Click to turn</Txt>
+      <Txt x={22} y={34}>on the WiFi</Txt>
+      <Txt x={55} y={60} size={3} color="#00FF00">{count}</Txt>
+      <Txt x={8} y={104}>No click: skip</Txt>
+    </div>
+  );
+}
+
+function Racing() {
+  return (
+    <div style={{width:'100%',height:'100%',background:'#000'}}>
+      <Txt x={2} y={4} color="#7A7F87" size={0.85}>RACING · L03</Txt>
+      <Txt x={2} y={18} size={2} color="#00FF00">127</Txt>
+      <Txt x={58} y={26} color="#7A7F87" size={0.85}>km/h</Txt>
+      <Txt x={2} y={52} color="#FFB300" size={0.85}>ax +0.18</Txt>
+      <Txt x={2} y={66} color="#FFB300" size={0.85}>ay -0.24</Txt>
+      <Txt x={70} y={52} color="#FFB300" size={0.85}>gz +12.0</Txt>
+      <Txt x={70} y={66} color="#FFB300" size={0.85}>θ 284°</Txt>
+      <div style={{position:'absolute',left:2*SCALE,top:88*SCALE,width:124*SCALE,height:1*SCALE,background:'#24272C'}}/>
+      <Txt x={2} y={94} color="#7A7F87" size={0.85}>SAT:11 HDOP:0.8</Txt>
+      <Txt x={2} y={108} color="#7A7F87" size={0.85}>SD:tel_83.bin</Txt>
+      <WifiDot on={true}/>
+    </div>
+  );
+}
+
+function SDError() {
+  return (
+    <div style={{width:'100%',height:'100%',background:'#FF0000'}}>
+      <Txt x={10} y={10} color="#FFFFFF" bg="#FF0000">INSERT SD!</Txt>
+      <Txt x={2} y={30} color="#FFFFFF" bg="#FF0000">2xClick=bypass</Txt>
+      <Txt x={8} y={70} color="#FFFFFF" bg="#FF0000" size={0.85}>Retrying every 2 s</Txt>
+    </div>
+  );
+}
+
+function GpsLost() {
+  return (
+    <div style={{width:'100%',height:'100%',background:'#000'}}>
+      <Txt x={2} y={4} color="#7A7F87" size={0.85}>RACING · L03</Txt>
+      <Txt x={2} y={18} size={2} color="#FF3B30">--</Txt>
+      <Txt x={58} y={26} color="#FF3B30" size={0.85}>km/h</Txt>
+      <div style={{position:'absolute',left:0,top:50*SCALE,width:'100%',height:20*SCALE,background:'#FF3B30',display:'flex',alignItems:'center',justifyContent:'center'}}>
+        <span style={{color:'#FFFFFF',fontSize:10*SCALE,fontFamily:'JetBrains Mono',fontWeight:700,letterSpacing:'.05em'}}>GPS LOST!</span>
+      </div>
+      <Txt x={2} y={80} color="#7A7F87" size={0.85}>Dead-reckoning</Txt>
+      <Txt x={2} y={94} color="#7A7F87" size={0.85}>&gt; 5 s stale</Txt>
+      <WifiDot on={true}/>
+    </div>
+  );
+}
+
+const SCREENS = [
+  { id:'boot',   label:'BOOT · v1.7.6',            Comp: BootSplash },
+  { id:'wifi',   label:'WIFI PROMPT · 3 s',        Comp: () => <WifiPrompt count={3}/> },
+  { id:'race',   label:'RACING · LIVE',            Comp: Racing },
+  { id:'sderr',  label:'SD ERROR · INSERT',        Comp: SDError },
+  { id:'gpslost',label:'GPS LOST · DEAD RECKON',   Comp: GpsLost },
+];
+
+function App() {
+  return (
+    <div className="stage">
+      <div className="side">
+        <div className="overline" style={{marginBottom:8,color:'#7A7F87'}}>UI KIT // DEVICE LCD</div>
+        <h3>M5Stack Atom S3</h3>
+        <p>128×128 LCD, 6 states. Every pixel drawn by <code>display.cpp</code> and <code>Telemetria.ino</code>. Scaled ×2.2 here for readability; the device itself is 24×24 mm.</p>
+        <p style={{fontFamily:'var(--font-mono)',fontSize:11,color:'#7A7F87'}}>BLACK #000 · WHITE · GREEN #0F0 · RED #F00 · 4 accent fills</p>
+      </div>
+      <div className="screens">
+        {SCREENS.map(({id,label,Comp})=>(
+          <div key={id} data-screen-label={id}>
+            <Bezel><Comp/></Bezel>
+            <div className="screen-label">{label}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body></html>

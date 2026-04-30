@@ -681,6 +681,11 @@ def _timestamp_us(vals, fields):
     return None
 
 
+def _record_seq(vals, fields):
+    value = _field_value(vals, fields, 'seq')
+    return int(value) if value is not None else None
+
+
 def _record_plausible(vals, fields, prev_ts_us=None, raw=None):
     """Heuristic guard used only to recover from byte-level SD log misalignment."""
     value = _field_value(vals, fields, 'record_magic')
@@ -827,7 +832,10 @@ def bin_to_csv_lines(bin_path, total=None):
             f.seek(offset)
         count = 0
         resync_count = 0
+        seq_gap_count = 0
+        seq_missing_total = 0
         prev_ts_us = None
+        prev_seq = None
         while True:
             record_pos = f.tell()
             chunk = f.read(chunk_size)
@@ -837,6 +845,7 @@ def bin_to_csv_lines(bin_path, total=None):
             if vals[0] == SENTINEL_CALIB:   # CalibrationRecord sentinel (uint64 max)
                 yield f"# CALIB_UPDATE: sin_phi={vals[1]:.5f} cos_phi={vals[2]:.5f} sin_theta={vals[3]:.5f} cos_theta={vals[4]:.5f} bias_ax={vals[5]:.5f} bias_ay={vals[6]:.5f} bias_az={vals[7]:.5f} bias_gx={vals[11]:.5f} bias_gy={vals[12]:.5f} bias_gz={vals[14]:.5f}"
                 prev_ts_us = None
+                prev_seq = None
                 continue
             if not _record_plausible(vals, fields, prev_ts_us, chunk):
                 skip = _find_resync_skip(f, record_pos, fmt, chunk_size, fields)
@@ -852,16 +861,31 @@ def bin_to_csv_lines(bin_path, total=None):
                       f"skipped {skip} byte(s)")
                 f.seek(record_pos + skip)
                 prev_ts_us = None
+                prev_seq = None
                 continue
+            seq = _record_seq(vals, fields)
+            if prev_seq is not None and seq is not None and seq != prev_seq + 1:
+                missing = max(0, seq - prev_seq - 1)
+                seq_gap_count += 1
+                seq_missing_total += missing
+                ts_us = _timestamp_us(vals, fields)
+                dt_us = (ts_us - prev_ts_us) if ts_us is not None and prev_ts_us is not None else None
+                dt_text = f", dt={dt_us / 1000000.0:.6f}s" if dt_us is not None else ""
+                print(f"\n    {YELLOW}WARN:{RESET} sequence gap at byte {record_pos:,}: "
+                      f"seq {prev_seq} -> {seq}, missing {missing}{dt_text}")
             line = ','.join(f.format(v) for f, v in zip(col_fmt, vals))
             yield line
             prev_ts_us = _timestamp_us(vals, fields)
+            prev_seq = seq
             count += 1
             if count % PROGRESS_EVERY == 0 and total:
                 pct = count * 100 // total
                 print(f"    Read {count:>10,} / {total:,}  ({pct}%)", end='\r')
         if resync_count:
             print(f"\n    {YELLOW}Resync events:{RESET} {resync_count}")
+        if seq_gap_count:
+            print(f"\n    {YELLOW}Sequence gap events:{RESET} {seq_gap_count} "
+                  f"(missing {seq_missing_total} record(s) by seq)")
     if total:
         status = "100%" if count >= total else "done"
         print(f"    Read {count:>10,} / {total:,}  ({status})    ")

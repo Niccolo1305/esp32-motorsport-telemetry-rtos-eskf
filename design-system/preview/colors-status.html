@@ -1,0 +1,21 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Colors — Status</title>
+<link rel="stylesheet" href="../colors_and_type.css">
+<style>
+  body{padding:16px;background:var(--color-bg-1);}
+  .row{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+  .sw{border:1px solid var(--color-border-2);border-radius:var(--radius-2);padding:12px;height:100px;display:flex;flex-direction:column;justify-content:space-between;background:var(--color-bg-2)}
+  .bar{height:8px;border-radius:4px}
+  .name{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-fg-3)}
+  .meta{display:flex;justify-content:space-between;align-items:center}
+  .hex{font-size:12px;color:var(--color-fg-2)}
+  .use{font-size:11px;color:var(--color-fg-3);margin-top:4px}
+</style></head><body>
+<div class="row">
+  <div class="sw"><span class="name">SIGNAL · GO-GREEN</span><div class="bar" style="background:var(--color-signal)"></div><div class="meta"><span class="hex">#00E676</span><span class="use">OK · FRESH FIX</span></div></div>
+  <div class="sw"><span class="name">WARN · AMBER</span><div class="bar" style="background:var(--color-warn)"></div><div class="meta"><span class="hex">#FFB300</span><span class="use">SD LOW · CAUTION</span></div></div>
+  <div class="sw"><span class="name">ALERT · HAZARD</span><div class="bar" style="background:var(--color-alert)"></div><div class="meta"><span class="hex">#FF3B30</span><span class="use">GPS LOST · ERR</span></div></div>
+  <div class="sw"><span class="name">BYPASS · ORANGE</span><div class="bar" style="background:var(--color-bypass)"></div><div class="meta"><span class="hex">#FF8800</span><span class="use">DEVICE BYPASS</span></div></div>
+  <div class="sw"><span class="name">ACCENT · INSTRUMENT</span><div class="bar" style="background:var(--color-accent)"></div><div class="meta"><span class="hex">#00A5FF</span><span class="use">LINK · FOCUS</span></div></div>
+  <div class="sw"><span class="name">SIGNAL-DIM</span><div class="bar" style="background:var(--color-signal-dim)"></div><div class="meta"><span class="hex">#00A86B</span><span class="use">IDLE LAMP</span></div></div>
+</div>
+</body></html>

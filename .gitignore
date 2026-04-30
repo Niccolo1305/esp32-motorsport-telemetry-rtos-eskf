@@ -8,6 +8,9 @@ lib/.dependencies/
 *.obj
 *.elf
 *.bin
+*.csv
+*.json
+*.md
 *.hex
 *.map
 
@@ -22,100 +25,96 @@ env/
 .env
 
 # =========================
-# OS / Dati Locali
+# OS / Local Data
 # =========================
 .DS_Store
 Thumbs.db
 *.log
 
 # =========================
-# File e cartelle extra locali
+# Extra Local Files and Folders
 # =========================
 .claude/
-Codebase Repomix file .md per LLM/
-Pipeline/
+docs/llm-context/
+docs/pipeline/
 Problema da risolvere.md
-Testdrive per fix madgwick/
-Tool/analyze_roundabout_deep.py
-Tool/analyze_roundabout_fix.py
-Tool/analyze_tbias_deep.py
-Tool/analyze_zaru.py
-Tool/simulate_vgpl.py
-Tool/verify_vgpl_theory.py
-Tool/script/analyze_roundabout_deep.py
-Tool/script/analyze_roundabout_fix.py
-Tool/script/analyze_tbias_deep.py
-Tool/script/analyze_zaru.py
-Tool/script/analyze4.py
-Tool/script/bias_drift_report.py
-Tool/script/bosch_static_validator.py
-Tool/script/generate_atom_s3_vs_atom_s3r_whitepaper.py
-Tool/script/gps_speed_compare.py
-Tool/script/gsen_analysis.py
-Tool/script/simulate_vgpl.py
-Tool/script/tumble_test.py
-Tool/script/verify_vgpl_theory.py
-Tool/testdrive_fix_madgwick_2gate.csv
+data/test-drives/madgwick-fix/
+tools/analyze_roundabout_deep.py
+tools/analyze_roundabout_fix.py
+tools/analyze_tbias_deep.py
+tools/analyze_zaru.py
+tools/simulate_vgpl.py
+tools/verify_vgpl_theory.py
+tools/script/analyze_roundabout_deep.py
+tools/script/analyze_roundabout_fix.py
+tools/script/analyze_tbias_deep.py
+tools/script/analyze_zaru.py
+tools/script/analyze4.py
+tools/script/bias_drift_report.py
+tools/script/bosch_static_validator.py
+tools/script/generate_atom_s3_vs_atom_s3r_whitepaper.py
+tools/script/gps_speed_compare.py
+tools/script/gsen_analysis.py
+tools/script/simulate_vgpl.py
+tools/script/tumble_test.py
+tools/script/verify_vgpl_theory.py
+tools/testdrive_fix_madgwick_2gate.csv
 claude.exe
 cross_domain_audit_report.md
 data_pipeline_audit.md
 CLAUDE.md
-/firmware/
-/test_fw/
+firmware/benchmarks/**/.pio/
+firmware/benchmarks/**/.vscode/
 
 # =========================
-# Dati di test locali / CSV
+# Local Test Data / CSV
 # =========================
-Tool/*.csv
-Tool/.telemetry_cache/
-Tool/sitl_hal/Bin_test_su_banco*/
+tools/*.csv
+tools/.telemetry_cache/
 
 # =========================
-# Capture e dataset locali pesanti
+# Heavy Local Captures and Datasets
 # =========================
-Reports/csv_termal_log/
-Tool/script/Reports bias/
-Tool/sitl_hal/tel_*_csv/
+tools/script/bias-reports/
+tools/sitl_hal/tel_*_csv/
 
 # =========================
-# Output analisi/grafici generati
+# Generated Analysis and Plots
 # =========================
-Reports/tel_*_metrics.json
-Reports/tel_*_*.png
-Reports/*_assets/
+analysis/reports/tel_*_metrics.json
+analysis/reports/tel_*_*.png
+analysis/reports/*_assets/
 
 # =========================
-# Log/boot dump locali
+# Local Logs / Boot Dumps
 # =========================
 *.txtMi
-test_fw/**/atoms3*_psram_boot.txtMi
+firmware/test/**/atoms3*_psram_boot.txtMi
 
 # =========================
-# PDF generati da documenti markdown
+# PDFs Generated from Markdown Documents
 # =========================
-Docs/*.pdf
-Tool/can_bus/*.pdf
+docs/guides/*.pdf
+tools/can_bus/*.pdf
 
 # =========================
-# Tool SITL sperimentali locali
+# Experimental Local SITL Tools
 # =========================
-Tool/gps_speed_compare.py
-Tool/sitl_hal/__init__.py
-Tool/sitl_hal/_smoke/
-Tool/sitl_hal/gps_speed_compare.py
-Tool/sitl_hal/static_bench_compare.py
-Tool/sitl_hal/static_bench_validator.py
-Tool/sitl_hal/static_gate_debug.py
+tools/gps_speed_compare.py
+tools/sitl_hal/__init__.py
+tools/sitl_hal/_smoke/
+tools/sitl_hal/gps_speed_compare.py
+tools/sitl_hal/static_bench_compare.py
+tools/sitl_hal/static_bench_validator.py
+tools/sitl_hal/static_gate_debug.py
 
 # =========================
-# Documenti locali non-source
+# Local Non-Source Documents
 # =========================
 Protocollo Operativo.txt
 audit_v1.5.1.md
 whitepaper_at6668_dhv_navpv_findings.md
 whitepaper_at6668_dhv_navpv_findings.pdf
-img/
-/Docs/
-/Reports/*.md
-/Storico MARKDOWN/
+docs/guides/
+analysis/reports/*.md
 

@@ -1,0 +1,160 @@
+<!doctype html>
+<html><head>
+<meta charset="utf-8">
+<title>Telemetria · Docs</title>
+<link rel="stylesheet" href="../../colors_and_type.css">
+<style>
+  body{margin:0;background:var(--color-bg-0);color:var(--color-fg-1)}
+  .nav{position:sticky;top:0;z-index:10;display:flex;align-items:center;justify-content:space-between;padding:14px 28px;background:rgba(15,16,18,0.8);backdrop-filter:blur(8px);border-bottom:1px solid var(--color-border-1)}
+  .brand{display:flex;align-items:center;gap:12px}
+  .brand .mark{width:28px;height:28px;border:1.5px solid var(--color-fg-1);border-radius:4px;display:flex;align-items:center;justify-content:center;font-family:var(--font-mono);font-weight:700;font-size:16px;position:relative}
+  .brand .mark::after{content:'';position:absolute;right:-2px;bottom:-2px;width:6px;height:6px;border-radius:50%;background:var(--color-signal);box-shadow:0 0 4px var(--color-signal)}
+  .brand .wm{font-family:var(--font-mono);font-weight:700;font-size:15px}
+  .nav ul{display:flex;gap:22px;list-style:none;margin:0;padding:0;font-family:var(--font-mono);font-size:13px;color:var(--color-fg-2)}
+  .nav ul li{cursor:pointer}
+  .nav ul li:hover{color:var(--color-fg-1)}
+  .nav .cta{font-family:var(--font-mono);font-size:12px;padding:7px 12px;border:1px solid var(--color-fg-1);color:var(--color-fg-1);text-transform:uppercase;letter-spacing:.06em;text-decoration:none}
+  .hero{padding:80px 28px 60px;max-width:1200px;margin:0 auto}
+  .pill{display:inline-flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-fg-3);border:1px solid var(--color-border-2);padding:5px 10px;border-radius:2px}
+  .pill .dot{width:6px;height:6px;border-radius:50%;background:var(--color-signal);box-shadow:0 0 4px var(--color-signal)}
+  h1{font-family:var(--font-display);font-weight:700;font-size:84px;line-height:0.92;letter-spacing:-0.035em;margin:18px 0 18px;max-width:14ch}
+  h1 em{font-style:normal;color:var(--color-signal)}
+  .lead{font-size:18px;line-height:1.5;color:var(--color-fg-2);max-width:62ch;margin:0}
+  .ctas{margin-top:28px;display:flex;gap:10px;flex-wrap:wrap}
+  .btn{font-family:var(--font-mono);font-size:12px;font-weight:500;letter-spacing:.05em;text-transform:uppercase;padding:10px 16px;border-radius:2px;text-decoration:none;display:inline-flex;align-items:center;gap:8px}
+  .btn.primary{background:var(--color-signal);color:var(--color-bg-0);border:1px solid var(--color-signal)}
+  .btn.ghost{background:transparent;color:var(--color-fg-1);border:1px solid var(--color-border-2)}
+  .btn.ghost:hover{border-color:var(--color-fg-1)}
+  .stat-row{margin-top:40px;display:grid;grid-template-columns:repeat(4,1fr);gap:20px;border-top:1px solid var(--color-border-2);border-bottom:1px solid var(--color-border-2);padding:22px 0}
+  .stat{font-family:var(--font-mono)}
+  .stat .v{font-size:28px;font-weight:500;color:var(--color-fg-1);font-variant-numeric:tabular-nums;letter-spacing:-0.01em}
+  .stat .l{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--color-fg-3);margin-top:4px}
+  section{padding:60px 28px;max-width:1200px;margin:0 auto}
+  .sh{font-family:var(--font-mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--color-signal);margin-bottom:10px}
+  h2{font-family:var(--font-display);font-weight:700;font-size:40px;line-height:1.05;letter-spacing:-0.02em;margin:0 0 36px;max-width:22ch}
+  .pipe{background:var(--color-bg-1);border:1px solid var(--color-border-2);border-radius:4px;padding:22px;overflow-x:auto}
+  .pipe pre{font-family:var(--font-mono);font-size:12px;line-height:1.55;color:var(--color-fg-2);margin:0;white-space:pre}
+  .pipe .hi{color:var(--color-signal)}
+  .pipe .c{color:var(--color-fg-3)}
+  .changelog{display:grid;grid-template-columns:180px 1fr;gap:24px}
+  .changelog .v{font-family:var(--font-mono);font-size:14px;color:var(--color-fg-1);font-weight:500}
+  .changelog .v .t{display:block;color:var(--color-fg-3);font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-top:4px}
+  .changelog .body p{font-size:14px;line-height:1.55;color:var(--color-fg-2);margin:0 0 8px;max-width:72ch}
+  .changelog .item{display:contents}
+  .changelog .item > *{padding:18px 0;border-top:1px solid var(--color-border-1)}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .card{background:var(--color-bg-1);border:1px solid var(--color-border-2);border-radius:4px;padding:22px;position:relative;overflow:hidden}
+  .card .n{font-family:var(--font-mono);font-size:11px;color:var(--color-fg-3);letter-spacing:.08em;text-transform:uppercase;margin-bottom:10px}
+  .card h3{font-family:var(--font-mono);font-size:16px;font-weight:600;margin:0 0 10px;color:var(--color-fg-1);letter-spacing:-0.01em}
+  .card p{font-size:13px;line-height:1.55;color:var(--color-fg-2);margin:0}
+  code{font-family:var(--font-mono);background:var(--color-bg-2);padding:1px 5px;border-radius:2px;color:var(--color-signal);font-size:90%}
+  pre.install{background:var(--color-bg-1);border:1px solid var(--color-border-2);border-left:2px solid var(--color-signal);padding:16px 20px;font-family:var(--font-mono);font-size:13px;color:var(--color-fg-2);margin:0;overflow-x:auto}
+  pre.install .p{color:var(--color-signal)}
+  footer{border-top:1px solid var(--color-border-1);padding:26px 28px;font-family:var(--font-mono);font-size:12px;color:var(--color-fg-3);display:flex;justify-content:space-between}
+  @media (max-width:900px){h1{font-size:56px}h2{font-size:32px}.stat-row{grid-template-columns:repeat(2,1fr)}.grid3{grid-template-columns:1fr}.changelog{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<nav class="nav">
+  <div class="brand">
+    <div class="mark">T</div>
+    <div class="wm">TELEMETRIA</div>
+  </div>
+  <ul>
+    <li>Overview</li><li>Pipeline</li><li>Changelog</li><li>Install</li><li>Config</li>
+  </ul>
+  <a class="cta" href="#">github ↗</a>
+</nav>
+
+<div class="hero">
+  <span class="pill"><span class="dot"></span>v1.7.6 · AtomS3R · 2 records / SD sector</span>
+  <h1>Zero-jitter vehicle telemetry. <em>Open source. No compromises.</em></h1>
+  <p class="lead">Telemetria is an open-source firmware for M5Stack Atom S3 / S3R that fuses 50 Hz IMU with 10 Hz GPS through a 5D/6D Error-State Kalman Filter. Logs 256-byte records to SD, streams JSON over MQTT, exports to MoTeC i2 Pro. Built for motorsport by people who got tired of black-box data loggers.</p>
+  <div class="ctas">
+    <a class="btn primary" href="#">Flash firmware →</a>
+    <a class="btn ghost" href="#">Read the patch notes</a>
+    <a class="btn ghost" href="#">Python tooling</a>
+  </div>
+  <div class="stat-row">
+    <div class="stat"><div class="v">50 Hz</div><div class="l">IMU sampling</div></div>
+    <div class="stat"><div class="v">10 Hz</div><div class="l">GPS fix rate</div></div>
+    <div class="stat"><div class="v">256 B</div><div class="l">per record · sector-aligned</div></div>
+    <div class="stat"><div class="v">337 k</div><div class="l">records validated, 0 dropped</div></div>
+  </div>
+</div>
+
+<section>
+  <div class="sh">§ 02 · Pipeline</div>
+  <h2>The math, end-to-end. Sixteen steps from chip to SD.</h2>
+  <div class="pipe"><pre>
+<span class="c">// Task_Filter — Core 1 · priority 2 · 50 Hz · FreeRTOS</span>
+<span class="hi">STEP 0</span>   Dynamic dt from esp_timer_get_time()
+<span class="hi">STEP 1</span>   Axis convention remap (chip → pipeline)
+<span class="hi">STEP 2</span>   Ellipsoidal calibration    a_cal = W · (a_raw − b)
+<span class="hi">STEP 3</span>   Geometric alignment        rotate_3d(a_cal, φ, θ)
+<span class="hi">STEP 4</span>   Mounting bias residuals    a_r = a_r_raw − bias_a
+<span class="hi">STEP 5</span>   Gyro bias + rotation       g_r = rotate_3d(g − bias_g)
+<span class="hi">STEP 6</span>   VGPL kinematic compensation (centripetal + longitudinal)
+<span class="hi">STEP 7</span>   Madgwick AHRS              dual-gate adaptive β
+<span class="hi">STEP 8</span>   Gravity cancellation       lin_a = a_r − grav(q)
+<span class="hi">STEP 9</span>   Statistical engine · RAW variance buffer (50 samples)
+<span class="hi">STEP 10</span>  GPS snapshot               gps_mutex · 2 ms timeout
+<span class="hi">STEP 11</span>  Stationary detection       var + sog + mean_gz gates
+<span class="hi">STEP 12</span>  ZARU update                static + straight-line
+<span class="hi">STEP 13</span>  ESKF 5D predict            X = [px py vx vy θ]
+<span class="hi">STEP 14</span>  NHC v_lateral = 0          R_nhc = 0.5 (m/s)²
+<span class="hi">STEP 15</span>  ESKF correct · Joseph form 3-stage sequential
+<span class="hi">STEP 16</span>  End-of-pipe EMA            α = 0.06 · τ ≈ 313 ms
+             → sd_queue → Task_SD_Writer (256 B, aligned)
+</pre></div>
+</section>
+
+<section>
+  <div class="sh">§ 03 · Why</div>
+  <div class="grid3">
+    <div class="card"><div class="n">01</div><h3>FreeRTOS multi-core</h3><p>Task_I2C on Core 0 at priority 3. Task_Filter on Core 1 at priority 2. Zero jitter by design: mailbox queue (depth 1) with <code>xQueueOverwrite</code> guarantees freshest data with no blocking.</p></div>
+    <div class="card"><div class="n">02</div><h3>5D / 6D shadow ESKF</h3><p>Production 5D filter drives display, MQTT, logs. The 6D shadow runs the same data with an augmented gyro-bias state. Offline A/B testing, zero runtime cost. Both use Joseph-form covariance updates.</p></div>
+    <div class="card"><div class="n">03</div><h3>Sector-aligned SD</h3><p>256 bytes per record, 2 records per SD sector. Cross-sector partial-write misalignment can't happen. <code>bin_to_csv.py</code> resyncs automatically if it ever does.</p></div>
+  </div>
+</section>
+
+<section>
+  <div class="sh">§ 04 · Changelog</div>
+  <h2>Every version, every fix, in plain English.</h2>
+  <div class="changelog">
+    <div class="item"><div class="v">v1.7.6<span class="t">WORKING · Oct 2026</span></div><div class="body"><p><strong>Sector-aligned records + SD resync.</strong> TelemetryRecord padded from 242 B to 256 B with <code>reserved[14]</code>. 2 records = 1 SD sector (512 B), eliminating cross-sector partial-write misalignment. <code>bin_to_csv.py</code> gains automatic resync: scans up to 4096 bytes for the next valid alignment.</p></div></div>
+    <div class="item"><div class="v">v1.7.5<span class="t">SD hotfix</span></div><div class="body"><p>Removes <code>File.position()</code> / <code>ftell()</code> from the runtime recovery path. A transient invalid position result could previously kill <code>Task_SD_Writer</code> even when <code>File.write()</code> had not actually failed. Progress now trusts only <code>write()</code> return value.</p></div></div>
+    <div class="item"><div class="v">v1.6.0<span class="t">HAL</span></div><div class="body"><p>AtomS3R Bosch-direct HAL introduction. <code>Bmi270Provider</code> for explicit bring-up on <code>M5.In_I2C</code>. M5Unified demoted to board/display/power only. Production IMU path no longer owned by M5.</p></div></div>
+    <div class="item"><div class="v">v1.2.0<span class="t">G-sensitivity</span></div><div class="body"><p>3×3 K_gs matrix measured by differential 6-face method. Corrects MPU-6886 gyro response to linear acceleration. Matters most on <code>gz</code> (the ESKF heading axis), where the effect survived boot calibration.</p></div></div>
+    <div class="item"><div class="v">v0.9.3<span class="t">Spiral fix</span></div><div class="body"><p>3-stage sequential Kalman update. Position alone wasn't enough — P(pos,vel) cross-covariance was too small to transfer information to velocity, so <code>kf_vel</code> underestimated by ~30 % and heading drifted into a spiral. Adding scalar speed and Course-Over-Ground updates closed the loop.</p></div></div>
+    <div class="item"><div class="v">v0.1.0<span class="t">baseline</span></div><div class="body"><p>Full port from MicroPython to C++ Arduino/ESP-IDF. MPU-6886 IMU via M5Unified. Basic pipeline: read → EMA filter → MQTT JSON at 10 Hz. Humble beginnings.</p></div></div>
+  </div>
+</section>
+
+<section>
+  <div class="sh">§ 05 · Install</div>
+  <h2>Flash it, mount an SD, drop in a wifi config.</h2>
+  <pre class="install"><span class="p">$</span> git clone https://github.com/&lt;you&gt;/telemetria.git
+<span class="p">$</span> cd telemetria
+<span class="p">$</span> arduino-cli compile --fqbn m5stack:esp32:m5stack_atoms3
+<span class="p">$</span> arduino-cli upload   --fqbn m5stack:esp32:m5stack_atoms3 -p /dev/ttyACM0
+
+<span class="c"># On the SD card, root:</span>
+<span class="p">$</span> cat &gt; /Volumes/TEL/wifi_config.txt &lt;&lt;EOF
+SSID=garage-wifi
+PASSWORD=hotlap2026
+MQTT_BROKER=192.168.1.10
+MQTT_PORT=1883
+MQTT_TOPIC=telemetry/car42/data
+EOF
+
+<span class="c"># Launch the live dashboard:</span>
+<span class="p">$</span> python tools/dashboard.py --broker 192.168.1.10</pre>
+</section>
+
+<footer>
+  <span>TELEMETRIA · GPL-3.0-or-later · Built for motorsport, shared with everyone.</span>
+  <span>v1.7.6-atoms3r · 2026</span>
+</footer>
+
+</body></html>
