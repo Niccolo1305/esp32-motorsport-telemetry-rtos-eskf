@@ -5,9 +5,19 @@
 #include <math.h>
 
 #ifdef USE_BMI270
-const char *const FIRMWARE_VERSION = "v1.7.9-atoms3r";
+const char *const FIRMWARE_VERSION = "v1.8.2-atoms3r";
 #else
 const char *const FIRMWARE_VERSION = "v1.5.2-clean";
+#endif
+
+#if !defined(LOG_BACKEND_SD_H) && !defined(LOG_BACKEND_SDFAT)
+#define LOG_BACKEND_SD_H 1
+#endif
+#if defined(LOG_BACKEND_SD_H) && defined(LOG_BACKEND_SDFAT)
+#error "Select only one log storage backend"
+#endif
+#ifndef LOG_SDFAT_PREALLOCATE
+#define LOG_SDFAT_PREALLOCATE 0
 #endif
 
 // Timing and sampling
@@ -53,6 +63,26 @@ static constexpr uint32_t SD_SPI_HZ = 10000000;
 static constexpr int SD_WRITE_RETRY_DELAY_MS = 20;      // delay before retry after close/reopen recovery
 static constexpr int SD_WRITE_STALL_TIMEOUT_MS = 10000; // max per-batch no-progress window before fatal
 static constexpr bool SD_VERIFY_EVERY_BATCH = true;     // diagnostic hardening: never trust File.write() alone
+static constexpr uint32_t LOG_PREALLOC_BYTES_CFG = 128UL * 1024UL * 1024UL; // production segment size
+static constexpr uint32_t LOG_PREALLOC_MARGIN_DIVISOR = 16;
+static constexpr uint32_t LOG_PREALLOC_MIN_MARGIN_BYTES = 1UL * 1024UL * 1024UL;
+static constexpr uint32_t LOG_PREALLOC_MAX_MARGIN_BYTES = 16UL * 1024UL * 1024UL;
+
+static inline uint32_t computePreallocRolloverMargin(uint32_t prealloc_bytes) {
+  uint32_t margin = prealloc_bytes / LOG_PREALLOC_MARGIN_DIVISOR;
+  if (margin < LOG_PREALLOC_MIN_MARGIN_BYTES) margin = LOG_PREALLOC_MIN_MARGIN_BYTES;
+  if (margin > LOG_PREALLOC_MAX_MARGIN_BYTES) margin = LOG_PREALLOC_MAX_MARGIN_BYTES;
+  return margin;
+}
+
+static inline bool shouldRollover(uint32_t logical_size,
+                                  uint32_t allocated_size,
+                                  uint32_t next_write_bytes) {
+  if (allocated_size == 0 || logical_size >= allocated_size) return true;
+  const uint32_t remaining = allocated_size - logical_size;
+  const uint32_t margin = computePreallocRolloverMargin(allocated_size);
+  return remaining <= margin || remaining < next_write_bytes + margin;
+}
 #ifndef IMU_QUEUE_DEPTH_CFG
 #ifdef USE_BMI270
 #define IMU_QUEUE_DEPTH_CFG 4 // diagnostic FIFO: absorbs short Task_Filter stalls

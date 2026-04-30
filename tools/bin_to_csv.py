@@ -39,6 +39,7 @@ RESYNC_SCAN_BYTES = 4096
 RESYNC_CONFIRM_RECORDS = 8
 MAX_TIMESTAMP_US = 7 * 24 * 60 * 60 * 1_000_000
 MAX_TIMESTAMP_GAP_US = 10_000_000
+FILE_HEADER_V6_FLAG_LOG_PREALLOCATED = 0x00000010
 
 # ── Format Registry ──────────────────────────────────────────────────────────
 # 122-byte record (v0.9.8 — v1.3.0)
@@ -813,17 +814,106 @@ def _find_resync_skip(fobj, start_pos, fmt, chunk_size, fields):
     return None
 
 
-def bin_record_count(bin_path):
+def _is_preallocated_log(hdr):
+    return (
+        hdr is not None
+        and hdr.get('header_version', 0) >= 6
+        and hdr.get('record_size') == 256
+        and (hdr.get('v6', {}).get('build_flags', 0) & FILE_HEADER_V6_FLAG_LOG_PREALLOCATED)
+    )
+
+
+def _scan_preallocated_logical_end(bin_path, hdr, offset, chunk_size, fmt, fields):
+    """Return (logical_end, valid_records, tail_bytes) for v6 preallocated logs.
+
+    The scan stops at the first invalid magic/CRC/plausibility record. It treats
+    the remaining bytes as preallocated tail only if there is no later TEL6 magic
+    and all remaining bytes are zero. That avoids hiding real mid-file corruption.
+    """
+    if not _is_preallocated_log(hdr):
+        size = os.path.getsize(bin_path)
+        return size, max(0, size - offset) // chunk_size, 0
+
+    file_size = os.path.getsize(bin_path)
+    logical_end = file_size
+    valid_records = 0
+    prev_ts_us = None
+    invalid_pos = None
+    magic_bytes = struct.pack('<I', RECORD_MAGIC_256_V6)
+
+    with open(bin_path, 'rb') as f:
+        f.seek(offset)
+        while True:
+            record_pos = f.tell()
+            chunk = f.read(chunk_size)
+            if len(chunk) < chunk_size:
+                invalid_pos = record_pos
+                break
+            vals = struct.unpack(fmt, chunk)
+            if not _record_plausible(vals, fields, prev_ts_us, chunk):
+                invalid_pos = record_pos
+                break
+            ts_us = _timestamp_us(vals, fields)
+            if ts_us is not None and ts_us != SENTINEL_CALIB:
+                prev_ts_us = ts_us
+            valid_records += 1
+
+        if invalid_pos is None or invalid_pos >= file_size:
+            return file_size, valid_records, 0
+
+        f.seek(invalid_pos)
+        tail = f.read()
+        if tail and all(b == 0 for b in tail) and tail.find(magic_bytes) < 0:
+            logical_end = invalid_pos
+            return logical_end, valid_records, file_size - logical_end
+
+    return file_size, max(0, file_size - offset) // chunk_size, 0
+
+
+def bin_logical_layout(bin_path, quiet=False):
     hdr, offset = read_file_header(bin_path)
     chunk_size = hdr['record_size'] if hdr else CHUNK_SIZE_DEFAULT
-    data_bytes = os.path.getsize(bin_path) - offset
-    return data_bytes // chunk_size
+    fmt, hdr_cols, _ = get_format(chunk_size, hdr.get('header_version') if hdr else None)
+    fields = _field_indices(hdr_cols)
+    logical_end, valid_records, tail_bytes = _scan_preallocated_logical_end(
+        bin_path, hdr, offset, chunk_size, fmt, fields
+    )
+    if tail_bytes and not quiet:
+        print(f"    {YELLOW}INFO:{RESET} preallocated empty tail ignored: "
+              f"{tail_bytes:,} byte(s); logical size={logical_end:,} byte(s)")
+    return {
+        'hdr': hdr,
+        'offset': offset,
+        'chunk_size': chunk_size,
+        'logical_end': logical_end,
+        'valid_records': valid_records,
+        'tail_bytes': tail_bytes,
+    }
+
+
+def repair_bin_preallocated_tail(bin_path):
+    layout = bin_logical_layout(bin_path, quiet=True)
+    tail_bytes = layout['tail_bytes']
+    if tail_bytes <= 0:
+        print(f"  {DIM}No preallocated empty tail to repair.{RESET}")
+        return False
+    os.truncate(bin_path, layout['logical_end'])
+    print(f"  {GREEN}Repaired:{RESET} truncated {tail_bytes:,} byte(s); "
+          f"new size={layout['logical_end']:,} byte(s)")
+    return True
+
+
+def bin_record_count(bin_path):
+    return bin_logical_layout(bin_path, quiet=True)['valid_records']
 
 
 def bin_to_csv_lines(bin_path, total=None):
     """Yield CSV rows from a binary telemetry file (with or without FileHeader)."""
-    hdr, offset = read_file_header(bin_path)
-    chunk_size = hdr['record_size'] if hdr else CHUNK_SIZE_DEFAULT
+    layout = bin_logical_layout(bin_path)
+    hdr = layout['hdr']
+    offset = layout['offset']
+    chunk_size = layout['chunk_size']
+    logical_end = layout['logical_end']
     fmt, hdr_cols, col_fmt = get_format(chunk_size, hdr.get('header_version') if hdr else None)
     fields = _field_indices(hdr_cols)
 
@@ -838,6 +928,8 @@ def bin_to_csv_lines(bin_path, total=None):
         prev_seq = None
         while True:
             record_pos = f.tell()
+            if record_pos >= logical_end:
+                break
             chunk = f.read(chunk_size)
             if len(chunk) < chunk_size:
                 break
@@ -1089,14 +1181,22 @@ def main():
     global HEADER_LINE, CSV_PREAMBLE_LINES
     banner()
 
+    args = sys.argv[1:]
+    repair_bin = False
+    if '--repair-bin' in args:
+        repair_bin = True
+        args = [arg for arg in args if arg != '--repair-bin']
+
     # Determine input
-    if len(sys.argv) >= 3:
+    if len(args) >= 2:
         # Direct mode: bin_to_csv.py input output
-        bin_file = sys.argv[1]
-        csv_file = sys.argv[2]
+        bin_file = args[0]
+        csv_file = args[1]
         if not os.path.isfile(bin_file):
             print(f"  {RED}File not found: {bin_file}{RESET}")
             sys.exit(1)
+        if repair_bin and os.path.splitext(bin_file)[1].lower() == '.bin':
+            repair_bin_preallocated_tail(bin_file)
         hdr, _ = read_file_header(bin_file)
         if hdr:
             print(f"  Firmware: {hdr['firmware_version']}, record_size={hdr['record_size']}B")
@@ -1108,8 +1208,8 @@ def main():
         no_split(bin_to_csv_lines(bin_file, total), csv_file)
         return
 
-    if len(sys.argv) == 2:
-        input_file = sys.argv[1]
+    if len(args) == 1:
+        input_file = args[0]
         if not os.path.isfile(input_file):
             print(f"  {RED}File not found: {input_file}{RESET}")
             sys.exit(1)
@@ -1120,6 +1220,8 @@ def main():
     base = os.path.splitext(input_file)[0]
 
     if ext == '.bin':
+        if repair_bin:
+            repair_bin_preallocated_tail(input_file)
         # Detect FileHeader (v0.9.7+)
         hdr, hdr_offset = read_file_header(input_file)
         if hdr:

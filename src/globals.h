@@ -82,6 +82,8 @@ extern std::atomic<uint32_t> sd_records_written;  // records successfully writte
 extern std::atomic<uint32_t> sd_records_dropped;  // records dropped (queue full)
 extern std::atomic<uint32_t> sd_flush_worst_us;   // worst-case flush() duration [us]
 extern std::atomic<uint32_t> sd_flush_count;      // total flush() calls
+extern std::atomic<uint32_t> sd_sync_worst_us;    // worst-case backend sync() duration [us]
+extern std::atomic<uint32_t> sd_sync_count;       // total durable sync calls
 extern std::atomic<uint32_t> sd_queue_hwm;        // queue high-water mark [records]
 extern std::atomic<uint32_t> sd_partial_write_count; // partial-write events recovered/attempted
 extern std::atomic<uint32_t> sd_stall_count;      // zero-progress write stalls
@@ -94,6 +96,18 @@ extern std::atomic<uint32_t> sd_last_stall_seq;   // first seq in the batch that
 extern std::atomic<uint32_t> sd_last_written_seq; // last seq durably accepted by Task_SD_Writer
 extern std::atomic<uint32_t> sd_size_mismatch_count; // persistent file size did not match write return accounting
 extern std::atomic<uint32_t> sd_last_file_size;   // last file size observed after flush/reopen verification
+extern std::atomic<uint32_t> sd_backend_id;       // active storage backend identifier
+extern std::atomic<uint32_t> sd_prealloc_bytes;   // bytes currently preallocated by backend, if any
+extern std::atomic<bool> sd_truncate_ok;          // last finalize/truncate status
+extern std::atomic<uint32_t> sd_rollover_count;   // completed preallocated segment rollovers
+extern std::atomic<uint32_t> sd_rollover_worst_ms; // worst rollover duration [ms]
+extern std::atomic<uint32_t> sd_prealloc_count;   // preallocation calls completed
+extern std::atomic<uint32_t> sd_prealloc_worst_ms; // worst preallocation duration [ms]
+extern std::atomic<uint32_t> sd_boot_repair_count; // preallocated logs repaired at boot
+extern std::atomic<uint32_t> sd_boot_repair_truncated_bytes; // bytes removed by boot repair
+extern std::atomic<uint32_t> sd_boot_repair_worst_ms; // worst boot repair duration [ms]
+extern std::atomic<uint32_t> sd_current_segment_bytes; // logical bytes in current log segment
+extern std::atomic<uint32_t> sd_current_segment_capacity; // allocated bytes in current log segment
 extern std::atomic<uint32_t> sd_enqueue_fail_count; // Task_Filter/Calibration failed to enqueue to SD queue
 extern std::atomic<uint32_t> imu_queue_drop_count; // Task_I2C dropped oldest sample in diagnostic FIFO mode
 extern std::atomic<uint32_t> gps_mutex_timeout_count; // Task_Filter GPS snapshot lock timeouts
@@ -118,4 +132,4 @@ extern int btn_click_count;
 extern bool display_off;
 extern bool display_confirm_pending;
 extern int display_confirm_cycles;
-extern char buf[768];
+extern char buf[1536];

@@ -6,18 +6,19 @@
 #include "wifi_manager.h"
 
 #include <M5Unified.h>
-#include <SD.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
 
 #include "globals.h"
 #include "display.h"
+#include "storage_manager.h"
 
 // Loads WiFi credentials and MQTT settings from /wifi_config.txt on SD.
-// Must be called after SD.begin(). Returns true if at least one SSID was found.
+// Must be called after storage.begin(). Returns true if at least one SSID was found.
 // On failure, wifi_enabled is set to false (WiFi silently disabled).
 bool load_wifi_config() {
-  File f = SD.open("/wifi_config.txt", FILE_READ);
+  StorageReadFile f;
+  storage.openRead("/wifi_config.txt", f);
   if (!f) {
     Serial.println("[CFG] /wifi_config.txt not found: WiFi disabled.");
     wifi_enabled = false;

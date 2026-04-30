@@ -232,7 +232,7 @@
 //   - Micro-SD logging over SPI (TF Card Reader base)
 //   - struct TelemetryRecord (CSV, 30 bytes) with 200-element FreeRTOS queue
 //   - Task_SD_Writer on Core 1 (priority 1, async background)
-//   - SPI.begin() and SD.begin() in setup() single-thread (no race condition)
+//   - storage.begin() in setup() single-thread (no race condition)
 //   - Sequential file naming /tel_N.csv with snprintf (no heap fragmentation)
 //   - system_state converted to std::atomic<int> (formal C++11 correctness)
 //   - Guard sd_queue != NULL: missing SD does not block the system
@@ -1346,10 +1346,55 @@
 //     pass. The telemetry stream is only ~12.8 KB/s, so reliability is more
 //     important than raw SPI throughput.
 //
-// --- TODO (deferred to v1.8.0 CAN format bump) ---
+// v1.8.0 - StorageManager + SdFat Backend
+//   - [ARCH] Adds StorageManager/LogFileWriter so mounting, wifi_config reads,
+//     log naming, header creation, and runtime writes use one selected storage
+//     backend instead of direct SD.h calls spread across modules.
+//   - [SD] LOG_BACKEND_SD_H remains the default and preserves the v1.7.9
+//     verified-write baseline. LOG_BACKEND_SDFAT enables the new greiman/SdFat
+//     backend in a dedicated PlatformIO env for append-mode soak testing.
+//   - [SD] Optional LOG_SDFAT_PREALLOCATE uses SdFat-style upfront
+//     preallocation plus finalize-time truncate() behind a separate env.
+//     Record format stays v6: 256 B header, 256 B records, seq, magic, and
+//     crc16 unchanged.
+//   - [DIAG] MQTT heartbeat now reports storage backend id, sync count/worst,
+//     preallocated bytes, and truncate status alongside the v1.7.9 size
+//     mismatch diagnostics.
+//
+// v1.8.1 - SdFat Prealloc Repair and Segment Rollover
+//   - [SD] Preallocated SdFat logs are repaired at boot: the previous .bin is
+//     scanned until the first invalid magic/CRC record and truncated to the
+//     last valid 256 B record.
+//   - [SD] LOG_SDFAT_PREALLOCATE now writes segmented logs. When the current
+//     segment approaches its configured prealloc capacity, the writer truncates
+//     and closes it, creates the next /tel_N.bin, preallocates it, writes a full
+//     header, and continues with monotonic record seq.
+//   - [BOOT] Previous-log repair lookup now stops at the first missing
+//     sequential /tel_N.bin, avoiding thousands of SD exists() checks at boot.
+//   - [CFG] Test preallocation size is LOG_PREALLOC_BYTES_CFG=10 MiB with a
+//     computed rollover margin, so short tests exercise multiple rollovers.
+//   - [DIAG] MQTT heartbeat reports rollover, preallocation, boot-repair, and
+//     current segment size/capacity diagnostics. Record format remains v6.
+//
+// v1.8.2 - Promote SdFat Prealloc as AtomS3R Primary
+//   - [BUILD] m5stack-atoms3r now builds the validated SdFat preallocated
+//     segmented logger directly; the temporary m5stack-atoms3r-sdfat and
+//     m5stack-atoms3r-sdfat-prealloc environments were removed.
+//   - [SD] Production preallocation segment size raised from 10 MiB test
+//     segments to 128 MiB, reducing rollover frequency while keeping boot
+//     repair/truncate semantics unchanged.
+//   - [COMPAT] The SD.h backend remains in source as a fallback path for now,
+//     but it is no longer the primary AtomS3R build.
+//
+// --- TODO (deferred to v1.9.0 CAN format bump) ---
 //   - [TODO] Add CAN bus task (Core 0) for RPM, throttle, wheel speeds (×4),
 //     engine temp, steering angle. CanData struct + can_mutex pattern, mirroring
 //     GpsData / gps_mutex. Fields merged into TelemetryRecord (Scenario A).
+//   - [TODO] Remove the legacy SD.h backend after a few more long-run SdFat
+//     prealloc soak tests. Removal steps: delete LOG_BACKEND_SD_H branches from
+//     StorageManager/LogFileWriter, drop SD.h includes/dependency usage, keep
+//     only SdFat mount/open/exists/read/write/truncate paths, and simplify
+//     config.h so LOG_BACKEND_SDFAT is no longer a selectable flag.
 //   - [TODO] Evaluate moving sd_queue allocation to PSRAM on AtomS3R to recover
 //     ~48 KB of internal SRAM for the incoming CAN task stack and shared structs.
 //   - [TODO] AtomS3R ellipsoidal calibration is identity (uncalibrated); a
@@ -1384,7 +1429,7 @@
 // ==========================================================
 
 #include <M5Unified.h>
-#include <SD.h>
+#include <stddef.h>
 #include <SPI.h>
 #include <Wire.h>
 #include <esp_system.h>
@@ -1399,6 +1444,7 @@
 #include "filter_task.h"
 #include "gps_task.h"
 #include "SerialGpsWrapper.h"
+#include "storage_manager.h"
 #ifdef USE_BMI270
 #include "Bmi270Provider.h"
 #else
@@ -1436,14 +1482,107 @@ static void fill_base_file_header(FileHeader &hdr, uint8_t header_version) {
   hdr.mag_ref_ut_z = mag_ref_ut_z;
 }
 
-static bool write_all_file(File &file, const uint8_t *data, size_t len) {
-  size_t offset = 0;
-  while (offset < len) {
-    const size_t written = file.write(data + offset, len - offset);
-    if (written == 0) return false;
-    offset += written;
-  }
+static bool build_log_header(const char *filename, uint8_t *header_buf, size_t& header_size) {
+#ifdef USE_BMI270
+  FileHeaderV6 hdr = {};
+  fill_base_file_header(hdr.base, 6); // v6: 256 B startup diagnostics header
+  hdr.header_size = sizeof(FileHeaderV6);
+  hdr.data_offset = sizeof(FileHeaderV6);
+  hdr.endian_marker = TELEMETRY_ENDIAN_MARKER;
+  hdr.build_flags = FILE_HEADER_V6_FLAG_USE_BMI270;
+#ifdef BOARD_HAS_PSRAM
+  hdr.build_flags |= FILE_HEADER_V6_FLAG_BOARD_HAS_PSRAM;
+#endif
+#ifdef BMM150_USE_FLOATING_POINT
+  hdr.build_flags |= FILE_HEADER_V6_FLAG_BMM150_FLOAT;
+#endif
+#ifdef LOG_BACKEND_SDFAT
+  hdr.build_flags |= FILE_HEADER_V6_FLAG_LOG_BACKEND_SDFAT;
+#endif
+#if LOG_SDFAT_PREALLOCATE
+  hdr.build_flags |= FILE_HEADER_V6_FLAG_LOG_PREALLOCATED;
+#endif
+  hdr.sd_spi_hz = SD_SPI_HZ;
+  hdr.imu_i2c_hz = ATOMS3R_IMU_I2C_FREQ;
+  hdr.sd_queue_depth = SD_QUEUE_DEPTH;
+  hdr.imu_queue_depth = IMU_QUEUE_DEPTH;
+  hdr.sd_flush_every = SD_FLUSH_EVERY;
+  hdr.record_magic_offset = offsetof(TelemetryRecord, record_magic);
+  hdr.record_crc_offset = offsetof(TelemetryRecord, crc16);
+  hdr.reset_reason_cpu0 = (uint8_t)esp_reset_reason();
+  hdr.reset_reason_cpu1 = 0;
+  hdr.board_id = FILE_HEADER_BOARD_ATOMS3R;
+  hdr.imu_id = FILE_HEADER_IMU_BMI270;
+  hdr.mag_id = FILE_HEADER_MAG_BMM150;
+  hdr.gps_enabled = 1;
+  strncpy(hdr.log_filename, filename, sizeof(hdr.log_filename) - 1);
+  imuProvider.fillStartupDiagnostics(hdr.bmi_cfg_regs, sizeof(hdr.bmi_cfg_regs),
+                                     hdr.bmm_cfg_regs, sizeof(hdr.bmm_cfg_regs),
+                                     hdr.bmi_chip_id, hdr.bmm_chip_id);
+  hdr.header_crc16 = 0;
+  hdr.header_crc16 = telemetry_crc16_ccitt((const uint8_t *)&hdr, sizeof(hdr));
+  header_size = sizeof(hdr);
+  memcpy(header_buf, &hdr, header_size);
+#else
+  FileHeader hdr = {};
+  fill_base_file_header(hdr, 3); // v3: adds boot calibration params for SITL
+  header_size = sizeof(hdr);
+  memcpy(header_buf, &hdr, header_size);
+#endif
   return true;
+}
+
+static bool find_next_log_filename(char *filename, size_t filename_size) {
+  for (int idx = 0; idx < 10000; ++idx) {
+    snprintf(filename, filename_size, "/tel_%d.bin", idx);
+    if (!storage.exists(filename)) {
+      return true;
+    }
+  }
+  filename[0] = '\0';
+  return false;
+}
+
+static bool find_latest_log_filename(char *filename, size_t filename_size) {
+  char previous[32] = {};
+  char candidate[32];
+  for (int idx = 0; idx < 10000; ++idx) {
+    snprintf(candidate, sizeof(candidate), "/tel_%d.bin", idx);
+    if (!storage.exists(candidate)) {
+      if (idx == 0 || previous[0] == '\0') {
+        filename[0] = '\0';
+        return false;
+      }
+      strncpy(filename, previous, filename_size - 1);
+      filename[filename_size - 1] = '\0';
+      return true;
+    }
+    strncpy(previous, candidate, sizeof(previous) - 1);
+    previous[sizeof(previous) - 1] = '\0';
+  }
+  strncpy(filename, previous, filename_size - 1);
+  filename[filename_size - 1] = '\0';
+  return previous[0] != '\0';
+}
+
+bool create_next_log_segment(char *filename, size_t filename_size) {
+  if (!find_next_log_filename(filename, filename_size)) {
+    return false;
+  }
+  uint8_t header_buf[256] = {};
+  size_t header_size = 0;
+  if (!build_log_header(filename, header_buf, header_size)) {
+    return false;
+  }
+  return storage.createLogFile(filename, header_buf, header_size);
+}
+
+static void repair_latest_preallocated_log() {
+  char latest[32] = {};
+  if (find_latest_log_filename(latest, sizeof(latest))) {
+    Serial.printf("[SD] Checking previous log for prealloc repair: %s\n", latest);
+    storage.repairPreallocatedLog(latest);
+  }
 }
 
 static bool wait_for_boot_wifi_request() {
@@ -1546,10 +1685,9 @@ void setup() {
   // ─────────────────────────────────────────────────────────────────────────
 
   // ── EARLY SD MOUNT — reads /wifi_config.txt before WiFi setup ────────────
-  // SPI is initialized here once. Full logging setup (file creation, queue,
-  // task) happens later after calibration.
-  SPI.begin(SCK_PIN, MISO_PIN, MOSI_PIN, CS_PIN);
-  if (SD.begin(CS_PIN, SPI, SD_SPI_HZ)) {
+  // StorageManager owns the selected backend mount (SD.h or SdFat). Full
+  // logging setup (file creation, queue, task) happens later after calibration.
+  if (storage.begin()) {
     sd_mounted = true;
     load_wifi_config(); // populates wifi_networks[], cfg_mqtt_*, mqtt_enabled
   } else {
@@ -1582,7 +1720,7 @@ void setup() {
   if (mqtt_enabled) {
     mqttClient.setServer(cfg_mqtt_broker, cfg_mqtt_port);
     mqttClient.setKeepAlive(60);
-    mqttClient.setBufferSize(768);
+    mqttClient.setBufferSize(1536);
   }
 
   if (wifi_enabled && mqtt_enabled) {
@@ -1596,9 +1734,9 @@ void setup() {
   }
 
   // ── SETUP LOGGING SD ─────────────────────────────────────────────────────
-  // SPI already initialized during early boot. If early mount succeeded
+  // Storage backend already initialized during early boot. If early mount succeeded
   // (sd_mounted = true), skip health gate and go straight to logging setup.
-  if (!sd_mounted && !SD.begin(CS_PIN, SPI, SD_SPI_HZ)) {
+  if (!sd_mounted && !storage.begin()) {
     Serial.println("[ERR] SD Card not found or defective!");
     // ── SD HEALTH GATE (v0.9.10) ──────────────────────────────────────────
     // Fixed red screen + retry every 2 s. Blocks calibration and task start
@@ -1615,8 +1753,8 @@ void setup() {
 
     while (!sd_mounted && !sd_bypass) {
       // Retry mount every 2 s (dirty contacts → reinsert → recovers)
-      SD.end();
-    if (SD.begin(CS_PIN, SPI, SD_SPI_HZ)) {
+      storage.end();
+      if (storage.begin()) {
         Serial.println("[SD] Card detected after retry!");
         sd_mounted = true;
         break;
@@ -1625,7 +1763,7 @@ void setup() {
       // Button polling for bypass (double-click) — 2 s in 50 ms steps.
       // Bypass triggers immediately on second click (no post-click wait).
       // Single-click timeout extended to 600 ms (12 × 50 ms) to absorb
-      // the dead time caused by the blocking SD.begin() call above.
+      // the dead time caused by the blocking storage.begin() call above.
       for (int i = 0; i < 40 && !sd_bypass && !sd_mounted; i++) {
         M5.update();
         if (M5.BtnA.wasPressed()) {
@@ -1638,7 +1776,7 @@ void setup() {
         }
         if (sd_click_count > 0) {
           sd_click_release++;
-          // 600 ms window (12 × 50 ms) — extra margin for SD.begin() dead time
+          // 600 ms window (12 × 50 ms) — extra margin for storage.begin() dead time
           if (sd_click_release > 12) {
             sd_click_count = 0;
             sd_click_release = 0;
@@ -1667,12 +1805,17 @@ void setup() {
     // One-time check at boot: if free space < 50 MB, yellow warning screen
     // for 3 s + serial warning. The MQTT warning is sent after connection
     // (see sd_low_space flag).
-    uint64_t sd_total = SD.totalBytes();
-    uint64_t sd_used  = SD.usedBytes();
+    uint64_t sd_total = storage.totalBytes();
+    uint64_t sd_used  = storage.usedBytes();
     uint64_t sd_free  = sd_total - sd_used;
-    Serial.printf("[SD] Space: %.1f MB free / %.1f MB total\n",
-                  sd_free / 1048576.0, sd_total / 1048576.0);
-    if (sd_free < 50ULL * 1024 * 1024) {
+    if (sd_total > 0) {
+      Serial.printf("[SD] Space: %.1f MB free / %.1f MB total\n",
+                    sd_free / 1048576.0, sd_total / 1048576.0);
+    } else {
+      Serial.printf("[SD] Space: unavailable via %s backend\n",
+                    storage.backendName());
+    }
+    if (sd_total > 0 && sd_free < 50ULL * 1024 * 1024) {
       Serial.println("[SD] WARNING: free space < 50 MB!");
       fillScreen(0xFFE000);  // yellow
       setLabel(10, "SD ALMOST FULL!", BLACK, (uint16_t)0xFFE000);
@@ -1694,82 +1837,34 @@ void setup() {
     }
     // ─────────────────────────────────────────────────────────────────────
 
-    int idx = 0;
-    while (true) {
-      snprintf(current_log_filename, sizeof(current_log_filename), "/tel_%d.bin", idx);
-      if (!SD.exists(current_log_filename))
-        break;
-      idx++;
-    }
+    setLabel(10, "SD setup...");
+    setLabel(30, "Preparing log");
+    repair_latest_preallocated_log();
 
-    File newFile = SD.open(current_log_filename, FILE_WRITE);
-    if (newFile) {
-      // Write FileHeader as the first block of the .bin file.
-      // The Python converter detects the "TEL" magic and uses record_size
-      // from the header to parse subsequent records.
+    if (!create_next_log_segment(current_log_filename, sizeof(current_log_filename))) {
+      Serial.println("[ERR] Failed to create initial binary log file!");
+    } else {
+      Serial.printf("[OK] SD binary file: %s (header %dB + %d bytes/record)\n",
+                    current_log_filename,
 #ifdef USE_BMI270
-      FileHeaderV6 hdr = {};
-      fill_base_file_header(hdr.base, 6); // v6: 256 B startup diagnostics header
-      hdr.header_size = sizeof(FileHeaderV6);
-      hdr.data_offset = sizeof(FileHeaderV6);
-      hdr.endian_marker = TELEMETRY_ENDIAN_MARKER;
-      hdr.build_flags = FILE_HEADER_V6_FLAG_USE_BMI270;
-#ifdef BOARD_HAS_PSRAM
-      hdr.build_flags |= FILE_HEADER_V6_FLAG_BOARD_HAS_PSRAM;
-#endif
-#ifdef BMM150_USE_FLOATING_POINT
-      hdr.build_flags |= FILE_HEADER_V6_FLAG_BMM150_FLOAT;
-#endif
-      hdr.sd_spi_hz = SD_SPI_HZ;
-      hdr.imu_i2c_hz = ATOMS3R_IMU_I2C_FREQ;
-      hdr.sd_queue_depth = SD_QUEUE_DEPTH;
-      hdr.imu_queue_depth = IMU_QUEUE_DEPTH;
-      hdr.sd_flush_every = SD_FLUSH_EVERY;
-      hdr.record_magic_offset = offsetof(TelemetryRecord, record_magic);
-      hdr.record_crc_offset = offsetof(TelemetryRecord, crc16);
-      hdr.reset_reason_cpu0 = (uint8_t)esp_reset_reason();
-      hdr.reset_reason_cpu1 = 0;
-      hdr.board_id = FILE_HEADER_BOARD_ATOMS3R;
-      hdr.imu_id = FILE_HEADER_IMU_BMI270;
-      hdr.mag_id = FILE_HEADER_MAG_BMM150;
-      hdr.gps_enabled = 1;
-      strncpy(hdr.log_filename, current_log_filename, sizeof(hdr.log_filename) - 1);
-      imuProvider.fillStartupDiagnostics(hdr.bmi_cfg_regs, sizeof(hdr.bmi_cfg_regs),
-                                         hdr.bmm_cfg_regs, sizeof(hdr.bmm_cfg_regs),
-                                         hdr.bmi_chip_id, hdr.bmm_chip_id);
-      hdr.header_crc16 = 0;
-      hdr.header_crc16 = telemetry_crc16_ccitt((const uint8_t *)&hdr, sizeof(hdr));
+                    (int)sizeof(FileHeaderV6),
 #else
-      FileHeader hdr = {};
-      fill_base_file_header(hdr, 3); // v3: adds boot calibration params for SITL
+                    (int)sizeof(FileHeader),
 #endif
-      const size_t header_size = sizeof(hdr);
-      const bool hdr_ok = write_all_file(newFile, (const uint8_t *)&hdr, header_size);
-      newFile.flush();
-      newFile.close();
-      if (!hdr_ok) {
-        Serial.printf("[ERR] SD header short write: expected %u bytes\n",
-                      (unsigned)header_size);
+                    (int)sizeof(TelemetryRecord));
+      sd_queue = xQueueCreate(SD_QUEUE_DEPTH, sizeof(TelemetryRecord));
+      if (!sd_queue) {
+        Serial.println("[ERR] SD queue allocation failed!");
       } else {
-        Serial.printf("[OK] SD binary file: %s (header %dB + %d bytes/record)\n",
-                      current_log_filename, (int)header_size,
-                      (int)sizeof(TelemetryRecord));
-        sd_queue = xQueueCreate(SD_QUEUE_DEPTH, sizeof(TelemetryRecord));
-        if (!sd_queue) {
-          Serial.println("[ERR] SD queue allocation failed!");
-        } else {
-          BaseType_t rc = xTaskCreatePinnedToCore(
-              Task_SD_Writer, "Task_SD", SD_TASK_STACK, NULL, 1,
-              &TaskSDHandle, 1);
-          if (rc != pdPASS) {
-            Serial.println("[ERR] Task_SD_Writer creation failed!");
-            vQueueDelete(sd_queue);
-            sd_queue = NULL;
-          }
+        BaseType_t rc = xTaskCreatePinnedToCore(
+            Task_SD_Writer, "Task_SD", SD_TASK_STACK, NULL, 1,
+            &TaskSDHandle, 1);
+        if (rc != pdPASS) {
+          Serial.println("[ERR] Task_SD_Writer creation failed!");
+          vQueueDelete(sd_queue);
+          sd_queue = NULL;
         }
       }
-    } else {
-      Serial.println("[ERR] Failed to create initial binary log file!");
     }
   }
   // ─────────────────────────────────────────────────────────────────────────
@@ -2068,6 +2163,13 @@ void loop() {
                  "\"sd_overreports\":%u,\"sd_write_zeros\":%u,\"sd_write_recovered\":%u,"
                  "\"sd_last_stall_seq\":%u,\"sd_last_written_seq\":%u,"
                  "\"sd_size_mismatches\":%u,\"sd_last_file_size\":%u,"
+                 "\"sd_backend\":%u,\"sd_syncs\":%u,\"sd_sync_worst_ms\":%u,"
+                 "\"sd_prealloc_bytes\":%u,\"sd_truncate_ok\":%s,"
+                 "\"sd_rollovers\":%u,\"sd_rollover_worst_ms\":%u,"
+                 "\"sd_preallocs\":%u,\"sd_prealloc_worst_ms\":%u,"
+                 "\"sd_boot_repairs\":%u,\"sd_boot_repair_bytes\":%u,"
+                 "\"sd_boot_repair_worst_ms\":%u,"
+                 "\"sd_segment_bytes\":%u,\"sd_segment_capacity\":%u,"
                  "\"sd_enqueue_fails\":%u,\"imu_queue_drops\":%u,\"gps_mutex_timeouts\":%u,"
                  "\"stk_filter\":%u,\"stk_i2c\":%u,\"stk_sd\":%u}",
                  (unsigned)sd_records_written.load(),
@@ -2089,6 +2191,20 @@ void loop() {
                  (unsigned)sd_last_written_seq.load(),
                  (unsigned)sd_size_mismatch_count.load(),
                  (unsigned)sd_last_file_size.load(),
+                 (unsigned)sd_backend_id.load(),
+                 (unsigned)sd_sync_count.load(),
+                 (unsigned)(sd_sync_worst_us.load() / 1000),
+                 (unsigned)sd_prealloc_bytes.load(),
+                 sd_truncate_ok.load() ? "true" : "false",
+                 (unsigned)sd_rollover_count.load(),
+                 (unsigned)sd_rollover_worst_ms.load(),
+                 (unsigned)sd_prealloc_count.load(),
+                 (unsigned)sd_prealloc_worst_ms.load(),
+                 (unsigned)sd_boot_repair_count.load(),
+                 (unsigned)sd_boot_repair_truncated_bytes.load(),
+                 (unsigned)sd_boot_repair_worst_ms.load(),
+                 (unsigned)sd_current_segment_bytes.load(),
+                 (unsigned)sd_current_segment_capacity.load(),
                  (unsigned)sd_enqueue_fail_count.load(),
                  (unsigned)imu_queue_drop_count.load(),
                  (unsigned)gps_mutex_timeout_count.load(),
