@@ -194,8 +194,11 @@ def _read_csv_source(path: Path) -> tuple[dict[str, np.ndarray], dict[str, Any]]
 
 
 def _read_bin_source(path: Path) -> tuple[dict[str, np.ndarray], dict[str, Any]]:
-    hdr, offset = bin_to_csv.read_file_header(str(path))
-    record_size = hdr["record_size"] if hdr else bin_to_csv.CHUNK_SIZE_DEFAULT
+    layout = bin_to_csv.bin_logical_layout(str(path), quiet=True)
+    hdr = layout["hdr"]
+    offset = layout["offset"]
+    record_size = layout["chunk_size"]
+    logical_end = layout["logical_end"]
     fmt, header_cols, _ = bin_to_csv.get_format(
         record_size, hdr.get("header_version") if hdr else None
     )
@@ -211,6 +214,8 @@ def _read_bin_source(path: Path) -> tuple[dict[str, np.ndarray], dict[str, Any]]
         f.seek(offset)
         while True:
             record_pos = f.tell()
+            if record_pos >= logical_end:
+                break
             chunk = f.read(record_size)
             if len(chunk) < record_size:
                 break
@@ -239,6 +244,9 @@ def _read_bin_source(path: Path) -> tuple[dict[str, np.ndarray], dict[str, Any]]
         "firmware_version": hdr.get("firmware_version") if hdr else "legacy",
         "record_size": record_size,
         "header_version": hdr.get("header_version") if hdr else None,
+        "logical_end": logical_end,
+        "tail_bytes": layout.get("tail_bytes", 0),
+        "valid_records": layout.get("valid_records"),
         "resync_count": resync_count,
         "skipped_records": skipped_records,
         "records_read": rows,

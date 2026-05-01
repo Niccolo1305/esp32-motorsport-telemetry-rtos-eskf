@@ -55,7 +55,7 @@ Modalita: **solo ascolto, zero trasmissioni, zero rischi per il veicolo.**
 
 ### Preparazione firmware sniffer
 
-1. Aprire `Tool/can_bus/sniffer_fw/main.cpp`
+1. Aprire `tools/can_bus/sniffer_fw/main.cpp`
 2. Verificare i GPIO CAN TX/RX — dipendono da quale porta del Hub Grove viene usata:
    - Se il GPS occupa GPIO 1/2, il CAN deve usare un'altra coppia
    - Modificare `CAN_TX_PIN` e `CAN_RX_PIN` di conseguenza
@@ -116,7 +116,7 @@ pio device monitor | tee sessione_X.csv
 
 1. Analisi automatica con statistiche e identificazione euristica:
    ```
-   cd Tool/can_bus
+   cd tools/can_bus
    python can_log_analyzer.py sessione_2.csv
    python can_log_analyzer.py sessione_4.csv --plot
    ```
@@ -156,7 +156,7 @@ Se hai catturato una sessione di telemetria (SD log) nello stesso momento del CA
    ```
 2. Lanciare la correlazione incrociata:
    ```
-   cd Tool/can_bus
+   cd tools/can_bus
    python can_signal_correlator.py sessione_5.csv ../output.csv
    python can_signal_correlator.py sessione_5.csv ../output.csv --target-id 0x180
    python can_signal_correlator.py sessione_5.csv ../output.csv --plot
@@ -175,7 +175,7 @@ Per ogni segnale identificato, verificare che soddisfi tutti i criteri:
 
 ### Aggiornamento CAN ID
 
-Una volta validati i CAN ID reali del tuo veicolo specifico, aggiornare le costanti in `Tool/can_bus/firmware/can_decode.h`:
+Una volta validati i CAN ID reali del tuo veicolo specifico, aggiornare le costanti in `tools/can_bus/firmware/can_decode.h`:
 ```cpp
 static constexpr uint32_t CAN_ID_RPM           = 0x???;  // il tuo ID verificato
 static constexpr uint32_t CAN_ID_WHEELS_FRONT  = 0x???;
@@ -212,7 +212,7 @@ Fare solo a veicolo fermo, motore acceso, dopo aver completato le Fasi 1-2.
 ### Analisi offline dei PID
 
 ```
-cd Tool/can_bus
+cd tools/can_bus
 python obd2_pid_decoder.py --logfile obd2_discovery.log
 python obd2_pid_decoder.py --database
 ```
@@ -225,11 +225,11 @@ Obiettivo: aggiungere Task_CAN al firmware di telemetria principale.
 
 ### File da copiare in `src/`
 
-1. Copiare i 3 file da `Tool/can_bus/firmware/` nella cartella `src/`:
+1. Copiare i 3 file da `tools/can_bus/firmware/` nella cartella `src/`:
    ```
-   cp Tool/can_bus/firmware/can_task.h   src/
-   cp Tool/can_bus/firmware/can_task.cpp src/
-   cp Tool/can_bus/firmware/can_decode.h src/
+   cp tools/can_bus/firmware/can_task.h   src/
+   cp tools/can_bus/firmware/can_task.cpp src/
+   cp tools/can_bus/firmware/can_decode.h src/
    ```
 
 ### Modifiche a `src/config.h`
@@ -308,7 +308,7 @@ Obiettivo: aggiungere Task_CAN al firmware di telemetria principale.
 Dopo aver raccolto sessioni con dati CAN integrati nel log:
 
 ```
-cd Tool/can_bus
+cd tools/can_bus
 python can_vehicle_dynamics.py ../output_con_can.csv --plot
 python can_vehicle_dynamics.py ../output_con_can.csv --output dynamics.csv
 ```
