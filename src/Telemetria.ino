@@ -1415,6 +1415,22 @@
 //     filtered speed derivative and correlates against lag-compensated IMU
 //     samples, reducing false yaw estimates from GPS/IMU timing offset.
 //
+// v1.8.5 - Fast SD Prealloc Boot Repair
+//   - [SD] Fixed long cold-boot delay in "SD setup..." caused by linear repair
+//     scan of the previous 128 MiB preallocated log. The repair now binary-
+//     searches the contiguous valid-record prefix and truncates at the first
+//     invalid record, preserving the same CRC/magic safety rule with O(log n)
+//     reads instead of one seek+read per record.
+//   - [DIAG] Repair logs now print checked record count and elapsed milliseconds
+//     when a truncate happens, report slow no-op checks above 250 ms, and print
+//     total SD setup elapsed time at boot.
+//
+// v1.8.6 - GPS Cold-Start Decoupled from Telemetry Boot
+//   - [BOOT] GPS UART init and Task_GPS creation moved before SD logging setup.
+//     Cold GNSS acquisition now runs in parallel with calibration/SD preparation
+//     instead of starting after the "SD setup..." phase. Telemetry task creation
+//     no longer waits for GPS to reach first valid fix.
+//
 // --- TODO (deferred to v1.9.0 CAN format bump) ---
 //   - [TODO] Add CAN bus task (Core 0) for RPM, throttle, wheel speeds (×4),
 //     engine temp, steering angle. CanData struct + can_mutex pattern, mirroring
@@ -1716,6 +1732,36 @@ void setup() {
   // ── EARLY SD MOUNT — reads /wifi_config.txt before WiFi setup ────────────
   // StorageManager owns the selected backend mount (SD.h or SdFat). Full
   // logging setup (file creation, queue, task) happens later after calibration.
+  // GPS cold acquisition must run in parallel with SD setup and calibration.
+  // Keeping Task_GPS late made boot look blocked on "SD setup..." until the
+  // first valid fix on cold starts, even though there was no explicit GPS gate.
+  gps_mutex = xSemaphoreCreateMutex();
+  if (gps_mutex == NULL) {
+    Serial.println("[ERR] GPS mutex allocation failed!");
+    setLabel(10, "FreeRTOS Memory");
+    setLabel(30, "GPS Mutex Fail");
+    while (true)
+      vTaskDelay(pdMS_TO_TICKS(100));
+  }
+
+  const uint32_t gps_boot_t0_ms = millis();
+  setLabel(30, "GPS: init...");
+  gpsWrapper.begin();
+  setLabel(30, "");
+  BaseType_t task_gps_rc = xTaskCreatePinnedToCore(
+      Task_GPS, "GPS", 4096, &gpsWrapper, 2, &TaskGPSHandle, 0);
+  if (task_gps_rc != pdPASS) {
+    Serial.printf("[ERR] Task_GPS creation failed: GPS=%ld\n",
+                  (long)task_gps_rc);
+    setLabel(10, "Task Create");
+    setLabel(30, "GPS Failed!");
+    while (true)
+      vTaskDelay(pdMS_TO_TICKS(1000));
+  }
+  Serial.printf("[BOOT] GPS task started at %lu ms (init %lu ms).\n",
+                (unsigned long)millis(),
+                (unsigned long)(millis() - gps_boot_t0_ms));
+
   if (storage.begin()) {
     sd_mounted = true;
     load_wifi_config(); // populates wifi_networks[], cfg_mqtt_*, mqtt_enabled
@@ -1868,6 +1914,7 @@ void setup() {
 
     setLabel(10, "SD setup...");
     setLabel(30, "Preparing log");
+    const uint32_t sd_setup_t0_ms = millis();
     repair_latest_preallocated_log();
 
     if (!create_next_log_segment(current_log_filename, sizeof(current_log_filename))) {
@@ -1895,28 +1942,14 @@ void setup() {
         }
       }
     }
+    Serial.printf("[BOOT] SD setup elapsed: %lu ms.\n",
+                  (unsigned long)(millis() - sd_setup_t0_ms));
   }
   // ─────────────────────────────────────────────────────────────────────────
 
   // ── GPS SETUP ─────────────────────────────────────────────────────────────
-  // Hardware init is delegated to SerialGpsWrapper::begin():
-  //   - UART1 on Grove pins (RX=1, TX=2), 115200 baud, RX buffer 2048 B
-  //   - UART overflow ISR callback (atomic counter)
-  //   - 500 ms AT6668 startup delay
-  //   - CASIC $PCAS02,100 command to set 10 Hz update rate
-  //   - $PCAS03 sentence selection (GGA/RMC/DHV only)
-  //   - passive CASIC listener only in the clean production build
-  gps_mutex = xSemaphoreCreateMutex();
-  if (gps_mutex == NULL) {
-    Serial.println("[ERR] GPS mutex allocation failed!");
-    setLabel(10, "FreeRTOS Memory");
-    setLabel(30, "GPS Mutex Fail");
-    while (true)
-      vTaskDelay(pdMS_TO_TICKS(100));
-  }
-  setLabel(30, "GPS: init...");
-  gpsWrapper.begin();
-  setLabel(30, "");
+  // GPS UART and Task_GPS are started earlier, before SD setup, so cold fix
+  // acquisition cannot hold back telemetry boot.
   // ─────────────────────────────────────────────────────────────────────────
 
   BaseType_t task_i2c_rc = xTaskCreatePinnedToCore(
@@ -1926,19 +1959,16 @@ void setup() {
   // Increased from 12288 to 16384 to prevent stack overflow at ~570 s (v0.9.12).
   BaseType_t task_filter_rc = xTaskCreatePinnedToCore(
       Task_Filter, "Filter", 16384, NULL, 2, &TaskFilterHandle, 1);
-  // Task_GPS on Core 0 alongside Task_I2C: both lightweight, no contention.
-  // Priority 2: below Task_I2C (3) — IMU timing is never disturbed.
-  // gpsWrapper is passed as pvParameters so Task_GPS is hardware-agnostic (IGpsProvider*).
-  BaseType_t task_gps_rc = xTaskCreatePinnedToCore(
-      Task_GPS, "GPS", 4096, &gpsWrapper, 2, &TaskGPSHandle, 0);
-  if (task_i2c_rc != pdPASS || task_filter_rc != pdPASS || task_gps_rc != pdPASS) {
-    Serial.printf("[ERR] Task creation failed: I2C=%ld Filter=%ld GPS=%ld\n",
-                  (long)task_i2c_rc, (long)task_filter_rc, (long)task_gps_rc);
+  if (task_i2c_rc != pdPASS || task_filter_rc != pdPASS) {
+    Serial.printf("[ERR] Task creation failed: I2C=%ld Filter=%ld\n",
+                  (long)task_i2c_rc, (long)task_filter_rc);
     setLabel(10, "Task Create");
     setLabel(30, "Failed!");
     while (true)
       vTaskDelay(pdMS_TO_TICKS(1000));
   }
+  Serial.printf("[BOOT] IMU/filter tasks started at %lu ms.\n",
+                (unsigned long)millis());
 }
 
 // ==========================================================

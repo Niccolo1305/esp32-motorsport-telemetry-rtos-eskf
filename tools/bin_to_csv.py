@@ -367,10 +367,31 @@ def ask_float(prompt, default=None, minimum=0.1):
 
 
 def find_input_file():
-    """Search for .bin and .csv files in the current directory."""
-    bins = sorted([f for f in os.listdir('.') if f.endswith('.bin')])
-    csvs = sorted([f for f in os.listdir('.') if f.endswith('.csv')
-                   and os.path.getsize(f) > 1_000_000])  # only CSV >1MB
+    """Search for .bin and .csv files in the current directory.
+
+    Keep this menu pass intentionally cheap. Older versions called
+    bin_record_count() for every .bin found, which could scan large/preallocated
+    logs just to print the selection list.
+    """
+    bins = []
+    csvs = []
+    with os.scandir('.') as entries:
+        for entry in entries:
+            if not entry.is_file():
+                continue
+            ext = os.path.splitext(entry.name)[1].lower()
+            if ext not in ('.bin', '.csv'):
+                continue
+            try:
+                size = entry.stat().st_size
+            except OSError:
+                continue
+            if ext == '.bin':
+                bins.append((entry.name, size))
+            elif size > 1_000_000:  # only CSV >1MB
+                csvs.append((entry.name, size))
+    bins.sort(key=lambda item: item[0].lower())
+    csvs.sort(key=lambda item: item[0].lower())
 
     if not bins and not csvs:
         print(f"  {RED}No .bin or .csv files found in the current directory.{RESET}")
@@ -382,17 +403,22 @@ def find_input_file():
 
     print(f"  {BOLD}Files found:{RESET}")
     options = []
-    for f in bins:
-        size_mb = os.path.getsize(f) / (1024 * 1024)
-        n_records = bin_record_count(f)
+    prealloc_seen = False
+    for f, size in bins:
+        size_mb = size / (1024 * 1024)
+        records_text, detail_text, is_prealloc = describe_bin_for_menu(f, size)
+        prealloc_seen = prealloc_seen or is_prealloc
         options.append(f)
         print(f"    {GREEN}{len(options)}.{RESET} {f}  "
-              f"{DIM}({size_mb:.1f} MB, ~{n_records:,} records, binary){RESET}")
-    for f in csvs:
-        size_mb = os.path.getsize(f) / (1024 * 1024)
+              f"{DIM}({size_mb:.1f} MB, {records_text}, {detail_text}){RESET}")
+    for f, size in csvs:
+        size_mb = size / (1024 * 1024)
         options.append(f)
         print(f"    {GREEN}{len(options)}.{RESET} {f}  "
               f"{DIM}({size_mb:.1f} MB, CSV){RESET}")
+    if prealloc_seen:
+        print(f"  {DIM}Preallocated .bin counts are size-based in this menu; "
+              f"exact valid rows are computed only after selection.{RESET}")
     print()
 
     if len(options) == 1:
@@ -541,6 +567,35 @@ def read_file_header(bin_path):
         if v6_extension is not None:
             result['v6'] = v6_extension
         return result, hdr_size
+
+
+def describe_bin_for_menu(bin_path, size_bytes):
+    """Return cheap display metadata for the interactive file picker."""
+    try:
+        hdr, offset = read_file_header(bin_path)
+    except (OSError, struct.error, ValueError):
+        hdr, offset = None, 0
+
+    record_size = hdr.get('record_size') if hdr else CHUNK_SIZE_DEFAULT
+    if not record_size:
+        record_size = CHUNK_SIZE_DEFAULT
+    max_records = max(0, size_bytes - offset) // record_size
+    is_prealloc = _is_preallocated_log(hdr)
+
+    if is_prealloc:
+        records_text = f"prealloc <= {max_records:,} records"
+    else:
+        records_text = f"~{max_records:,} records"
+
+    if hdr:
+        detail_text = (
+            f"binary, {hdr.get('firmware_version', 'unknown fw')}, "
+            f"{record_size}B rec, header_v{hdr.get('header_version', '?')}"
+        )
+    else:
+        detail_text = f"binary, legacy/default {record_size}B rec"
+
+    return records_text, detail_text, is_prealloc
 
 
 def open_text_read(path):
@@ -901,12 +956,28 @@ def _is_preallocated_log(hdr):
     )
 
 
+def _tail_is_all_zero(fobj, start_pos, chunk_bytes=1024 * 1024):
+    """Return True only if the remaining file tail is entirely preallocated zeros."""
+    fobj.seek(start_pos)
+    zero_chunk = b'\x00' * chunk_bytes
+    while True:
+        chunk = fobj.read(chunk_bytes)
+        if not chunk:
+            return True
+        # Do not allocate/read the whole preallocated tail at once. A single
+        # non-zero byte means this may be real corruption or later valid data,
+        # so the caller must keep the physical file size.
+        expected = zero_chunk if len(chunk) == chunk_bytes else b'\x00' * len(chunk)
+        if chunk != expected:
+            return False
+
+
 def _scan_preallocated_logical_end(bin_path, hdr, offset, chunk_size, fmt, fields):
     """Return (logical_end, valid_records, tail_bytes) for v6 preallocated logs.
 
     The scan stops at the first invalid magic/CRC/plausibility record. It treats
-    the remaining bytes as preallocated tail only if there is no later TEL6 magic
-    and all remaining bytes are zero. That avoids hiding real mid-file corruption.
+    the remaining bytes as preallocated tail only if every byte after that point
+    is zero. That avoids hiding real mid-file corruption or later valid records.
     """
     if not _is_preallocated_log(hdr):
         size = os.path.getsize(bin_path)
@@ -917,7 +988,6 @@ def _scan_preallocated_logical_end(bin_path, hdr, offset, chunk_size, fmt, field
     valid_records = 0
     prev_ts_us = None
     invalid_pos = None
-    magic_bytes = struct.pack('<I', RECORD_MAGIC_256_V6)
 
     with open(bin_path, 'rb') as f:
         f.seek(offset)
@@ -939,9 +1009,7 @@ def _scan_preallocated_logical_end(bin_path, hdr, offset, chunk_size, fmt, field
         if invalid_pos is None or invalid_pos >= file_size:
             return file_size, valid_records, 0
 
-        f.seek(invalid_pos)
-        tail = f.read()
-        if tail and all(b == 0 for b in tail) and tail.find(magic_bytes) < 0:
+        if invalid_pos < file_size and _tail_is_all_zero(f, invalid_pos):
             logical_end = invalid_pos
             return logical_end, valid_records, file_size - logical_end
 
@@ -981,13 +1049,16 @@ def repair_bin_preallocated_tail(bin_path):
     return True
 
 
-def bin_record_count(bin_path):
-    return bin_logical_layout(bin_path, quiet=True)['valid_records']
+def bin_record_count(bin_path, layout=None):
+    if layout is None:
+        layout = bin_logical_layout(bin_path, quiet=True)
+    return layout['valid_records']
 
 
-def bin_to_csv_lines(bin_path, total=None):
+def bin_to_csv_lines(bin_path, total=None, layout=None):
     """Yield CSV rows from a binary telemetry file (with or without FileHeader)."""
-    layout = bin_logical_layout(bin_path)
+    if layout is None:
+        layout = bin_logical_layout(bin_path)
     hdr = layout['hdr']
     offset = layout['offset']
     chunk_size = layout['chunk_size']
@@ -1292,8 +1363,9 @@ def main():
             HEADER_LINE = ','.join(hdr_cols) + '\n'
             CSV_PREAMBLE_LINES = build_csv_preamble_lines(hdr)
         print(f"  Direct conversion: {bin_file} → {csv_file}")
-        total = bin_record_count(bin_file)
-        no_split(bin_to_csv_lines(bin_file, total), csv_file)
+        layout = bin_logical_layout(bin_file)
+        total = bin_record_count(bin_file, layout)
+        no_split(bin_to_csv_lines(bin_file, total, layout), csv_file)
         return
 
     if len(args) == 1:
@@ -1325,12 +1397,14 @@ def main():
             print(f"  {DIM}Legacy file (no header) — record_size={CHUNK_SIZE_DEFAULT}B{RESET}")
             CSV_PREAMBLE_LINES = []
 
-        total_lines = bin_record_count(input_file)
+        layout = bin_logical_layout(input_file)
+        total_lines = bin_record_count(input_file, layout)
         # Estimate CSV size: updated dynamically from the first record
         bytes_per_row_est = len(HEADER_LINE) * 0 + 150  # base heuristic
+        est_csv_mb = (total_lines * bytes_per_row_est) / (1024 * 1024)
 
         # Sample one row for a better estimate
-        for sample_line in bin_to_csv_lines(input_file, None):
+        for sample_line in bin_to_csv_lines(input_file, None, layout):
             bytes_per_row_est = len(sample_line.encode('utf-8')) + 1
             est_csv_mb = (total_lines * bytes_per_row_est) / (1024 * 1024)
             break
@@ -1340,7 +1414,7 @@ def main():
               f"{total_lines:,} records, ~{est_csv_mb:.1f} MB as CSV{RESET}")
 
         def gen_factory():
-            return bin_to_csv_lines(input_file, total_lines)
+            return bin_to_csv_lines(input_file, total_lines, layout)
 
         split_menu(gen_factory, base, total_lines, est_csv_mb)
 

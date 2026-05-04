@@ -619,25 +619,57 @@ bool StorageManager::repairPreallocatedLog(const char *path) {
     return false;
   }
 
-  uint32_t valid_size = hdr.data_offset;
-  uint32_t pos = hdr.data_offset;
-  TelemetryRecord rec = {};
-  while ((uint64_t)pos + sizeof(TelemetryRecord) <= physical_size64) {
+  auto record_valid_at = [&f](uint32_t pos) -> bool {
+    TelemetryRecord rec = {};
     if (!f.seekSet(pos) || f.read(&rec, sizeof(rec)) != (int)sizeof(rec)) {
-      break;
+      return false;
     }
     const uint16_t stored_crc = rec.crc16;
     rec.crc16 = 0;
-    const bool record_ok =
-        rec.record_magic == TELEMETRY_RECORD_MAGIC &&
-        telemetry_crc16_ccitt(reinterpret_cast<const uint8_t *>(&rec),
-                              sizeof(TelemetryRecord) - sizeof(rec.crc16)) == stored_crc;
-    if (!record_ok) {
-      break;
-    }
-    valid_size = pos + sizeof(TelemetryRecord);
-    pos = valid_size;
+    return rec.record_magic == TELEMETRY_RECORD_MAGIC &&
+           telemetry_crc16_ccitt(reinterpret_cast<const uint8_t *>(&rec),
+                                 sizeof(TelemetryRecord) - sizeof(rec.crc16)) == stored_crc;
+  };
+
+  // v1.8.5: preallocated logs contain a contiguous prefix of valid records
+  // followed by unwritten/preallocated bytes. The old linear scan did one
+  // seek+read+CRC per valid record; a 1h+ drive could make cold boot appear to
+  // spend minutes in "SD setup". Binary search finds the first invalid record
+  // in O(log n) reads while preserving the same truncation semantics.
+  const uint64_t payload_bytes =
+      physical_size64 > hdr.data_offset ? physical_size64 - hdr.data_offset : 0ULL;
+  uint64_t max_records64 = payload_bytes / sizeof(TelemetryRecord);
+  if (max_records64 > UINT32_MAX) {
+    max_records64 = UINT32_MAX;
   }
+  uint32_t lo = 0;
+  uint32_t hi = (uint32_t)max_records64;
+  while (lo < hi) {
+    const uint32_t mid = lo + (hi - lo) / 2U;
+    const uint64_t pos64 =
+        (uint64_t)hdr.data_offset + (uint64_t)mid * sizeof(TelemetryRecord);
+    if (pos64 > UINT32_MAX) {
+      hi = mid;
+      continue;
+    }
+    if (record_valid_at((uint32_t)pos64)) {
+      lo = mid + 1U;
+    } else {
+      hi = mid;
+    }
+  }
+
+  const uint64_t valid_size64 =
+      (uint64_t)hdr.data_offset + (uint64_t)lo * sizeof(TelemetryRecord);
+  const uint32_t valid_size = valid_size64 > UINT32_MAX
+      ? UINT32_MAX
+      : (uint32_t)valid_size64;
+
+  const uint64_t repair_dt_ms64 = (esp_timer_get_time() - t0) / 1000ULL;
+  const uint32_t repair_dt_ms = repair_dt_ms64 > UINT32_MAX
+      ? UINT32_MAX
+      : (uint32_t)repair_dt_ms64;
+  update_worst_atomic(sd_boot_repair_worst_ms, repair_dt_ms);
 
   if ((uint64_t)valid_size < physical_size64) {
     const uint64_t truncated64 = physical_size64 - valid_size;
@@ -650,13 +682,17 @@ bool StorageManager::repairPreallocatedLog(const char *path) {
         ? UINT32_MAX
         : (uint32_t)truncated64;
     sd_boot_repair_truncated_bytes.fetch_add(truncated, std::memory_order_relaxed);
-    const uint64_t dt_ms64 = (esp_timer_get_time() - t0) / 1000ULL;
-    const uint32_t dt_ms = dt_ms64 > UINT32_MAX ? UINT32_MAX : (uint32_t)dt_ms64;
-    update_worst_atomic(sd_boot_repair_worst_ms, dt_ms);
-    Serial.printf("[SD] Repaired preallocated log %s: truncated %lu byte(s), valid_size=%lu.\n",
+    Serial.printf("[SD] Repaired preallocated log %s: truncated %lu byte(s), valid_size=%lu, checked=%lu records in %lu ms.\n",
                   path,
                   (unsigned long)truncated,
-                  (unsigned long)valid_size);
+                  (unsigned long)valid_size,
+                  (unsigned long)max_records64,
+                  (unsigned long)repair_dt_ms);
+  } else if (repair_dt_ms > 250U) {
+    Serial.printf("[SD] Prealloc repair check %s: %lu records, no truncate, %lu ms.\n",
+                  path,
+                  (unsigned long)max_records64,
+                  (unsigned long)repair_dt_ms);
   }
 
   f.close();
