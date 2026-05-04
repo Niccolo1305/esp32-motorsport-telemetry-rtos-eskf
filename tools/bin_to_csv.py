@@ -32,6 +32,8 @@ HEADER_V2_SIZE = 26               # v2: record_size is uint16_t (26 bytes)
 HEADER_V3_SIZE = 66               # v3/v4: adds 40 bytes of calibration params
 HEADER_V5_SIZE = 80               # v5: adds header_flags + mag_ref_ut_xyz
 SENTINEL_CALIB = 0xFFFFFFFFFFFFFFFF  # uint64 max — CalibrationRecord marker
+SENTINEL_MOUNT_YAW_OBS = 0xFFFFFFFFFFFFFFFE  # uint64 max-1 — Mount-yaw observation marker
+SENTINEL_MOUNT_YAW_BOOT = 0xFFFFFFFFFFFFFFFD  # uint64 max-2 — Applied mount-yaw boot marker
 PROGRESS_EVERY = 5000
 TEXT_ENCODING_WRITE = 'utf-8-sig'
 TEXT_ENCODINGS_READ = ('utf-8-sig', 'utf-8', 'latin1')
@@ -687,6 +689,82 @@ def _record_seq(vals, fields):
     return int(value) if value is not None else None
 
 
+def _fmt_sentinel_float(value, digits=5):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        value = float('nan')
+    if not math.isfinite(value):
+        return "nan"
+    return f"{value:.{digits}f}"
+
+
+def _mount_yaw_obs_comment(vals, fields):
+    """Decode the v1.8.3 mount-yaw observation sentinel payload."""
+    yaw_deg = _field_value(vals, fields, 'ax')
+    quality = _field_value(vals, fields, 'ay')
+    duration_s = _field_value(vals, fields, 'az')
+    mean_speed_kmh = _field_value(vals, fields, 'gx')
+    mean_abs_acc_g = _field_value(vals, fields, 'gy')
+    rms_gz_dps = _field_value(vals, fields, 'gz')
+    rms_cog_rate_dps = _field_value(vals, fields, 'temp_c')
+    obs_id = _field_value(vals, fields, 'lap')
+    long_corr = _field_value(vals, fields, 'gps_sog_kmh')
+    lat_rms_before_g = _field_value(vals, fields, 'gps_alt_m')
+    lat_rms_after_g = _field_value(vals, fields, 'gps_hdop')
+    lat_reduction_pct = _field_value(vals, fields, 'kf_x')
+    rms_lat_expected_g = _field_value(vals, fields, 'kf_y')
+    rms_az_g = _field_value(vals, fields, 'kf_vel')
+    t_start_us = _field_value(vals, fields, 'gps_fix_us')
+    t_end_us = _field_value(vals, fields, 'nav_fix_us')
+    return (
+        "# MOUNT_YAW_OBS: "
+        f"obs_id={int(obs_id or 0)} "
+        f"yaw_deg={_fmt_sentinel_float(yaw_deg)} "
+        f"quality={_fmt_sentinel_float(quality, 3)} "
+        f"t_start_us={int(t_start_us or 0)} "
+        f"t_end_us={int(t_end_us or 0)} "
+        f"duration_s={_fmt_sentinel_float(duration_s, 3)} "
+        f"mean_speed_kmh={_fmt_sentinel_float(mean_speed_kmh, 2)} "
+        f"mean_abs_acc_g={_fmt_sentinel_float(mean_abs_acc_g, 5)} "
+        f"rms_gz_dps={_fmt_sentinel_float(rms_gz_dps, 3)} "
+        f"rms_cog_rate_dps={_fmt_sentinel_float(rms_cog_rate_dps, 3)} "
+        f"long_corr={_fmt_sentinel_float(long_corr, 3)} "
+        f"lat_rms_before_g={_fmt_sentinel_float(lat_rms_before_g, 5)} "
+        f"lat_rms_after_g={_fmt_sentinel_float(lat_rms_after_g, 5)} "
+        f"lat_reduction_pct={_fmt_sentinel_float(lat_reduction_pct, 2)} "
+        f"rms_lat_expected_g={_fmt_sentinel_float(rms_lat_expected_g, 5)} "
+        f"rms_az_g={_fmt_sentinel_float(rms_az_g, 5)}"
+    )
+
+
+def _mount_yaw_boot_comment(vals, fields):
+    """Decode the v1.8.4 accepted mount-yaw boot sentinel payload."""
+    yaw_deg = _field_value(vals, fields, 'ax')
+    consensus_std_deg = _field_value(vals, fields, 'ay')
+    obs_count = _field_value(vals, fields, 'az')
+    avg_quality = _field_value(vals, fields, 'gx')
+    avg_long_corr = _field_value(vals, fields, 'gy')
+    avg_stability_std_deg = _field_value(vals, fields, 'gz')
+    sin_yaw = _field_value(vals, fields, 'gps_sog_kmh')
+    cos_yaw = _field_value(vals, fields, 'gps_alt_m')
+    emitted_us = _field_value(vals, fields, 'gps_fix_us')
+    nav_fix_us = _field_value(vals, fields, 'nav_fix_us')
+    return (
+        "# MOUNT_YAW_BOOT: "
+        f"yaw_deg={_fmt_sentinel_float(yaw_deg)} "
+        f"consensus_std_deg={_fmt_sentinel_float(consensus_std_deg, 3)} "
+        f"obs_count={int(obs_count or 0)} "
+        f"avg_quality={_fmt_sentinel_float(avg_quality, 3)} "
+        f"avg_long_corr={_fmt_sentinel_float(avg_long_corr, 3)} "
+        f"avg_stability_std_deg={_fmt_sentinel_float(avg_stability_std_deg, 3)} "
+        f"sin_yaw={_fmt_sentinel_float(sin_yaw, 6)} "
+        f"cos_yaw={_fmt_sentinel_float(cos_yaw, 6)} "
+        f"emitted_us={int(emitted_us or 0)} "
+        f"nav_fix_us={int(nav_fix_us or 0)}"
+    )
+
+
 def _record_plausible(vals, fields, prev_ts_us=None, raw=None):
     """Heuristic guard used only to recover from byte-level SD log misalignment."""
     value = _field_value(vals, fields, 'record_magic')
@@ -699,7 +777,7 @@ def _record_plausible(vals, fields, prev_ts_us=None, raw=None):
             return False
 
     ts_us = _timestamp_us(vals, fields)
-    if ts_us == SENTINEL_CALIB:
+    if ts_us in (SENTINEL_CALIB, SENTINEL_MOUNT_YAW_OBS, SENTINEL_MOUNT_YAW_BOOT):
         return True
     if ts_us is not None:
         if not (0 <= ts_us <= MAX_TIMESTAMP_US):
@@ -807,7 +885,7 @@ def _find_resync_skip(fobj, start_pos, fmt, chunk_size, fields):
                 ok = False
                 break
             ts_us = _timestamp_us(vals, fields)
-            if ts_us is not None and ts_us != SENTINEL_CALIB:
+            if ts_us is not None and ts_us not in (SENTINEL_CALIB, SENTINEL_MOUNT_YAW_OBS, SENTINEL_MOUNT_YAW_BOOT):
                 prev_ts_us = ts_us
         if ok:
             return skip
@@ -854,7 +932,7 @@ def _scan_preallocated_logical_end(bin_path, hdr, offset, chunk_size, fmt, field
                 invalid_pos = record_pos
                 break
             ts_us = _timestamp_us(vals, fields)
-            if ts_us is not None and ts_us != SENTINEL_CALIB:
+            if ts_us is not None and ts_us not in (SENTINEL_CALIB, SENTINEL_MOUNT_YAW_OBS, SENTINEL_MOUNT_YAW_BOOT):
                 prev_ts_us = ts_us
             valid_records += 1
 
@@ -936,6 +1014,16 @@ def bin_to_csv_lines(bin_path, total=None):
             vals = struct.unpack(fmt, chunk)
             if vals[0] == SENTINEL_CALIB:   # CalibrationRecord sentinel (uint64 max)
                 yield f"# CALIB_UPDATE: sin_phi={vals[1]:.5f} cos_phi={vals[2]:.5f} sin_theta={vals[3]:.5f} cos_theta={vals[4]:.5f} bias_ax={vals[5]:.5f} bias_ay={vals[6]:.5f} bias_az={vals[7]:.5f} bias_gx={vals[11]:.5f} bias_gy={vals[12]:.5f} bias_gz={vals[14]:.5f}"
+                prev_ts_us = None
+                prev_seq = None
+                continue
+            if vals[0] == SENTINEL_MOUNT_YAW_OBS:
+                yield _mount_yaw_obs_comment(vals, fields)
+                prev_ts_us = None
+                prev_seq = None
+                continue
+            if vals[0] == SENTINEL_MOUNT_YAW_BOOT:
+                yield _mount_yaw_boot_comment(vals, fields)
                 prev_ts_us = None
                 prev_seq = None
                 continue

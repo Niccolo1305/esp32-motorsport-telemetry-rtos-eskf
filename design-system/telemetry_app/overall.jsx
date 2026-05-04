@@ -40,13 +40,23 @@ function Insight({tone='info', icon, label, value, meta}){
   );
 }
 
-function HeroMap({d, laps, activeIdx}){
+function HeroMap({d, laps, activeIdx, onHoverPoint, onHoverEnd}){
   const mapRef = useRef(null);
   const instRef = useRef(null);
   const segmentsRef = useRef([]);
   const markerRef = useRef(null);
   const annotMarkersRef = useRef([]);
+  const ptsRef = useRef([]);
+  const hoverPtsRef = useRef([]);
+  const onHoverRef = useRef(onHoverPoint);
+  const onHoverEndRef = useRef(onHoverEnd);
+  const [hoverInfo, setHoverInfo] = useState(null);
   const insights = useMemo(()=> TelemetryCompute.computeInsights(d, laps), [d, laps]);
+
+  useEffect(()=>{
+    onHoverRef.current = onHoverPoint;
+    onHoverEndRef.current = onHoverEnd;
+  }, [onHoverPoint, onHoverEnd]);
 
   // Init map once
   useEffect(()=>{
@@ -69,15 +79,10 @@ function HeroMap({d, laps, activeIdx}){
     segmentsRef.current.forEach(s => map.removeLayer(s)); segmentsRef.current = [];
     annotMarkersRef.current.forEach(s => map.removeLayer(s)); annotMarkersRef.current = [];
 
-    const s = TelemetryCharts.mapSeries(d, 2500);
-    // Pick GPS if present, else KF-derived
-    const lat = d.gps_lat.some(v => v && v!==0) ? s.gps_lat : s.kf_lat;
-    const lon = d.gps_lon.some(v => v && v!==0) ? s.gps_lon : s.kf_lon;
-    const pts = [];
-    for(let i=0;i<lat.length;i++){
-      if(isFinite(lat[i]) && isFinite(lon[i]) && lat[i]!==0)
-        pts.push({lat: lat[i], lon: lon[i], v: s.vel_kmh[i], idx: s.idx ? s.idx[i] : i});
-    }
+    const pts = TelemetryCharts.mapPoints(d, TelemetryCharts.mapDrawMaxPoints(d), 'kf');
+    const hoverPts = TelemetryCharts.mapPoints(d, TelemetryCharts.mapHoverMaxPoints(d), 'kf');
+    ptsRef.current = pts;
+    hoverPtsRef.current = hoverPts.length ? hoverPts : pts;
     if(!pts.length) return;
 
     // Compute v range for colors
@@ -150,9 +155,48 @@ function HeroMap({d, laps, activeIdx}){
     if(lat && lon) markerRef.current.setLatLng([lat, lon]);
   }, [activeIdx, d]);
 
+  const clearMapHover = () => {
+    setHoverInfo(null);
+    if(onHoverEndRef.current) onHoverEndRef.current();
+  };
+
+  const handleMapHover = (ev) => {
+    if(ev.target && ev.target.closest && ev.target.closest('.leaflet-control')){
+      clearMapHover();
+      return;
+    }
+    const map = instRef.current;
+    const pts = hoverPtsRef.current.length ? hoverPtsRef.current : ptsRef.current;
+    if(!map || !pts || !pts.length) return;
+    const nativeEvent = ev.nativeEvent || ev;
+    const p = TelemetryCharts.nearestMapPoint(map, pts, map.mouseEventToLatLng(nativeEvent));
+    if(!p) return;
+
+    if(markerRef.current) markerRef.current.setLatLng([p.lat, p.lon]);
+    if(onHoverRef.current) onHoverRef.current(p.idx);
+
+    const rect = ev.currentTarget.getBoundingClientRect();
+    const x = Math.max(10, Math.min(rect.width - 140, ev.clientX - rect.left + 14));
+    const y = Math.max(10, Math.min(rect.height - 72, ev.clientY - rect.top - 72));
+    setHoverInfo(prev => (
+      prev && prev.idx === p.idx && Math.abs(prev.x - x) < 2 && Math.abs(prev.y - y) < 2
+        ? prev
+        : {idx:p.idx, x, y}
+    ));
+  };
+
   return (
-    <div className="hero-map">
+    <div className="hero-map"
+      onMouseMoveCapture={handleMapHover}
+      onPointerMoveCapture={handleMapHover}
+      onMouseLeaveCapture={clearMapHover}
+      onPointerLeaveCapture={clearMapHover}>
       <div id="leaflet-map" ref={mapRef}></div>
+      {hoverInfo && (
+        <div className="map-hover-float"
+          style={{left:hoverInfo.x, top:hoverInfo.y}}
+          dangerouslySetInnerHTML={{__html: TelemetryCharts.mapPointHtml(d, hoverInfo.idx)}} />
+      )}
       <div className="hero-scale">
         <span>Slow</span>
         <div className="grad"></div>
@@ -185,8 +229,20 @@ function SmallPlot({title, freq, chartKey, onReady}){
 
 function OverallView({ d, laps, xAxis, setXAxis, showRaw, setShowRaw, mode3D, setMode3D, onHoverIdx }){
   const plotRefs = useRef({ speed:null, accel:null, yaw:null, gg:null, laps:null, tl:null });
+  const cursorElsRef = useRef([]);
   const insights = useMemo(()=> TelemetryCompute.computeInsights(d, laps), [d, laps]);
   const [activeIdx, setActiveIdx] = useState(null);
+
+  const syncRawIndex = (idx, skipEl=null) => {
+    if(idx == null) return;
+    setActiveIdx(idx);
+    if(onHoverIdx) onHoverIdx(idx);
+    const xVal = TelemetryCharts.xValueForIndex(d, idx, xAxis);
+    TelemetryCharts.setCursorLines(cursorElsRef.current, xVal, skipEl);
+  };
+  const clearCursorSync = () => {
+    TelemetryCharts.clearCursorLines(cursorElsRef.current);
+  };
 
   // Chart init
   useEffect(()=>{
@@ -200,36 +256,25 @@ function OverallView({ d, laps, xAxis, setXAxis, showRaw, setShowRaw, mode3D, se
 
     // Bind cursor sync on all x-axis charts
     const syncEls = [r.speed, r.accel, r.yaw, r.tl].filter(Boolean);
+    cursorElsRef.current = syncEls;
     const handler = (ev) => {
       if(!ev || !ev.points || !ev.points.length) return;
-      const xVal = ev.points[0].x;
       const idx = TelemetryCharts.eventRawIndex(ev, d, xAxis);
-      setActiveIdx(idx);
-      if(onHoverIdx) onHoverIdx(idx);
-
-      // Update cursor lines on other x-axis charts
-      syncEls.forEach(el => {
-        if(el && el !== ev.event?.target?.closest('.plot')){
-          Plotly.relayout(el, {
-            shapes: [{
-              type:'line', yref:'paper', y0:0, y1:1, x0: xVal, x1: xVal,
-              line:{color:'rgba(255,255,255,0.35)', width:1, dash:'dot'}
-            }]
-          });
-        }
-      });
-    };
-    const unhandler = (el) => {
-      if(el) Plotly.relayout(el, {shapes: []});
+      syncRawIndex(idx, ev.event?.target?.closest('.plot'));
     };
     syncEls.forEach(el => {
       if(el){
         el.on('plotly_hover', handler);
-        el.on('plotly_unhover', () => { syncEls.forEach(unhandler); });
+        el.on('plotly_unhover', clearCursorSync);
       }
     });
     return () => {
-      syncEls.forEach(el => { if(el) el.removeAllListeners && el.removeAllListeners('plotly_hover'); });
+      syncEls.forEach(el => {
+        if(el && el.removeAllListeners){
+          el.removeAllListeners('plotly_hover');
+          el.removeAllListeners('plotly_unhover');
+        }
+      });
     };
   }, [d, laps, xAxis, showRaw, mode3D]);
 
@@ -288,7 +333,8 @@ function OverallView({ d, laps, xAxis, setXAxis, showRaw, setShowRaw, mode3D, se
             <div className="t">Track · racing line</div>
             <div className="freq">● speed heat · {d._N.toLocaleString()} samples</div>
           </div>
-          <HeroMap d={d} laps={laps} activeIdx={activeIdx}/>
+          <HeroMap d={d} laps={laps} activeIdx={activeIdx}
+            onHoverPoint={syncRawIndex} onHoverEnd={clearCursorSync}/>
         </div>
         <div className="card">
           <div className="head">

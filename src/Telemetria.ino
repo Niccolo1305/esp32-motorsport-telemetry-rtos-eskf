@@ -1386,6 +1386,35 @@
 //   - [COMPAT] The SD.h backend remains in source as a fallback path for now,
 //     but it is no longer the primary AtomS3R build.
 //
+// v1.8.3 - Mount-Yaw Observation Sentinel
+//   - [FW] Task_Filter now detects straight accel/brake windows and injects
+//     MOUNT_YAW_OBS sentinel records into the SD stream (timestamp_us =
+//     UINT64_MAX-1). The record layout remains v6; payload fields are reused
+//     only for this impossible timestamp marker.
+//   - [TOOL] bin_to_csv.py exports those records as `# MOUNT_YAW_OBS: ...`
+//     comments. tools/sitl_hal/mount_yaw_sentinel.py provides the matching
+//     offline detector/report for CSV-only validation and threshold tuning.
+//   - [SAFETY] Observations are not applied live to ESKF/ZARU/Madgwick. A single
+//     window is evidence, not correction. A future MOUNT_YAW_BOOT parameter must
+//     be derived from multiple coherent observations and applied pre-pipeline.
+//
+// v1.8.4 - GPS Fix Gate + Conservative Mount-Yaw Boot
+//   - [GPS] Fixed stale-position republish in SerialGpsWrapper: only a fresh
+//     TinyGPSPlus location update may advance fix_us/epoch. Speed/sats/alt/DHV
+//     updates can refresh metadata, but no longer trigger an ESKF position
+//     correction with an old coordinate.
+//   - [ESKF] Added GPS quality and kinematic gates before eskf.correct(): fixes
+//     with weak sats/HDOP or impossible position jumps are consumed but rejected.
+//     The internal Mahalanobis gate now hard-rejects toxic jumps after the R x50
+//     retry instead of still applying a softened correction.
+//   - [MOUNT] MOUNT_YAW_OBS remains diagnostic. MOUNT_YAW_BOOT is emitted and
+//     applied only after 5 strong observations with quality >= 0.65,
+//     long_corr >= 0.45, low per-observation stability, and final circular
+//     dispersion <= 8 deg. Tentative or high-dispersion evidence is not applied.
+//   - [MOUNT] GPS acceleration for mount-yaw estimation now uses a 2-4 s
+//     filtered speed derivative and correlates against lag-compensated IMU
+//     samples, reducing false yaw estimates from GPS/IMU timing offset.
+//
 // --- TODO (deferred to v1.9.0 CAN format bump) ---
 //   - [TODO] Add CAN bus task (Core 0) for RPM, throttle, wheel speeds (×4),
 //     engine temp, steering angle. CanData struct + can_mutex pattern, mirroring

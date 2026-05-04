@@ -175,6 +175,7 @@ public:
         R_pos.Fill(0.0f);
         R_pos(0, 0) = r_dynamic;
         R_pos(1, 1) = r_dynamic;
+        bool position_update_ok = false;
 
         // UPDATE 1: 2D POSITION
         // BUG-2 fix: do-while(0) allows break instead of return on degenerate
@@ -222,6 +223,9 @@ public:
                     S_inv(0, 1) = -S(0, 1) * inv_det;
                     S_inv(1, 0) = -S(1, 0) * inv_det;
                     S_inv(1, 1) =  S(0, 0) * inv_det;
+                    d2 = y(0) * (S_inv(0, 0) * y(0) + S_inv(0, 1) * y(1))
+                       + y(1) * (S_inv(1, 0) * y(0) + S_inv(1, 1) * y(1));
+                    if (d2 > 11.83f) break; // v1.8.4: hard-reject toxic jumps
                 }
 
                 Matrix<5, 2> PHt;
@@ -242,6 +246,7 @@ public:
                 }
                 P = I_KH * P * (~I_KH) + K * R_pos * (~K);
                 symmetrize_P();
+                position_update_ok = true;
             }
         } while (0);
 
@@ -284,7 +289,7 @@ public:
 
         // UPDATE 3: COURSE OVER GROUND (1D)
         // Threshold 5 km/h (v0.9.7), adaptive R_th (v0.9.3)
-        if (has_last_gps_ && gps_speed_kmh > 5.0f) {
+        if (position_update_ok && has_last_gps_ && gps_speed_kmh > 5.0f) {
             float dx = gps_east_m - last_gps_east_;
             float dy = gps_north_m - last_gps_north_;
             float dist = sqrtf(dx * dx + dy * dy);
@@ -328,9 +333,11 @@ public:
             }
         }
 
-        last_gps_east_  = gps_east_m;
-        last_gps_north_ = gps_north_m;
-        has_last_gps_   = true;
+        if (position_update_ok) {
+            last_gps_east_  = gps_east_m;
+            last_gps_north_ = gps_north_m;
+            has_last_gps_   = true;
+        }
 
         while (X(4) > (float)M_PI)  X(4) -= 2.0f * (float)M_PI;
         while (X(4) < -(float)M_PI) X(4) += 2.0f * (float)M_PI;
@@ -527,6 +534,7 @@ public:
         R_pos.Fill(0.0f);
         R_pos(0, 0) = r_dynamic;
         R_pos(1, 1) = r_dynamic;
+        bool position_update_ok = false;
 
         // UPDATE 1: 2D POSITION
         // BUG-2 fix: do-while(0) allows break instead of return (see ESKF2D)
@@ -573,6 +581,9 @@ public:
                     S_inv(0, 1) = -S(0, 1) * inv_det;
                     S_inv(1, 0) = -S(1, 0) * inv_det;
                     S_inv(1, 1) =  S(0, 0) * inv_det;
+                    d2 = y(0) * (S_inv(0, 0) * y(0) + S_inv(0, 1) * y(1))
+                       + y(1) * (S_inv(1, 0) * y(0) + S_inv(1, 1) * y(1));
+                    if (d2 > 11.83f) break; // v1.8.4: hard-reject toxic jumps
                 }
 
                 Matrix<6, 2> PHt;
@@ -593,6 +604,7 @@ public:
                 }
                 P = I_KH * P * (~I_KH) + K * R_pos * (~K);
                 symmetrize_P();
+                position_update_ok = true;
             }
         } while (0);
 
@@ -634,7 +646,7 @@ public:
         }
 
         // UPDATE 3: COURSE OVER GROUND (1D)
-        if (has_last_gps_ && gps_speed_kmh > 5.0f) {
+        if (position_update_ok && has_last_gps_ && gps_speed_kmh > 5.0f) {
             float dx = gps_east_m - last_gps_east_;
             float dy = gps_north_m - last_gps_north_;
             float dist = sqrtf(dx * dx + dy * dy);
@@ -678,9 +690,11 @@ public:
             }
         }
 
-        last_gps_east_  = gps_east_m;
-        last_gps_north_ = gps_north_m;
-        has_last_gps_   = true;
+        if (position_update_ok) {
+            last_gps_east_  = gps_east_m;
+            last_gps_north_ = gps_north_m;
+            has_last_gps_   = true;
+        }
 
         while (X(4) > (float)M_PI)  X(4) -= 2.0f * (float)M_PI;
         while (X(4) < -(float)M_PI) X(4) += 2.0f * (float)M_PI;

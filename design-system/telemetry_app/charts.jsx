@@ -297,6 +297,32 @@
     return lo;
   }
 
+  function xValueForIndex(d, idx, xAxis){
+    if(idx == null) return null;
+    const arr = xAxis === 'dist' ? d.distance_m : d.t_s;
+    const xVal = arr && arr[idx];
+    return Number.isFinite(xVal) ? xVal : null;
+  }
+
+  function setCursorLines(els, xVal, skipEl=null){
+    if(!Number.isFinite(xVal)) return;
+    (els || []).forEach(el => {
+      if(!el || el === skipEl || !window.Plotly) return;
+      Plotly.relayout(el, {
+        shapes: [{
+          type:'line', yref:'paper', y0:0, y1:1, x0:xVal, x1:xVal,
+          line:{color:'rgba(255,255,255,0.35)', width:1, dash:'dot'}
+        }]
+      });
+    });
+  }
+
+  function clearCursorLines(els){
+    (els || []).forEach(el => {
+      if(el && window.Plotly) Plotly.relayout(el, {shapes: []});
+    });
+  }
+
   function mapSeries(d, maxPoints){
     if(d.getSeries){
       return d.getSeries({channels:['gps_lat','gps_lon','kf_lat','kf_lon','vel_kmh'], xAxis:'time', maxPoints});
@@ -304,10 +330,199 @@
     return getSeries(d, ['gps_lat','gps_lon','kf_lat','kf_lon','vel_kmh'], 'time', maxPoints);
   }
 
+  function lastFinite(arr){
+    if(!arr) return NaN;
+    for(let i=arr.length-1; i>=0; i--){
+      if(Number.isFinite(arr[i])) return arr[i];
+    }
+    return NaN;
+  }
+
+  function clamp(n, lo, hi){
+    if(hi < lo) return hi;
+    return Math.max(lo, Math.min(hi, n));
+  }
+
+  function mapDrawMaxPoints(d){
+    const n = d._N || (d.t_s && d.t_s.length) || 2500;
+    const distance = lastFinite(d.distance_m);
+    const byDistance = Number.isFinite(distance) && distance > 0 ? Math.ceil(distance / 20) : 0;
+    return clamp(Math.max(2500, byDistance), 2500, Math.min(8000, n));
+  }
+
+  function mapHoverMaxPoints(d){
+    const n = d._N || (d.t_s && d.t_s.length) || 8000;
+    const duration = d._duration_s || lastFinite(d.t_s);
+    const distance = lastFinite(d.distance_m);
+    const byTime = Number.isFinite(duration) && duration > 0 ? Math.ceil(duration * 8) : 0;
+    const byDistance = Number.isFinite(distance) && distance > 0 ? Math.ceil(distance / 3) : 0;
+    return clamp(Math.max(8000, byTime, byDistance), 2500, Math.min(60000, n));
+  }
+
+  function validCoordCount(lat, lon){
+    if(!lat || !lon) return 0;
+    let count = 0;
+    for(let i=0; i<lat.length; i++){
+      if(Number.isFinite(lat[i]) && Number.isFinite(lon[i]) && lat[i] !== 0 && lon[i] !== 0) count++;
+    }
+    return count;
+  }
+
+  function chooseMapCoords(series, prefer='kf'){
+    const kfValid = validCoordCount(series.kf_lat, series.kf_lon);
+    const gpsValid = validCoordCount(series.gps_lat, series.gps_lon);
+    if(prefer === 'gps' && gpsValid > 1) return {lat:series.gps_lat, lon:series.gps_lon, source:'gps'};
+    if(kfValid > 1) return {lat:series.kf_lat, lon:series.kf_lon, source:'kf'};
+    if(gpsValid > 1) return {lat:series.gps_lat, lon:series.gps_lon, source:'gps'};
+    return {lat:series.kf_lat || series.gps_lat, lon:series.kf_lon || series.gps_lon, source:'none'};
+  }
+
+  function mapPoints(d, maxPoints, prefer='kf'){
+    const s = mapSeries(d, maxPoints);
+    const pos = chooseMapCoords(s, prefer);
+    const pts = [];
+    const lat = pos.lat || [];
+    const lon = pos.lon || [];
+    for(let i=0; i<lat.length; i++){
+      if(Number.isFinite(lat[i]) && Number.isFinite(lon[i]) && lat[i] !== 0 && lon[i] !== 0){
+        pts.push({lat:lat[i], lon:lon[i], v:s.vel_kmh[i], idx:s.idx ? s.idx[i] : i});
+      }
+    }
+    pts.source = pos.source;
+    return pts;
+  }
+
+  function mapPointHtml(d, idx){
+    const t = d.t_s && d.t_s[idx];
+    const v = d.vel_kmh && d.vel_kmh[idx];
+    const dist = d.distance_m && d.distance_m[idx];
+    const time = Number.isFinite(t) && window.TelemetryCompute ? TelemetryCompute.fmtTime(t) : '--:--.---';
+    const speed = Number.isFinite(v) ? v.toFixed(1) : '--';
+    const distance = Number.isFinite(dist) ? (dist/1000).toFixed(3) : '--';
+    return `<div class="map-hover-card">
+      <div><span>t</span><b>${time}</b></div>
+      <div><span>v</span><b>${speed} km/h</b></div>
+      <div><span>d</span><b>${distance} km</b></div>
+    </div>`;
+  }
+
+  function nearestMapPoint(map, pts, latlng, maxPx=Infinity){
+    if(!map || !pts || !pts.length || !latlng) return null;
+    const target = map.latLngToLayerPoint(latlng);
+    const bounds = map.getPixelBounds();
+    const cacheKey = [
+      map.getZoom(),
+      bounds.min.x, bounds.min.y,
+      bounds.max.x, bounds.max.y,
+      pts.length,
+    ].join('|');
+    if(pts._pxKey !== cacheKey){
+      const projected = new Array(pts.length);
+      for(let i=0; i<pts.length; i++){
+        const lp = map.latLngToLayerPoint([pts[i].lat, pts[i].lon]);
+        projected[i] = {x:lp.x, y:lp.y};
+      }
+      pts._px = projected;
+      pts._pxKey = cacheKey;
+    }
+    const projected = pts._px || [];
+    let best = null;
+    let bestD2 = Number.isFinite(maxPx) ? maxPx * maxPx : Infinity;
+    for(let i=0; i<pts.length; i++){
+      const lp = projected[i];
+      const dx = lp.x - target.x;
+      const dy = lp.y - target.y;
+      const d2 = dx*dx + dy*dy;
+      if(d2 <= bestD2){
+        bestD2 = d2;
+        best = pts[i];
+      }
+    }
+    return best;
+  }
+
+  function bindMapHover(map, ptsRef, d, onHover, onLeave){
+    const container = map && map.getContainer ? map.getContainer() : null;
+    if(!container) return () => {};
+    let tip = null;
+    let raf = null;
+    let lastEvent = null;
+    let lastIdx = null;
+
+    const getPts = () => {
+      if(typeof ptsRef === 'function') return ptsRef() || [];
+      return ptsRef && ptsRef.current ? ptsRef.current : (ptsRef || []);
+    };
+    const closeTip = () => {
+      if(tip){
+        map.removeLayer(tip);
+        tip = null;
+      }
+    };
+    const leave = () => {
+      if(raf) cancelAnimationFrame(raf);
+      raf = null;
+      lastEvent = null;
+      lastIdx = null;
+      closeTip();
+      if(onLeave) onLeave();
+    };
+    const render = () => {
+      raf = null;
+      const ev = lastEvent;
+      if(!ev) return;
+      const latlng = ev.latlng || map.mouseEventToLatLng(ev);
+      const p = nearestMapPoint(map, getPts(), latlng);
+      if(!p){
+        leave();
+        return;
+      }
+      if(!tip){
+        tip = L.tooltip({
+          className:'telemetry-map-tooltip',
+          direction:'top',
+          offset:[0,-10],
+          opacity:1,
+          interactive:false,
+        }).addTo(map);
+      }
+      tip.setLatLng([p.lat, p.lon]).setContent(mapPointHtml(d, p.idx));
+      if(p.idx !== lastIdx){
+        lastIdx = p.idx;
+        if(onHover) onHover(p.idx, p);
+      }
+    };
+    const move = (ev) => {
+      if(ev.target && ev.target.closest && ev.target.closest('.leaflet-control')){
+        leave();
+        return;
+      }
+      lastEvent = ev;
+      if(!raf) raf = requestAnimationFrame(render);
+    };
+
+    container.addEventListener('mousemove', move, {capture:true, passive:true});
+    container.addEventListener('pointermove', move, {capture:true, passive:true});
+    container.addEventListener('mouseleave', leave, true);
+    container.addEventListener('pointerleave', leave, true);
+    map.on('zoomstart movestart', leave);
+    return () => {
+      container.removeEventListener('mousemove', move, true);
+      container.removeEventListener('pointermove', move, true);
+      container.removeEventListener('mouseleave', leave, true);
+      container.removeEventListener('pointerleave', leave, true);
+      map.off('zoomstart movestart', leave);
+      leave();
+    };
+  }
+
   window.TelemetryCharts = {
     palette,
     renderSpeed, renderAccel, renderYaw,
     renderGG, renderLapHistogram, renderTimeline,
     bindCursorSync, findSampleAtX, eventRawIndex, mapSeries,
+    mapDrawMaxPoints, mapHoverMaxPoints, mapPoints,
+    xValueForIndex, setCursorLines, clearCursorLines,
+    mapPointHtml, nearestMapPoint, bindMapHover,
   };
 })();

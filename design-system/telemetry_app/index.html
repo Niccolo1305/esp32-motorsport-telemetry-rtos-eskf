@@ -237,6 +237,7 @@
   /* Hero map */
   .hero-map { height: 440px; position: relative; background: #000; border-radius: 0 0 4px 4px;}
   #leaflet-map { width: 100%; height: 100%; border-radius: 0 0 4px 4px; }
+  .detail-map-host { height: calc(100% - 42px); position: relative; background: #000; }
   .hero-scale {
     position: absolute; bottom: 12px; left: 12px; z-index: 400;
     background: rgba(0,0,0,0.75);
@@ -339,10 +340,41 @@
   .toggle.on .sw::after { left: 13px; background: #000; }
 
   /* Leaflet dark tweaks */
-  .leaflet-container { background: #000; }
+  .leaflet-container { background: #000; cursor: crosshair; }
   .leaflet-control-attribution { background: rgba(0,0,0,0.7) !important; color: var(--color-fg-3) !important; font-family: var(--font-mono); font-size: 9px !important;}
   .leaflet-control-attribution a { color: var(--color-fg-2) !important;}
   .leaflet-control-zoom a { background: var(--color-bg-2) !important; color: var(--color-fg-1) !important; border-color: var(--color-border-2) !important;}
+  .leaflet-tooltip.telemetry-map-tooltip {
+    background: rgba(0,0,0,0.82);
+    border: 1px solid var(--color-border-2);
+    border-radius: 2px;
+    box-shadow: none;
+    color: var(--color-fg-1);
+    padding: 6px 8px;
+  }
+  .leaflet-tooltip.telemetry-map-tooltip::before { border-top-color: rgba(0,0,0,0.82); }
+  .map-hover-card {
+    display: grid;
+    gap: 3px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: .04em;
+    min-width: 112px;
+  }
+  .map-hover-card div { display: grid; grid-template-columns: 16px 1fr; gap: 8px; align-items: baseline; }
+  .map-hover-card span { color: var(--color-fg-3); text-transform: uppercase; }
+  .map-hover-card b { color: var(--color-fg-1); font-weight: 500; text-align: right; }
+  .map-hover-float {
+    position: absolute;
+    z-index: 900;
+    pointer-events: none;
+    background: rgba(0,0,0,0.82);
+    border: 1px solid var(--color-border-2);
+    border-radius: 2px;
+    color: var(--color-fg-1);
+    padding: 6px 8px;
+  }
 
   /* Footer */
   .foot {
@@ -364,12 +396,12 @@
 <body data-screen-label="telemetria-app">
 <div id="root"></div>
 
-<script src="compute.js"></script>
-<script src="session_binary.js"></script>
-<script type="text/babel" src="charts.jsx"></script>
-<script type="text/babel" src="overall.jsx"></script>
-<script type="text/babel" src="detail.jsx"></script>
-<script type="text/babel" src="app.jsx"></script>
+<script src="compute.js?v=20260504-map-hover6"></script>
+<script src="session_binary.js?v=20260504-map-hover6"></script>
+<script type="text/babel" src="charts.jsx?v=20260504-map-hover6"></script>
+<script type="text/babel" src="overall.jsx?v=20260504-map-hover6"></script>
+<script type="text/babel" src="detail.jsx?v=20260504-map-hover6"></script>
+<script type="text/babel" src="app.jsx?v=20260504-map-hover6"></script>
 
 </body>
 </html>

@@ -124,7 +124,8 @@ public:
             _parseCasicByte(b, outData);  // passive NAV-PV listener
         }
 
-        bool nmea_updated = _gps.satellites.isUpdated() || _gps.location.isUpdated() ||
+        const bool location_updated = _gps.location.isUpdated();
+        bool nmea_updated = _gps.satellites.isUpdated() || location_updated ||
                             _gps.speed.isUpdated()       || _gps.altitude.isUpdated();
 
         if (!nmea_updated && !_navPvUpdated && !_dhvUpdated) {
@@ -138,12 +139,19 @@ public:
         outData.sats  = _gps.satellites.isValid() ? (uint8_t)_gps.satellites.value() : 0;
         outData.valid = _gps.location.isValid();
 
-        if (nmea_updated && outData.valid) {
+        if (nmea_updated) {
+            outData.sog_kmh = _gps.speed.isValid() ? (float)_gps.speed.kmph() : outData.sog_kmh;
+            outData.alt_m = _gps.altitude.isValid() ? (float)_gps.altitude.meters() : outData.alt_m;
+            outData.hdop = _gps.hdop.isValid() ? (float)_gps.hdop.hdop() : outData.hdop;
+        }
+
+        // v1.8.4: Only a fresh location sentence may advance fix_us/epoch.
+        // TinyGPSPlus keeps location.isValid() true after signal degradation;
+        // speed/sats-only updates must not re-publish that stale coordinate as
+        // a new position fix or the ESKF can accept kilometre-scale jumps.
+        if (location_updated && outData.valid) {
             outData.lat      = _gps.location.lat();
             outData.lon      = _gps.location.lng();
-            outData.sog_kmh  = _gps.speed.isValid()    ? (float)_gps.speed.kmph()      : 0.0f;
-            outData.alt_m    = _gps.altitude.isValid()  ? (float)_gps.altitude.meters() : 0.0f;
-            outData.hdop     = _gps.hdop.isValid()      ? (float)_gps.hdop.hdop()       : 99.9f;
             outData.fix_us   = esp_timer_get_time();
             outData.epoch++;  // only on NMEA — triggers ESKF correction in Task_Filter
         }

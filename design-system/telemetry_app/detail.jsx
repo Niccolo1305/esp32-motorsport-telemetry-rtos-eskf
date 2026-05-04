@@ -9,6 +9,47 @@ function DetailView({d, laps, xAxis, setXAxis, showRaw, setShowRaw, mode3D, setM
   const mapInstRef = useRefD(null);
   const mapLineRef = useRefD([]);
   const mapCurRef = useRefD(null);
+  const mapPtsRef = useRefD([]);
+  const mapHoverPtsRef = useRefD([]);
+  const [mapHover, setMapHover] = useStateD(null);
+
+  const syncEls = () => [plotRefs.current.yaw, plotRefs.current.tl].filter(Boolean);
+  const clearCursorSync = () => TelemetryCharts.clearCursorLines(syncEls());
+  const applyRawIndex = (idx, p=null, skipEl=null) => {
+    if(idx == null) return;
+    if(onHoverIdx) onHoverIdx(idx);
+    const lat = p ? p.lat : (d.gps_lat[idx]||d.kf_lat[idx]);
+    const lon = p ? p.lon : (d.gps_lon[idx]||d.kf_lon[idx]);
+    if(mapCurRef.current && lat && lon) mapCurRef.current.setLatLng([lat,lon]);
+    const xVal = TelemetryCharts.xValueForIndex(d, idx, xAxis);
+    TelemetryCharts.setCursorLines(syncEls(), xVal, skipEl);
+  };
+  const clearMapHover = () => {
+    setMapHover(null);
+    clearCursorSync();
+  };
+  const handleMapHover = (ev) => {
+    if(ev.target && ev.target.closest && ev.target.closest('.leaflet-control')){
+      clearMapHover();
+      return;
+    }
+    const map = mapInstRef.current;
+    const pts = mapHoverPtsRef.current.length ? mapHoverPtsRef.current : mapPtsRef.current;
+    if(!map || !pts || !pts.length) return;
+    const nativeEvent = ev.nativeEvent || ev;
+    const p = TelemetryCharts.nearestMapPoint(map, pts, map.mouseEventToLatLng(nativeEvent));
+    if(!p) return;
+    applyRawIndex(p.idx, p);
+
+    const rect = ev.currentTarget.getBoundingClientRect();
+    const x = Math.max(10, Math.min(rect.width - 140, ev.clientX - rect.left + 14));
+    const y = Math.max(10, Math.min(rect.height - 72, ev.clientY - rect.top - 72));
+    setMapHover(prev => (
+      prev && prev.idx === p.idx && Math.abs(prev.x - x) < 2 && Math.abs(prev.y - y) < 2
+        ? prev
+        : {idx:p.idx, x, y}
+    ));
+  };
 
   // Init Leaflet
   useEffD(()=>{
@@ -24,11 +65,10 @@ function DetailView({d, laps, xAxis, setXAxis, showRaw, setShowRaw, mode3D, setM
     const map = mapInstRef.current;
     if(map){
       mapLineRef.current.forEach(s=>map.removeLayer(s)); mapLineRef.current=[];
-      const s = TelemetryCharts.mapSeries(d, 2500);
-      const lat = d.gps_lat.some(v=>v&&v!==0)?s.gps_lat:s.kf_lat;
-      const lon = d.gps_lon.some(v=>v&&v!==0)?s.gps_lon:s.kf_lon;
-      const pts = [];
-      for(let i=0;i<lat.length;i++){ if(isFinite(lat[i])&&isFinite(lon[i])&&lat[i]!==0) pts.push({lat:lat[i], lon:lon[i], v:s.vel_kmh[i]}); }
+      const pts = TelemetryCharts.mapPoints(d, TelemetryCharts.mapDrawMaxPoints(d), 'kf');
+      const hoverPts = TelemetryCharts.mapPoints(d, TelemetryCharts.mapHoverMaxPoints(d), 'kf');
+      mapPtsRef.current = pts;
+      mapHoverPtsRef.current = hoverPts.length ? hoverPts : pts;
       if(pts.length){
         let vmin=Infinity,vmax=-Infinity; for(const p of pts){ if(p.v<vmin)vmin=p.v; if(p.v>vmax)vmax=p.v;}
         const span = Math.max(1,vmax-vmin);
@@ -55,23 +95,22 @@ function DetailView({d, laps, xAxis, setXAxis, showRaw, setShowRaw, mode3D, setM
     if(r.yaw) TelemetryCharts.renderYaw(r.yaw, d, xAxis);
     if(r.tl)  TelemetryCharts.renderTimeline(r.tl, d, xAxis);
 
-    const syncEls = [r.yaw, r.tl].filter(Boolean);
+    const syncElsNow = syncEls();
     const handler = (ev)=>{
       if(!ev||!ev.points||!ev.points.length) return;
-      const xVal = ev.points[0].x;
       const idx = TelemetryCharts.eventRawIndex(ev, d, xAxis);
-      if(onHoverIdx) onHoverIdx(idx);
-      const lat = d.gps_lat[idx]||d.kf_lat[idx];
-      const lon = d.gps_lon[idx]||d.kf_lon[idx];
-      if(mapCurRef.current && lat && lon) mapCurRef.current.setLatLng([lat,lon]);
-      syncEls.forEach(el => {
-        if(el){ Plotly.relayout(el, {shapes:[{type:'line', yref:'paper', y0:0, y1:1, x0:xVal, x1:xVal,
-          line:{color:'rgba(255,255,255,0.35)', width:1, dash:'dot'}}]}); }
+      applyRawIndex(idx, null, ev.event?.target?.closest('.plot'));
+    };
+    syncElsNow.forEach(el => { if(el){ el.on('plotly_hover', handler);
+      el.on('plotly_unhover', clearCursorSync); }});
+    return ()=>{
+      syncElsNow.forEach(el => {
+        if(el && el.removeAllListeners){
+          el.removeAllListeners('plotly_hover');
+          el.removeAllListeners('plotly_unhover');
+        }
       });
     };
-    syncEls.forEach(el => { if(el){ el.on('plotly_hover', handler);
-      el.on('plotly_unhover', ()=>{ syncEls.forEach(e=>Plotly.relayout(e,{shapes:[]}));}); }});
-    return ()=>{ syncEls.forEach(el => { if(el) el.removeAllListeners && el.removeAllListeners('plotly_hover'); }); };
   }, [d, laps, xAxis, showRaw, mode3D]);
 
   const attach = (el, key) => { plotRefs.current[key] = el; };
@@ -101,7 +140,18 @@ function DetailView({d, laps, xAxis, setXAxis, showRaw, setShowRaw, mode3D, setM
       <div className="row-2" style={{marginBottom:12}}>
         <div className="card flat" style={{height:440}}>
           <div className="head"><div className="t">GPS · track (speed heat)</div><div className="freq">● racing line</div></div>
-          <div ref={mapRef} style={{height:'calc(100% - 42px)', background:'#000'}}></div>
+          <div className="detail-map-host"
+            onMouseMoveCapture={handleMapHover}
+            onPointerMoveCapture={handleMapHover}
+            onMouseLeaveCapture={clearMapHover}
+            onPointerLeaveCapture={clearMapHover}>
+            <div ref={mapRef} style={{height:'100%', background:'#000'}}></div>
+            {mapHover && (
+              <div className="map-hover-float"
+                style={{left:mapHover.x, top:mapHover.y}}
+                dangerouslySetInnerHTML={{__html: TelemetryCharts.mapPointHtml(d, mapHover.idx)}} />
+            )}
+          </div>
         </div>
         <div className="card flat" style={{height:440}}>
           <div className="head"><div className="t">G-G {mode3D?'3D':'2D'}</div><div className="freq">● friction disc</div></div>

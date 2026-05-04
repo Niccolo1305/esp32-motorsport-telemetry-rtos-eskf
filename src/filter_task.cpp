@@ -32,10 +32,677 @@
 #include "imu_axis_remap.h"
 #include "math_utils.h"
 
+static constexpr uint64_t MOUNT_YAW_OBS_SENTINEL_TS = UINT64_MAX - 1ULL;
+static constexpr uint64_t MOUNT_YAW_BOOT_SENTINEL_TS = UINT64_MAX - 2ULL;
+static constexpr uint8_t ESKF_GPS_MIN_SATS = 8;
+static constexpr float ESKF_GPS_MAX_HDOP = 2.0f;
+static constexpr float ESKF_GPS_POS_GATE_MIN_M = 80.0f;
+static constexpr float ESKF_GPS_POS_GATE_MARGIN_M = 60.0f;
+static constexpr float ESKF_GPS_POS_GATE_SPEED_FACTOR = 2.5f;
+static constexpr float MOUNT_YAW_MIN_SPEED_KMH = 18.0f;
+static constexpr float MOUNT_YAW_MAX_HDOP = 1.5f;
+static constexpr uint8_t MOUNT_YAW_MIN_SATS = 10;
+static constexpr float MOUNT_YAW_MAX_ABS_GZ_DPS = 2.0f;
+static constexpr float MOUNT_YAW_MAX_ABS_COG_RATE_DPS = 8.0f;
+static constexpr float MOUNT_YAW_MAX_LAT_EXPECTED_G = 0.05f;
+static constexpr float MOUNT_YAW_MIN_ABS_GPS_ACCEL_G = 0.025f;
+static constexpr float MOUNT_YAW_MIN_LONG_CORR = 0.20f;
+static constexpr float MOUNT_YAW_MIN_QUALITY = 0.55f;
+static constexpr float MOUNT_YAW_MIN_DURATION_S = 2.5f;
+static constexpr float MOUNT_YAW_MAX_DURATION_S = 6.5f;
+static constexpr float MOUNT_YAW_COOLDOWN_S = 1.0f;
+static constexpr uint8_t MOUNT_YAW_SPEED_HIST_N = 64;
+static constexpr uint16_t MOUNT_YAW_IMU_HIST_N = 256;
+static constexpr float MOUNT_YAW_GPS_ACCEL_MIN_BASELINE_S = 2.0f;
+static constexpr float MOUNT_YAW_GPS_ACCEL_MAX_BASELINE_S = 4.0f;
+static constexpr uint8_t MOUNT_YAW_BOOT_MIN_OBS = 5;
+static constexpr float MOUNT_YAW_BOOT_MIN_QUALITY = 0.65f;
+static constexpr float MOUNT_YAW_BOOT_MIN_LONG_CORR = 0.45f;
+static constexpr float MOUNT_YAW_BOOT_MAX_OBS_STABILITY_STD_DEG = 15.0f;
+static constexpr float MOUNT_YAW_BOOT_MAX_CONSENSUS_STD_DEG = 8.0f;
+
+struct MountYawWindow {
+  bool active = false;
+  uint64_t start_us = 0;
+  uint64_t end_us = 0;
+  uint16_t count = 0;
+  float sum_ax = 0.0f;
+  float sum_ay = 0.0f;
+  float sum_ax2 = 0.0f;
+  float sum_ay2 = 0.0f;
+  float sum_axay = 0.0f;
+  float sum_acc = 0.0f;
+  float sum_acc2 = 0.0f;
+  float sum_axacc = 0.0f;
+  float sum_ayacc = 0.0f;
+  float sum_abs_acc = 0.0f;
+  float sum_speed = 0.0f;
+  float min_speed = 9999.0f;
+  float sum_gz2 = 0.0f;
+  float sum_cog2 = 0.0f;
+  float sum_lat_expected2 = 0.0f;
+  float sum_az2 = 0.0f;
+  uint16_t stab_count = 0;
+  float stab_sum_ax = 0.0f;
+  float stab_sum_ay = 0.0f;
+  float stab_sum_acc = 0.0f;
+  float stab_sum_axacc = 0.0f;
+  float stab_sum_ayacc = 0.0f;
+  float stab_sum_abs_acc = 0.0f;
+  uint8_t stability_n = 0;
+  float stability_sin_sum = 0.0f;
+  float stability_cos_sum = 0.0f;
+};
+
+struct MountYawBootState {
+  bool active = false;
+  bool emitted = false;
+  bool just_activated = false;
+  float yaw_deg = 0.0f;
+  float yaw_rad = 0.0f;
+  float sin_yaw = 0.0f;
+  float cos_yaw = 1.0f;
+  uint8_t obs_count = 0;
+  float sin_sum = 0.0f;
+  float cos_sum = 0.0f;
+  float quality_sum = 0.0f;
+  float corr_sum = 0.0f;
+  float stability_sum = 0.0f;
+};
+
+struct MountYawState {
+  MountYawWindow win;
+  MountYawBootState boot;
+  uint8_t obs_id = 0;
+  uint64_t cooldown_until_us = 0;
+  uint32_t last_speed_epoch = 0;
+  uint64_t last_speed_fix_us = 0;
+  float last_speed_ms = 0.0f;
+  float gps_acc_ema_g = 0.0f;
+  bool has_speed = false;
+  uint8_t speed_hist_idx = 0;
+  uint8_t speed_hist_count = 0;
+  uint64_t speed_hist_fix_us[MOUNT_YAW_SPEED_HIST_N] = {};
+  float speed_hist_ms[MOUNT_YAW_SPEED_HIST_N] = {};
+  uint32_t gps_acc_lag_us = 0;
+  uint16_t imu_hist_idx = 0;
+  uint16_t imu_hist_count = 0;
+  uint64_t imu_hist_us[MOUNT_YAW_IMU_HIST_N] = {};
+  float imu_hist_ax[MOUNT_YAW_IMU_HIST_N] = {};
+  float imu_hist_ay[MOUNT_YAW_IMU_HIST_N] = {};
+  float imu_hist_az[MOUNT_YAW_IMU_HIST_N] = {};
+  uint32_t last_cog_epoch = 0;
+  uint64_t last_cog_fix_us = 0;
+  float last_east_m = 0.0f;
+  float last_north_m = 0.0f;
+  float last_cog_rad = 0.0f;
+  float cog_rate_ema_dps = 0.0f;
+  bool has_cog = false;
+};
+
+struct GpsCorrectionGateState {
+  bool has_ref = false;
+  float east_m = 0.0f;
+  float north_m = 0.0f;
+  float speed_kmh = 0.0f;
+  uint64_t fix_us = 0;
+  uint8_t reject_count = 0;
+};
+
+static float clamp01f(float value) {
+  if (!isfinite(value)) return 0.0f;
+  if (value < 0.0f) return 0.0f;
+  if (value > 1.0f) return 1.0f;
+  return value;
+}
+
+static float normalize_mount_yaw_deg(float angle) {
+  while (angle > 90.0f) angle -= 180.0f;
+  while (angle < -90.0f) angle += 180.0f;
+  return angle;
+}
+
+static float wrap_pi(float value) {
+  while (value > (float)M_PI) value -= 2.0f * (float)M_PI;
+  while (value < -(float)M_PI) value += 2.0f * (float)M_PI;
+  return value;
+}
+
+static float circular_std_deg(float sin_sum, float cos_sum, float n) {
+  if (n <= 0.0f) return 180.0f;
+  float r = sqrtf(sin_sum * sin_sum + cos_sum * cos_sum) / n;
+  r = fminf(1.0f, fmaxf(1.0e-6f, r));
+  return sqrtf(fmaxf(0.0f, -2.0f * logf(r))) / DEG2RAD;
+}
+
+static void rotate_mount_yaw_xy(float yaw_rad, float& x, float& y) {
+  const float c = cosf(yaw_rad);
+  const float s = sinf(yaw_rad);
+  const float x_corr = c * x - s * y;
+  const float y_corr = s * x + c * y;
+  x = x_corr;
+  y = y_corr;
+}
+
+static bool gps_fix_quality_ok(const GpsData& gps) {
+  return gps.valid &&
+         gps.sats >= ESKF_GPS_MIN_SATS &&
+         gps.hdop <= ESKF_GPS_MAX_HDOP &&
+         isfinite(gps.lat) && isfinite(gps.lon) &&
+         fabs(gps.lat) > 1.0e-9 && fabs(gps.lon) > 1.0e-9;
+}
+
+static bool gps_correction_gate_allows(const GpsCorrectionGateState& gate,
+                                       float east_m,
+                                       float north_m,
+                                       float speed_kmh,
+                                       uint64_t fix_us) {
+  if (!gate.has_ref || gate.fix_us == 0 || fix_us <= gate.fix_us) {
+    return true;
+  }
+  const float dt_s = (float)(fix_us - gate.fix_us) / 1000000.0f;
+  if (dt_s <= 0.0f) return false;
+
+  const float de = east_m - gate.east_m;
+  const float dn = north_m - gate.north_m;
+  const float dist_m = sqrtf(de * de + dn * dn);
+  const float ref_speed_ms = fmaxf(fmaxf(speed_kmh, gate.speed_kmh) / 3.6f, 3.0f);
+  const float allowed_m = fmaxf(ESKF_GPS_POS_GATE_MIN_M,
+                                ref_speed_ms * dt_s * ESKF_GPS_POS_GATE_SPEED_FACTOR
+                                + ESKF_GPS_POS_GATE_MARGIN_M);
+  return dist_m <= allowed_m;
+}
+
+static void gps_correction_gate_accept(GpsCorrectionGateState& gate,
+                                       float east_m,
+                                       float north_m,
+                                       float speed_kmh,
+                                       uint64_t fix_us) {
+  gate.has_ref = true;
+  gate.east_m = east_m;
+  gate.north_m = north_m;
+  gate.speed_kmh = speed_kmh;
+  gate.fix_us = fix_us;
+  gate.reject_count = 0;
+}
+
+static void update_mount_yaw_speed_history(MountYawState& state,
+                                           uint64_t fix_us,
+                                           float speed_ms) {
+  state.speed_hist_fix_us[state.speed_hist_idx] = fix_us;
+  state.speed_hist_ms[state.speed_hist_idx] = speed_ms;
+  state.speed_hist_idx = (uint8_t)((state.speed_hist_idx + 1) % MOUNT_YAW_SPEED_HIST_N);
+  if (state.speed_hist_count < MOUNT_YAW_SPEED_HIST_N) state.speed_hist_count++;
+}
+
+static bool mount_yaw_speed_baseline_accel(const MountYawState& state,
+                                           uint64_t fix_us,
+                                           float speed_ms,
+                                           float& acc_g,
+                                           uint32_t& lag_us) {
+  bool found = false;
+  float best_dt = 0.0f;
+  float best_speed = 0.0f;
+  uint64_t best_hist_us = 0;
+  for (uint8_t i = 0; i < state.speed_hist_count; i++) {
+    const uint64_t hist_us = state.speed_hist_fix_us[i];
+    if (hist_us == 0 || hist_us >= fix_us) continue;
+    const float dt_s = (float)(fix_us - hist_us) / 1000000.0f;
+    if (dt_s >= MOUNT_YAW_GPS_ACCEL_MIN_BASELINE_S &&
+        dt_s <= MOUNT_YAW_GPS_ACCEL_MAX_BASELINE_S &&
+        dt_s > best_dt) {
+      best_dt = dt_s;
+      best_speed = state.speed_hist_ms[i];
+      best_hist_us = hist_us;
+      found = true;
+    }
+  }
+  if (!found) return false;
+  acc_g = (speed_ms - best_speed) / best_dt / G_ACCEL;
+  lag_us = (uint32_t)((fix_us - best_hist_us) / 2ULL);
+  return true;
+}
+
+static void update_mount_yaw_imu_history(MountYawState& state,
+                                         uint64_t timestamp_us,
+                                         float ax,
+                                         float ay,
+                                         float az) {
+  state.imu_hist_us[state.imu_hist_idx] = timestamp_us;
+  state.imu_hist_ax[state.imu_hist_idx] = ax;
+  state.imu_hist_ay[state.imu_hist_idx] = ay;
+  state.imu_hist_az[state.imu_hist_idx] = az;
+  state.imu_hist_idx = (uint16_t)((state.imu_hist_idx + 1) % MOUNT_YAW_IMU_HIST_N);
+  if (state.imu_hist_count < MOUNT_YAW_IMU_HIST_N) state.imu_hist_count++;
+}
+
+static bool mount_yaw_delayed_imu(const MountYawState& state,
+                                  uint64_t target_us,
+                                  float& ax,
+                                  float& ay,
+                                  float& az) {
+  if (state.imu_hist_count == 0) return false;
+  bool found = false;
+  uint64_t best_err = UINT64_MAX;
+  uint16_t best_i = 0;
+  for (uint16_t i = 0; i < state.imu_hist_count; i++) {
+    const uint64_t sample_us = state.imu_hist_us[i];
+    if (sample_us == 0) continue;
+    const uint64_t err = (sample_us > target_us) ? (sample_us - target_us)
+                                                : (target_us - sample_us);
+    if (err < best_err) {
+      best_err = err;
+      best_i = i;
+      found = true;
+    }
+  }
+  if (!found || best_err > 50000ULL) return false;
+  ax = state.imu_hist_ax[best_i];
+  ay = state.imu_hist_ay[best_i];
+  az = state.imu_hist_az[best_i];
+  return true;
+}
+
+static void reset_mount_yaw_window(MountYawWindow& w) {
+  w = MountYawWindow{};
+}
+
+static void start_mount_yaw_window(MountYawWindow& w, uint64_t timestamp_us) {
+  reset_mount_yaw_window(w);
+  w.active = true;
+  w.start_us = timestamp_us;
+  w.end_us = timestamp_us;
+}
+
+static void flush_mount_yaw_stability_segment(MountYawWindow& w) {
+  if (w.stab_count < (uint16_t)FREQ_HZ / 2 || w.stab_sum_abs_acc < 0.01f) {
+    w.stab_count = 0;
+    w.stab_sum_ax = 0.0f;
+    w.stab_sum_ay = 0.0f;
+    w.stab_sum_acc = 0.0f;
+    w.stab_sum_axacc = 0.0f;
+    w.stab_sum_ayacc = 0.0f;
+    w.stab_sum_abs_acc = 0.0f;
+    return;
+  }
+
+  const float n = (float)w.stab_count;
+  const float mean_ax = w.stab_sum_ax / n;
+  const float mean_ay = w.stab_sum_ay / n;
+  const float mean_acc = w.stab_sum_acc / n;
+  const float cov_ax_acc = w.stab_sum_axacc / n - mean_ax * mean_acc;
+  const float cov_ay_acc = w.stab_sum_ayacc / n - mean_ay * mean_acc;
+  const float yaw_deg = normalize_mount_yaw_deg(atan2f(cov_ax_acc, cov_ay_acc) / DEG2RAD);
+  const float yaw_rad = yaw_deg * DEG2RAD;
+  w.stability_sin_sum += sinf(yaw_rad);
+  w.stability_cos_sum += cosf(yaw_rad);
+  if (w.stability_n < 255) w.stability_n++;
+
+  w.stab_count = 0;
+  w.stab_sum_ax = 0.0f;
+  w.stab_sum_ay = 0.0f;
+  w.stab_sum_acc = 0.0f;
+  w.stab_sum_axacc = 0.0f;
+  w.stab_sum_ayacc = 0.0f;
+  w.stab_sum_abs_acc = 0.0f;
+}
+
+static void accumulate_mount_yaw_window(MountYawWindow& w,
+                                        uint64_t timestamp_us,
+                                        float ax, float ay, float az,
+                                        float gps_acc_g,
+                                        float speed_kmh,
+                                        float gz_corr_dps,
+                                        float cog_rate_dps,
+                                        float lat_expected_g) {
+  w.end_us = timestamp_us;
+  w.count++;
+  w.sum_ax += ax;
+  w.sum_ay += ay;
+  w.sum_ax2 += ax * ax;
+  w.sum_ay2 += ay * ay;
+  w.sum_axay += ax * ay;
+  w.sum_acc += gps_acc_g;
+  w.sum_acc2 += gps_acc_g * gps_acc_g;
+  w.sum_axacc += ax * gps_acc_g;
+  w.sum_ayacc += ay * gps_acc_g;
+  w.sum_abs_acc += fabsf(gps_acc_g);
+  w.sum_speed += speed_kmh;
+  if (speed_kmh < w.min_speed) w.min_speed = speed_kmh;
+  w.sum_gz2 += gz_corr_dps * gz_corr_dps;
+  w.sum_cog2 += cog_rate_dps * cog_rate_dps;
+  w.sum_lat_expected2 += lat_expected_g * lat_expected_g;
+  w.sum_az2 += az * az;
+  w.stab_count++;
+  w.stab_sum_ax += ax;
+  w.stab_sum_ay += ay;
+  w.stab_sum_acc += gps_acc_g;
+  w.stab_sum_axacc += ax * gps_acc_g;
+  w.stab_sum_ayacc += ay * gps_acc_g;
+  w.stab_sum_abs_acc += fabsf(gps_acc_g);
+  if (w.stab_count >= (uint16_t)FREQ_HZ) {
+    flush_mount_yaw_stability_segment(w);
+  }
+}
+
+static bool compute_mount_yaw_observation(const MountYawWindow& w,
+                                          float& yaw_deg,
+                                          float& quality,
+                                          float& long_corr,
+                                          float& lat_rms_before,
+                                          float& lat_rms_after,
+                                          float& duration_s,
+                                          float& mean_speed_kmh,
+                                          float& mean_abs_acc_g,
+                                          float& rms_gz_dps,
+                                          float& rms_cog_rate_dps,
+                                          float& rms_lat_expected_g,
+                                          float& rms_az_g,
+                                          float& stability_std_deg,
+                                          uint8_t& stability_n) {
+  if (!w.active || w.count < (uint16_t)(MOUNT_YAW_MIN_DURATION_S * FREQ_HZ)) {
+    return false;
+  }
+  const float n = (float)w.count;
+  duration_s = (float)(w.end_us - w.start_us) / 1000000.0f;
+  if (duration_s < MOUNT_YAW_MIN_DURATION_S) return false;
+
+  const float mean_ax = w.sum_ax / n;
+  const float mean_ay = w.sum_ay / n;
+  const float var_ax = fmaxf(0.0f, w.sum_ax2 / n - mean_ax * mean_ax);
+  const float var_ay = fmaxf(0.0f, w.sum_ay2 / n - mean_ay * mean_ay);
+  const float cov_xy = w.sum_axay / n - mean_ax * mean_ay;
+
+  const float trace = var_ax + var_ay;
+  const float disc = sqrtf(fmaxf(0.0f, (var_ax - var_ay) * (var_ax - var_ay)
+                                      + 4.0f * cov_xy * cov_xy));
+  const float lambda_min = 0.5f * (trace - disc);
+  float vx = 1.0f;
+  float vy = 0.0f;
+  if (fabsf(cov_xy) > 1.0e-9f) {
+    vx = cov_xy;
+    vy = lambda_min - var_ax;
+  } else if (var_ay < var_ax) {
+    vx = 0.0f;
+    vy = 1.0f;
+  }
+  const float norm_v = sqrtf(vx * vx + vy * vy);
+  if (norm_v < 1.0e-9f) return false;
+  vx /= norm_v;
+  vy /= norm_v;
+
+  yaw_deg = normalize_mount_yaw_deg(atan2f(-vy, vx) / DEG2RAD);
+  const float yaw_rad = yaw_deg * DEG2RAD;
+  const float c = cosf(yaw_rad);
+  const float s = sinf(yaw_rad);
+
+  const float mean_acc = w.sum_acc / n;
+  const float var_acc = fmaxf(0.0f, w.sum_acc2 / n - mean_acc * mean_acc);
+  const float cov_ax_acc = w.sum_axacc / n - mean_ax * mean_acc;
+  const float cov_ay_acc = w.sum_ayacc / n - mean_ay * mean_acc;
+  const float var_lat = fmaxf(0.0f, c * c * var_ax + s * s * var_ay - 2.0f * c * s * cov_xy);
+  const float var_long = fmaxf(0.0f, s * s * var_ax + c * c * var_ay + 2.0f * s * c * cov_xy);
+  const float cov_long_acc = s * cov_ax_acc + c * cov_ay_acc;
+
+  long_corr = 0.0f;
+  if (var_long > 1.0e-10f && var_acc > 1.0e-10f) {
+    long_corr = cov_long_acc / sqrtf(var_long * var_acc);
+  }
+  lat_rms_before = sqrtf(var_ax);
+  lat_rms_after = sqrtf(var_lat);
+  mean_speed_kmh = w.sum_speed / n;
+  mean_abs_acc_g = w.sum_abs_acc / n;
+  rms_gz_dps = sqrtf(w.sum_gz2 / n);
+  rms_cog_rate_dps = sqrtf(w.sum_cog2 / n);
+  rms_lat_expected_g = sqrtf(w.sum_lat_expected2 / n);
+  rms_az_g = sqrtf(w.sum_az2 / n);
+  stability_n = w.stability_n;
+  stability_std_deg = (stability_n >= 2)
+      ? circular_std_deg(w.stability_sin_sum, w.stability_cos_sum, (float)stability_n)
+      : 180.0f;
+
+  float q_duration = clamp01f((duration_s - MOUNT_YAW_MIN_DURATION_S) / 3.5f);
+  float q_speed = clamp01f((mean_speed_kmh - MOUNT_YAW_MIN_SPEED_KMH) / 27.0f);
+  float q_gz = clamp01f(1.0f - rms_gz_dps / 1.5f);
+  float q_cog = clamp01f(1.0f - rms_cog_rate_dps / MOUNT_YAW_MAX_ABS_COG_RATE_DPS);
+  float q_lat_expected = clamp01f(1.0f - rms_lat_expected_g / MOUNT_YAW_MAX_LAT_EXPECTED_G);
+  float q_acc = clamp01f((mean_abs_acc_g - MOUNT_YAW_MIN_ABS_GPS_ACCEL_G) / 0.075f);
+  float q_corr = clamp01f((long_corr - MOUNT_YAW_MIN_LONG_CORR) / 0.6f);
+  quality = 0.14f * q_duration + 0.10f * q_speed + 0.12f * q_gz
+          + 0.10f * q_cog + 0.14f * q_lat_expected + 0.18f * q_acc
+          + 0.22f * q_corr;
+
+  return mean_abs_acc_g >= MOUNT_YAW_MIN_ABS_GPS_ACCEL_G
+      && long_corr >= MOUNT_YAW_MIN_LONG_CORR
+      && quality >= MOUNT_YAW_MIN_QUALITY;
+}
+
+static bool enqueue_mount_yaw_observation(const MountYawWindow& w,
+                                          uint8_t obs_id,
+                                          float yaw_deg,
+                                          float quality,
+                                          float long_corr,
+                                          float lat_rms_before,
+                                          float lat_rms_after,
+                                          float duration_s,
+                                          float mean_speed_kmh,
+                                          float mean_abs_acc_g,
+                                          float rms_gz_dps,
+                                          float rms_cog_rate_dps,
+                                          float rms_lat_expected_g,
+                                          float rms_az_g,
+                                          float stability_std_deg,
+                                          uint8_t stability_n
+#ifdef USE_BMI270
+                                          , uint32_t& record_seq
+#endif
+) {
+  if (sd_queue == NULL) return false;
+  TelemetryRecord rec = {};
+  rec.timestamp_us = MOUNT_YAW_OBS_SENTINEL_TS;
+  rec.ax = yaw_deg;
+  rec.ay = quality;
+  rec.az = duration_s;
+  rec.gx = mean_speed_kmh;
+  rec.gy = mean_abs_acc_g;
+  rec.gz = rms_gz_dps;
+  rec.temp_c = rms_cog_rate_dps;
+  rec.lap = obs_id;
+  rec.gps_sog_kmh = long_corr;
+  rec.gps_alt_m = lat_rms_before;
+  rec.gps_hdop = lat_rms_after;
+  rec.kf_x = (lat_rms_before > 1.0e-6f)
+      ? 100.0f * (lat_rms_before - lat_rms_after) / lat_rms_before
+      : 0.0f;
+  rec.kf_y = rms_lat_expected_g;
+  rec.kf_vel = rms_az_g;
+  rec.kf_heading = stability_std_deg;
+  rec.kf6_bgz = (float)stability_n;
+  rec.gps_fix_us = w.start_us;
+  rec.nav_fix_us = w.end_us;
+#ifdef USE_BMI270
+  rec.seq = record_seq++;
+#endif
+  if (xQueueSend(sd_queue, &rec, 0) != pdTRUE) {
+    sd_enqueue_fail_count++;
+    sd_records_dropped++;
+    return false;
+  }
+  Serial.printf("[MOUNT_YAW] OBS id=%u yaw=%+.2f q=%.2f dur=%.1fs corr=%.2f stab=%.1f n=%u\n",
+                (unsigned)obs_id, yaw_deg, quality, duration_s, long_corr,
+                stability_std_deg, (unsigned)stability_n);
+  return true;
+}
+
+static bool enqueue_mount_yaw_boot(const MountYawBootState& boot,
+                                   uint64_t now_us
+#ifdef USE_BMI270
+                                   , uint32_t& record_seq
+#endif
+) {
+  if (sd_queue == NULL) return false;
+  TelemetryRecord rec = {};
+  rec.timestamp_us = MOUNT_YAW_BOOT_SENTINEL_TS;
+  rec.ax = boot.yaw_deg;
+  rec.ay = circular_std_deg(boot.sin_sum, boot.cos_sum, (float)boot.obs_count);
+  rec.az = (float)boot.obs_count;
+  rec.gx = boot.quality_sum / fmaxf(1.0f, (float)boot.obs_count);
+  rec.gy = boot.corr_sum / fmaxf(1.0f, (float)boot.obs_count);
+  rec.gz = boot.stability_sum / fmaxf(1.0f, (float)boot.obs_count);
+  rec.gps_sog_kmh = boot.sin_yaw;
+  rec.gps_alt_m = boot.cos_yaw;
+  rec.gps_fix_us = now_us;
+  rec.nav_fix_us = now_us;
+#ifdef USE_BMI270
+  rec.seq = record_seq++;
+#endif
+  if (xQueueSend(sd_queue, &rec, 0) != pdTRUE) {
+    return false;
+  }
+  Serial.printf("[MOUNT_YAW] BOOT yaw=%+.2f std=%.1f obs=%u q=%.2f corr=%.2f\n",
+                boot.yaw_deg,
+                rec.ay,
+                (unsigned)boot.obs_count,
+                rec.gx,
+                rec.gy);
+  return true;
+}
+
+static bool consider_mount_yaw_boot(MountYawState& state,
+                                    float yaw_deg,
+                                    float quality,
+                                    float long_corr,
+                                    float stability_std_deg,
+                                    uint64_t now_us
+#ifdef USE_BMI270
+                                    , uint32_t& record_seq
+#endif
+) {
+  if (state.boot.active) return false;
+  if (quality < MOUNT_YAW_BOOT_MIN_QUALITY ||
+      long_corr < MOUNT_YAW_BOOT_MIN_LONG_CORR ||
+      stability_std_deg > MOUNT_YAW_BOOT_MAX_OBS_STABILITY_STD_DEG) {
+    return false;
+  }
+
+  const float yaw_rad = normalize_mount_yaw_deg(yaw_deg) * DEG2RAD;
+  state.boot.sin_sum += sinf(yaw_rad) * quality;
+  state.boot.cos_sum += cosf(yaw_rad) * quality;
+  state.boot.quality_sum += quality;
+  state.boot.corr_sum += long_corr;
+  state.boot.stability_sum += stability_std_deg;
+  if (state.boot.obs_count < 255) state.boot.obs_count++;
+
+  if (state.boot.obs_count < MOUNT_YAW_BOOT_MIN_OBS) {
+    return false;
+  }
+
+  const float consensus_std_deg =
+      circular_std_deg(state.boot.sin_sum, state.boot.cos_sum, state.boot.quality_sum);
+  if (consensus_std_deg > MOUNT_YAW_BOOT_MAX_CONSENSUS_STD_DEG) {
+    return false;
+  }
+
+  state.boot.yaw_rad = atan2f(state.boot.sin_sum, state.boot.cos_sum);
+  state.boot.yaw_deg = normalize_mount_yaw_deg(state.boot.yaw_rad / DEG2RAD);
+  state.boot.yaw_rad = state.boot.yaw_deg * DEG2RAD;
+  state.boot.sin_yaw = sinf(state.boot.yaw_rad);
+  state.boot.cos_yaw = cosf(state.boot.yaw_rad);
+  state.boot.active = true;
+  state.boot.just_activated = true;
+
+  if (!state.boot.emitted) {
+    enqueue_mount_yaw_boot(state.boot,
+                           now_us
+#ifdef USE_BMI270
+                           , record_seq
+#endif
+    );
+    state.boot.emitted = true;
+  }
+  return true;
+}
+
+static void finalize_mount_yaw_window(MountYawState& state,
+                                      uint64_t now_us
+#ifdef USE_BMI270
+                                      , uint32_t& record_seq
+#endif
+) {
+  if (!state.win.active) return;
+  flush_mount_yaw_stability_segment(state.win);
+  float yaw_deg = 0.0f;
+  float quality = 0.0f;
+  float long_corr = 0.0f;
+  float lat_rms_before = 0.0f;
+  float lat_rms_after = 0.0f;
+  float duration_s = 0.0f;
+  float mean_speed_kmh = 0.0f;
+  float mean_abs_acc_g = 0.0f;
+  float rms_gz_dps = 0.0f;
+  float rms_cog_rate_dps = 0.0f;
+  float rms_lat_expected_g = 0.0f;
+  float rms_az_g = 0.0f;
+  float stability_std_deg = 180.0f;
+  uint8_t stability_n = 0;
+
+  if (compute_mount_yaw_observation(state.win,
+                                    yaw_deg,
+                                    quality,
+                                    long_corr,
+                                    lat_rms_before,
+                                    lat_rms_after,
+                                    duration_s,
+                                    mean_speed_kmh,
+                                    mean_abs_acc_g,
+                                    rms_gz_dps,
+                                    rms_cog_rate_dps,
+                                    rms_lat_expected_g,
+                                    rms_az_g,
+                                    stability_std_deg,
+                                    stability_n)) {
+    state.obs_id++;
+    enqueue_mount_yaw_observation(state.win,
+                                  state.obs_id,
+                                  yaw_deg,
+                                  quality,
+                                  long_corr,
+                                  lat_rms_before,
+                                  lat_rms_after,
+                                  duration_s,
+                                  mean_speed_kmh,
+                                  mean_abs_acc_g,
+                                  rms_gz_dps,
+                                  rms_cog_rate_dps,
+                                  rms_lat_expected_g,
+                                  rms_az_g,
+                                  stability_std_deg,
+                                  stability_n
+#ifdef USE_BMI270
+                                  , record_seq
+#endif
+    );
+    consider_mount_yaw_boot(state,
+                            yaw_deg,
+                            quality,
+                            long_corr,
+                            stability_std_deg,
+                            now_us
+#ifdef USE_BMI270
+                            , record_seq
+#endif
+    );
+    state.cooldown_until_us = now_us + (uint64_t)(MOUNT_YAW_COOLDOWN_S * 1000000.0f);
+  }
+  reset_mount_yaw_window(state.win);
+}
+
 void Task_Filter(void *pvParameters) {
   ImuRawData data;
   uint32_t last_eskf_epoch = 0; // last GPS epoch processed by the ESKF
   uint64_t last_timestamp_us = 0;
+  MountYawState mount_yaw;
+  GpsCorrectionGateState gps_gate;
 #ifdef USE_BMI270
   uint32_t record_seq = 0;
 #endif
@@ -140,6 +807,8 @@ void Task_Filter(void *pvParameters) {
           prev_cent_x = 0.0f;  // VGPL: reset stale centripetal compensation
           prev_long_y = 0.0f;  // VGPL: reset stale longitudinal compensation
           prev_v_eskf = 0.0f;
+          mount_yaw = MountYawState{};
+          gps_gate = GpsCorrectionGateState{};
           Serial.println("[FILTER] Recalibration reset complete.");
           xSemaphoreGive(telemetry_mutex);
           continue; // discard stale IMU sample, start fresh
@@ -168,6 +837,9 @@ void Task_Filter(void *pvParameters) {
         ax_r = ax_r_raw - bias_ax;
         ay_r = ay_r_raw - bias_ay;
         az_r = az_r_raw - bias_az;
+        if (mount_yaw.boot.active) {
+          rotate_mount_yaw_xy(mount_yaw.boot.yaw_rad, ax_r, ay_r);
+        }
 
         // STEP 4: Gyroscope — electronic bias + vehicle-frame rotation
         // K_gs (G-sensitivity matrix) was removed in v1.3.0: the MPU-6886 bias
@@ -180,6 +852,29 @@ void Task_Filter(void *pvParameters) {
 
         rotate_3d(gx_clean, gy_clean, gz_clean, gx_r, gy_r, gz_r, cos_phi,
                  sin_phi, cos_theta, sin_theta);
+        if (mount_yaw.boot.active) {
+          rotate_mount_yaw_xy(mount_yaw.boot.yaw_rad, gx_r, gy_r);
+        }
+        if (mount_yaw.boot.just_activated) {
+          // The mount-yaw correction changes the vehicle X/Y basis. Clear
+          // frame-dependent learnt state before the corrected frame feeds ZARU,
+          // Madgwick and the ESKF on subsequent samples.
+          thermal_bias_gx = 0.0f;
+          thermal_bias_gy = 0.0f;
+          thermal_bias_gz = 0.0f;
+          memset(gz_var_buf, 0, sizeof(gz_var_buf));
+          memset(gx_var_buf, 0, sizeof(gx_var_buf));
+          memset(gy_var_buf, 0, sizeof(gy_var_buf));
+          gz_var_idx = 0;
+          gz_var_count = 0;
+          has_cog_ref = false;
+          cog_variation = 0.0f;
+          prev_cent_x = 0.0f;
+          prev_long_y = 0.0f;
+          ahrs.q[0] = 1.0f; ahrs.q[1] = 0.0f; ahrs.q[2] = 0.0f; ahrs.q[3] = 0.0f;
+          first_sample_after_recalib = true;
+          mount_yaw.boot.just_activated = false;
+        }
 
         // STEP 4b: ZARU→Madgwick bias pre-correction (v1.3.5)
         // ─────────────────────────────────────────────────────────────────
@@ -269,6 +964,7 @@ void Task_Filter(void *pvParameters) {
         lin_ax = ax_r - grav_x;
         lin_ay = ay_r - grav_y;
         lin_az = az_r - grav_z;
+        update_mount_yaw_imu_history(mount_yaw, data.timestamp_us, lin_ax, lin_ay, lin_az);
 
         // Snapshot prev_* EMA globals for use in the end-of-pipe EMA (Phase 3).
         // calibrate_alignment() may zero these between now and Phase 4 write-back,
@@ -486,49 +1182,189 @@ void Task_Filter(void *pvParameters) {
 
       // Correct: only if there is a new GPS fix AND it is not stale
       if (last_gps.valid && last_gps.epoch != last_eskf_epoch && !gps_is_stale) {
-        // First valid coordinate → set the ENU origin
-        if (!gps_origin_set) {
-          gps_origin_lat = last_gps.lat;
-          gps_origin_lon = last_gps.lon;
-          gps_origin_set = true;
-          eskf.reset();  // clean state centred on origin
-          eskf6.reset();
-          Serial.printf("[ESKF] ENU origin: %.6f, %.6f\n",
-                        gps_origin_lat, gps_origin_lon);
-        }
-        float east_m, north_m;
-        wgs84_to_enu(last_gps.lat, last_gps.lon,
-                     gps_origin_lat, gps_origin_lon,
-                     east_m, north_m);
-        eskf.correct(east_m, north_m, gps_speed_kmh_used, last_gps.hdop);
-        eskf6.correct(east_m, north_m, gps_speed_kmh_used, last_gps.hdop);
-        last_eskf_epoch = last_gps.epoch;
+        bool gps_fix_accepted = gps_fix_quality_ok(last_gps);
+        if (!gps_fix_accepted) {
+          last_eskf_epoch = last_gps.epoch;
+        } else {
+          // First valid coordinate → set the ENU origin
+          if (!gps_origin_set) {
+            gps_origin_lat = last_gps.lat;
+            gps_origin_lon = last_gps.lon;
+            gps_origin_set = true;
+            eskf.reset();  // clean state centred on origin
+            eskf6.reset();
+            gps_gate = GpsCorrectionGateState{};
+            Serial.printf("[ESKF] ENU origin: %.6f, %.6f\n",
+                          gps_origin_lat, gps_origin_lon);
+          }
+          float east_m, north_m;
+          wgs84_to_enu(last_gps.lat, last_gps.lon,
+                       gps_origin_lat, gps_origin_lon,
+                       east_m, north_m);
+          gps_fix_accepted =
+              gps_correction_gate_allows(gps_gate,
+                                         east_m,
+                                         north_m,
+                                         gps_speed_kmh_used,
+                                         last_gps.fix_us);
+          if (gps_fix_accepted) {
+            eskf.correct(east_m, north_m, gps_speed_kmh_used, last_gps.hdop);
+            eskf6.correct(east_m, north_m, gps_speed_kmh_used, last_gps.hdop);
+            gps_correction_gate_accept(gps_gate,
+                                       east_m,
+                                       north_m,
+                                       gps_speed_kmh_used,
+                                       last_gps.fix_us);
+          } else if (gps_gate.reject_count < 255) {
+            gps_gate.reject_count++;
+          }
+          last_eskf_epoch = last_gps.epoch;
 
-        // ── COG variation for Enhanced Straight-Line ZARU (v1.3.1) ──────────
-        // Long-baseline approach: COG computed only after >15 m displacement
-        // from the reference position. Suppresses GPS position noise
-        // (σ_COG ≈ σ_pos/baseline ≈ 1.5m/15m ≈ 0.1 rad).
-        if (gps_speed_kmh_used > 20.0f) {
-          if (!has_cog_ref) {
-            cog_ref_east = east_m;
-            cog_ref_north = north_m;
-            has_cog_ref = true;
-          } else {
-            float de = east_m - cog_ref_east;
-            float dn = north_m - cog_ref_north;
-            float dist = sqrtf(de * de + dn * dn);
-            if (dist > COG_MIN_BASELINE_M) {
-              float current_cog = atan2f(de, dn);
-              cog_variation = current_cog - prev_cog_rad;
-              // wrap to [-π, π]
-              if (cog_variation >  (float)M_PI) cog_variation -= 2.0f * (float)M_PI;
-              if (cog_variation < -(float)M_PI) cog_variation += 2.0f * (float)M_PI;
-              prev_cog_rad = current_cog;
+          // ── COG variation for Enhanced Straight-Line ZARU (v1.3.1) ──────────
+          // Long-baseline approach: COG computed only after >15 m displacement
+          // from the reference position. Suppresses GPS position noise
+          // (σ_COG ≈ σ_pos/baseline ≈ 1.5m/15m ≈ 0.1 rad).
+          if (gps_fix_accepted && gps_speed_kmh_used > 20.0f) {
+            if (!has_cog_ref) {
               cog_ref_east = east_m;
               cog_ref_north = north_m;
+              has_cog_ref = true;
+            } else {
+              float de = east_m - cog_ref_east;
+              float dn = north_m - cog_ref_north;
+              float dist = sqrtf(de * de + dn * dn);
+              if (dist > COG_MIN_BASELINE_M) {
+                float current_cog = atan2f(de, dn);
+                cog_variation = current_cog - prev_cog_rad;
+                // wrap to [-π, π]
+                if (cog_variation >  (float)M_PI) cog_variation -= 2.0f * (float)M_PI;
+                if (cog_variation < -(float)M_PI) cog_variation += 2.0f * (float)M_PI;
+                prev_cog_rad = current_cog;
+                cog_ref_east = east_m;
+                cog_ref_north = north_m;
+              }
             }
           }
         }
+      }
+
+      // ── Mount-yaw observation sentinel (v1.8.3, diagnostic only) ───────
+      // Detects straight accel/brake windows and injects MOUNT_YAW_OBS records
+      // into the SD stream. MOUNT_YAW_OBS stays diagnostic. MOUNT_YAW_BOOT is
+      // applied only after several strong, stable and mutually coherent
+      // observations, so tentative/high-dispersion evidence never rotates the
+      // live pipeline.
+      if (last_gps.valid && !gps_is_stale && gps_origin_set) {
+        if (last_gps.epoch != mount_yaw.last_speed_epoch) {
+          const float speed_ms = gps_speed_kmh_used / 3.6f;
+          float acc_g = 0.0f;
+          uint32_t gps_acc_lag_us = 0;
+          if (mount_yaw_speed_baseline_accel(mount_yaw,
+                                             last_gps.fix_us,
+                                             speed_ms,
+                                             acc_g,
+                                             gps_acc_lag_us)) {
+            mount_yaw.gps_acc_ema_g = 0.25f * acc_g + 0.75f * mount_yaw.gps_acc_ema_g;
+            mount_yaw.gps_acc_lag_us = gps_acc_lag_us;
+          }
+          update_mount_yaw_speed_history(mount_yaw, last_gps.fix_us, speed_ms);
+          mount_yaw.last_speed_ms = speed_ms;
+          mount_yaw.last_speed_fix_us = last_gps.fix_us;
+          mount_yaw.last_speed_epoch = last_gps.epoch;
+          mount_yaw.has_speed = true;
+
+          float east_m = 0.0f, north_m = 0.0f;
+          wgs84_to_enu(last_gps.lat, last_gps.lon,
+                       gps_origin_lat, gps_origin_lon,
+                       east_m, north_m);
+          if (mount_yaw.has_cog && last_gps.fix_us > mount_yaw.last_cog_fix_us) {
+            const float de = east_m - mount_yaw.last_east_m;
+            const float dn = north_m - mount_yaw.last_north_m;
+            const float dist = sqrtf(de * de + dn * dn);
+            const float dt_cog = (float)(last_gps.fix_us - mount_yaw.last_cog_fix_us) / 1000000.0f;
+            if (dist > 1.5f && dt_cog > 0.05f && dt_cog < 1.0f) {
+              const float cog = atan2f(de, dn);
+              const float cog_rate_dps = wrap_pi(cog - mount_yaw.last_cog_rad) / dt_cog / DEG2RAD;
+              mount_yaw.cog_rate_ema_dps = 0.35f * cog_rate_dps + 0.65f * mount_yaw.cog_rate_ema_dps;
+              mount_yaw.last_cog_rad = cog;
+            }
+          } else {
+            mount_yaw.last_cog_rad = 0.0f;
+            mount_yaw.has_cog = true;
+          }
+          mount_yaw.last_east_m = east_m;
+          mount_yaw.last_north_m = north_m;
+          mount_yaw.last_cog_fix_us = last_gps.fix_us;
+          mount_yaw.last_cog_epoch = last_gps.epoch;
+        }
+
+        const float gz_corr_dps = gz_r - thermal_bias_gz;
+        const float speed_ms = gps_speed_kmh_used / 3.6f;
+        const float lat_expected_g = speed_ms * (gz_corr_dps * DEG2RAD) / G_ACCEL;
+        const bool straight_candidate =
+            data.timestamp_us >= mount_yaw.cooldown_until_us &&
+            gps_speed_kmh_used >= MOUNT_YAW_MIN_SPEED_KMH &&
+            last_gps.hdop <= MOUNT_YAW_MAX_HDOP &&
+            last_gps.sats >= MOUNT_YAW_MIN_SATS &&
+            fabsf(gz_corr_dps) <= MOUNT_YAW_MAX_ABS_GZ_DPS &&
+            fabsf(mount_yaw.cog_rate_ema_dps) <= MOUNT_YAW_MAX_ABS_COG_RATE_DPS &&
+            fabsf(lat_expected_g) <= MOUNT_YAW_MAX_LAT_EXPECTED_G &&
+#ifdef USE_BMI270
+            !data.fifo_overrun &&
+            data.imu_sample_fresh &&
+#endif
+            true;
+
+        if (straight_candidate) {
+          if (!mount_yaw.win.active) {
+            start_mount_yaw_window(mount_yaw.win, data.timestamp_us);
+          }
+          float obs_lin_ax = lin_ax;
+          float obs_lin_ay = lin_ay;
+          float obs_lin_az = lin_az;
+          if (mount_yaw.gps_acc_lag_us > 0 &&
+              data.timestamp_us > (uint64_t)mount_yaw.gps_acc_lag_us) {
+            mount_yaw_delayed_imu(mount_yaw,
+                                  data.timestamp_us - (uint64_t)mount_yaw.gps_acc_lag_us,
+                                  obs_lin_ax,
+                                  obs_lin_ay,
+                                  obs_lin_az);
+          }
+          accumulate_mount_yaw_window(mount_yaw.win,
+                                      data.timestamp_us,
+                                      obs_lin_ax,
+                                      obs_lin_ay,
+                                      obs_lin_az,
+                                      mount_yaw.gps_acc_ema_g,
+                                      gps_speed_kmh_used,
+                                      gz_corr_dps,
+                                      mount_yaw.cog_rate_ema_dps,
+                                      lat_expected_g);
+          const float win_duration_s =
+              (float)(data.timestamp_us - mount_yaw.win.start_us) / 1000000.0f;
+          if (win_duration_s >= MOUNT_YAW_MAX_DURATION_S) {
+            finalize_mount_yaw_window(mount_yaw,
+                                      data.timestamp_us
+#ifdef USE_BMI270
+                                      , record_seq
+#endif
+            );
+          }
+        } else if (mount_yaw.win.active) {
+          finalize_mount_yaw_window(mount_yaw,
+                                    data.timestamp_us
+#ifdef USE_BMI270
+                                    , record_seq
+#endif
+          );
+        }
+      } else if (mount_yaw.win.active) {
+        finalize_mount_yaw_window(mount_yaw,
+                                  data.timestamp_us
+#ifdef USE_BMI270
+                                  , record_seq
+#endif
+        );
       }
 
       // ── PHASE 3: End-of-pipe EMA ───────────────────────────────────────────
