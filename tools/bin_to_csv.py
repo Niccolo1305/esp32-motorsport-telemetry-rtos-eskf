@@ -39,6 +39,7 @@ TEXT_ENCODING_WRITE = 'utf-8-sig'
 TEXT_ENCODINGS_READ = ('utf-8-sig', 'utf-8', 'latin1')
 RESYNC_SCAN_BYTES = 4096
 RESYNC_CONFIRM_RECORDS = 8
+PREALLOC_TAIL_RESYNC_SCAN_BYTES = 1024 * 1024
 MAX_TIMESTAMP_US = 7 * 24 * 60 * 60 * 1_000_000
 MAX_TIMESTAMP_GAP_US = 10_000_000
 FILE_HEADER_V6_FLAG_LOG_PREALLOCATED = 0x00000010
@@ -117,13 +118,13 @@ HEADER_164 = HEADER_155 + ['gps_fix_us (µs)', 'gps_valid']
 COL_FMT_164 = COL_FMT_155 + ['{:d}', '{:d}']
 assert struct.calcsize(FMT_164) == 164, f"FMT_164 mismatch: {struct.calcsize(FMT_164)}"
 
-# 190-byte record (v1.5.0+): adds NAV-PV velocity fields from CASIC binary
-# nav_speed2d: CASIC NAV-PV ground speed [m/s]
+# 190-byte record (v1.5.0+): adds CASIC NAV/NAV2 binary velocity fields
+# nav_speed2d: CASIC NAV/NAV2 ground speed [m/s]
 # nav_s_acc:   speed accuracy estimate [m/s]
 # nav_vel_n/e: ENU velocity components [m/s]
-# nav_vel_valid: 0=invalid, 6=2D, 7=3D
-# gps_speed_source: 0=NMEA_SOG, 1=NAV_PV (per-sample source flag)
-# nav_fix_us:  esp_timer when NAV-PV was parsed [µs] (freshness/SITL)
+# nav_vel_valid: raw CASIC NAV/NAV2 velocity validity scale; firmware treats >=6 as velocity-valid
+# gps_speed_source: 0=NMEA_SOG, 1=NAV/NAV2 binary (source actually used by firmware)
+# nav_fix_us:  esp_timer when NAV/NAV2 was parsed [µs] (freshness/SITL)
 FMT_190 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQ'
 HEADER_190 = HEADER_164 + [
     'nav_speed2d (m/s)', 'nav_s_acc (m/s)',
@@ -744,6 +745,19 @@ def _record_seq(vals, fields):
     return int(value) if value is not None else None
 
 
+def _record_integrity_ok(vals, fields, raw=None):
+    value = _field_value(vals, fields, 'record_magic')
+    if value is not None and value != RECORD_MAGIC_256_V6:
+        return False
+
+    value = _field_value(vals, fields, 'crc16')
+    if value is not None and raw is not None:
+        if crc16_ccitt(raw[:-2]) != value:
+            return False
+
+    return True
+
+
 def _fmt_sentinel_float(value, digits=5):
     try:
         value = float(value)
@@ -822,14 +836,8 @@ def _mount_yaw_boot_comment(vals, fields):
 
 def _record_plausible(vals, fields, prev_ts_us=None, raw=None):
     """Heuristic guard used only to recover from byte-level SD log misalignment."""
-    value = _field_value(vals, fields, 'record_magic')
-    if value is not None and value != RECORD_MAGIC_256_V6:
+    if not _record_integrity_ok(vals, fields, raw):
         return False
-
-    value = _field_value(vals, fields, 'crc16')
-    if value is not None and raw is not None:
-        if crc16_ccitt(raw[:-2]) != value:
-            return False
 
     ts_us = _timestamp_us(vals, fields)
     if ts_us in (SENTINEL_CALIB, SENTINEL_MOUNT_YAW_OBS, SENTINEL_MOUNT_YAW_BOOT):
@@ -911,7 +919,7 @@ def _record_plausible(vals, fields, prev_ts_us=None, raw=None):
         return False
 
     value = _field_value(vals, fields, 'nav_vel_valid')
-    if value is not None and value not in (0, 6, 7):
+    if value is not None and not _range_ok(value, 0, 7):
         return False
 
     value = _field_value(vals, fields, 'gps_speed_source')
@@ -921,27 +929,28 @@ def _record_plausible(vals, fields, prev_ts_us=None, raw=None):
     return True
 
 
-def _find_resync_skip(fobj, start_pos, fmt, chunk_size, fields):
-    window_len = RESYNC_SCAN_BYTES + RESYNC_CONFIRM_RECORDS * chunk_size
+def _find_resync_skip(fobj, start_pos, fmt, chunk_size, fields,
+                      prev_ts_us=None, scan_bytes=RESYNC_SCAN_BYTES):
+    window_len = scan_bytes + RESYNC_CONFIRM_RECORDS * chunk_size
     fobj.seek(start_pos)
     window = fobj.read(window_len)
-    max_skip = min(RESYNC_SCAN_BYTES, len(window) - RESYNC_CONFIRM_RECORDS * chunk_size)
+    max_skip = min(scan_bytes, len(window) - RESYNC_CONFIRM_RECORDS * chunk_size)
     if max_skip < 1:
         return None
 
     for skip in range(1, max_skip + 1):
-        prev_ts_us = None
+        candidate_prev_ts_us = prev_ts_us
         ok = True
         for i in range(RESYNC_CONFIRM_RECORDS):
             off = skip + i * chunk_size
             vals = struct.unpack_from(fmt, window, off)
             raw = window[off:off + chunk_size]
-            if not _record_plausible(vals, fields, prev_ts_us, raw):
+            if not _record_plausible(vals, fields, candidate_prev_ts_us, raw):
                 ok = False
                 break
             ts_us = _timestamp_us(vals, fields)
             if ts_us is not None and ts_us not in (SENTINEL_CALIB, SENTINEL_MOUNT_YAW_OBS, SENTINEL_MOUNT_YAW_BOOT):
-                prev_ts_us = ts_us
+                candidate_prev_ts_us = ts_us
         if ok:
             return skip
     return None
@@ -976,8 +985,10 @@ def _scan_preallocated_logical_end(bin_path, hdr, offset, chunk_size, fmt, field
     """Return (logical_end, valid_records, tail_bytes) for v6 preallocated logs.
 
     The scan stops at the first invalid magic/CRC/plausibility record. It treats
-    the remaining bytes as preallocated tail only if every byte after that point
-    is zero. That avoids hiding real mid-file corruption or later valid records.
+    the remaining bytes as preallocated tail if they are all zero. For v6 logs
+    with stale non-zero preallocated cluster contents, a structurally invalid
+    record (bad magic/CRC) after a valid sequence is also treated as logical EOF,
+    unless a confirmed current-stream resync is found shortly after it.
     """
     if not _is_preallocated_log(hdr):
         size = os.path.getsize(bin_path)
@@ -988,6 +999,7 @@ def _scan_preallocated_logical_end(bin_path, hdr, offset, chunk_size, fmt, field
     valid_records = 0
     prev_ts_us = None
     invalid_pos = None
+    invalid_integrity = False
 
     with open(bin_path, 'rb') as f:
         f.seek(offset)
@@ -998,8 +1010,10 @@ def _scan_preallocated_logical_end(bin_path, hdr, offset, chunk_size, fmt, field
                 invalid_pos = record_pos
                 break
             vals = struct.unpack(fmt, chunk)
-            if not _record_plausible(vals, fields, prev_ts_us, chunk):
+            integrity_ok = _record_integrity_ok(vals, fields, chunk)
+            if not integrity_ok or not _record_plausible(vals, fields, prev_ts_us, chunk):
                 invalid_pos = record_pos
+                invalid_integrity = not integrity_ok
                 break
             ts_us = _timestamp_us(vals, fields)
             if ts_us is not None and ts_us not in (SENTINEL_CALIB, SENTINEL_MOUNT_YAW_OBS, SENTINEL_MOUNT_YAW_BOOT):
@@ -1013,6 +1027,19 @@ def _scan_preallocated_logical_end(bin_path, hdr, offset, chunk_size, fmt, field
             logical_end = invalid_pos
             return logical_end, valid_records, file_size - logical_end
 
+        if invalid_integrity and valid_records > 0:
+            # Preallocated v6 files can expose stale non-zero cluster contents
+            # after the last written record. Do not mistake a real mid-stream
+            # corruption for EOF if the same stream resumes nearby.
+            skip = _find_resync_skip(
+                f, invalid_pos, fmt, chunk_size, fields,
+                prev_ts_us=prev_ts_us,
+                scan_bytes=PREALLOC_TAIL_RESYNC_SCAN_BYTES,
+            )
+            if skip is None:
+                logical_end = invalid_pos
+                return logical_end, valid_records, file_size - logical_end
+
     return file_size, max(0, file_size - offset) // chunk_size, 0
 
 
@@ -1025,7 +1052,7 @@ def bin_logical_layout(bin_path, quiet=False):
         bin_path, hdr, offset, chunk_size, fmt, fields
     )
     if tail_bytes and not quiet:
-        print(f"    {YELLOW}INFO:{RESET} preallocated empty tail ignored: "
+        print(f"    {YELLOW}INFO:{RESET} preallocated tail ignored: "
               f"{tail_bytes:,} byte(s); logical size={logical_end:,} byte(s)")
     return {
         'hdr': hdr,
@@ -1041,7 +1068,7 @@ def repair_bin_preallocated_tail(bin_path):
     layout = bin_logical_layout(bin_path, quiet=True)
     tail_bytes = layout['tail_bytes']
     if tail_bytes <= 0:
-        print(f"  {DIM}No preallocated empty tail to repair.{RESET}")
+        print(f"  {DIM}No preallocated tail to repair.{RESET}")
         return False
     os.truncate(bin_path, layout['logical_end'])
     print(f"  {GREEN}Repaired:{RESET} truncated {tail_bytes:,} byte(s); "

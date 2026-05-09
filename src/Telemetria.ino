@@ -21,7 +21,9 @@
 // DT_MS                        20              Delta Time in milliseconds for FreeRTOS task delay.
 // CALIB_SAMPLES               100             Number of samples for initial static calibration (2 sec).
 // GPS_BAUD                     115200          Baud rate for serial communication with the ATGM336H-6N module.
-// SD_FLUSH_EVERY               250             Samples between one flush() and the next (5s at 50Hz), in Task_SD_Writer.
+// SD_WRITE_BATCH_RECORDS       8               Records accumulated before one SD batch write.
+// SD_FLUSH_EVERY               32              Records between normal sync() calls (4 batches, ~640 ms at 50 Hz).
+// SD_BATCH_IDLE_FLUSH_MS       250             Partial-batch sync timeout when the producer goes idle.
 //
 // --- 3. NETWORK AND DATA TRANSMISSION (telemetria.ino) ---
 // VARIABLE                     VALUE           DESCRIPTION
@@ -39,8 +41,8 @@
 // --- 5. ZARU STATISTICAL ENGINE (telemetria.ino) ---
 // VARIABLE                     VALUE           DESCRIPTION
 // VAR_BUF_SIZE                 50              Variance sliding window size (1 sec at 50Hz).
-// VAR_STILLNESS_GZ_THRESHOLD    0.25f           [(deg/s)^2] gz RAW variance threshold (v1.3.5: was 0.05 on EMA).
-// VAR_STILLNESS_GXY_THRESHOLD   0.35f           [(deg/s)^2] gx/gy RAW variance (higher: chassis vibration on roll/pitch).
+// VAR_STILLNESS_GZ_THRESHOLD    0.25/0.05       [(deg/s)^2] gz RAW variance threshold (AtomS3 / AtomS3R).
+// VAR_STILLNESS_GXY_THRESHOLD   0.35/0.08       [(deg/s)^2] gx/gy RAW variance threshold (AtomS3 / AtomS3R).
 // ZUPT_GPS_MAX_KMH             2.0f            [km/h] Threshold below which GPS agrees vehicle is stationary.
 //
 // --- 6. PHYSICAL AND GEOGRAPHICAL CONSTANTS (eskf.h) ---
@@ -64,7 +66,7 @@
 //
 //
 // ==============================================================================================
-// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.7.6
+// IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.8.9
 // ==============================================================================================
 //
 // Architecture: "End-of-Pipe EMA" + "ZARU-to-Madgwick"
@@ -72,10 +74,14 @@
 // - Variance buffers feed on RAW gyro (prevents false stationary from EMA decay tail)
 // - EMA is computed at the END of the pipeline, after all ZARU updates
 // - Straight-Line ZARU gz_gate uses RAW corrected data (zero latency)
+// - GPS freshness is part of the control gate: stale/no-fix GPS cannot assert ZARU
+// - AtomS3R stale BMI270 FIFO samples are skipped before integration
+// - Mount-yaw observations are diagnostic SD sentinels only; no live frame rotation
 //
 //                          PHASE 1: telemetry_mutex
 // ┌──────────────────────────────────────────────────────────────────────────────┐
 // │ Raw ImuRawData from IMU queue policy (Task_I2C, Core 0)                    │
+// │   AtomS3R: if imu_sample_fresh=false, skip sample before any integration   │
 // │   |                                                                         │
 // │   | STEP 0: Dynamic dt from hardware timestamp                              │
 // │   |   dt_real_sec = delta(timestamp_us) / 1e6                               │
@@ -129,22 +135,30 @@
 //   |   last_gps = shared_gps_data copy
 //   |   NMEA fix path: lat/lon/sog_kmh/alt/sats/hdop + valid/epoch/fix_us
 //   |   NMEA DHV path: dhv_gdspd + dhv_fix_us     [logged for diagnostics only]
-//   |   CASIC NAV-PV path: nav_* fields passive listener only (logged for diagnostics)
+//   |   CASIC NAV2-PVH path: nav_* fields diagnostic listener only
 //   |
-//   | STEP 10: GPS Velocity Selection + Stationary Condition (v1.5.2-clean)
+//   | STEP 10: GPS Velocity Selection + Freshness + Stationary Condition
 //   |   gps_speed_used = sog_kmh
 //   |   Source semantics:
 //   |     * sog_kmh   = NMEA RMC receiver-reported Speed Over Ground at 10 Hz
 //   |     * dhv_gdspd = NMEA DHV, observed 1 Hz on AT6668, diagnostics only
-//   |     * nav_*     = passive CASIC NAV-PV listener, CFG-MSG NACKed by module
-//   |   is_stationary = var_gz < 0.25 AND var_gx < 0.35 AND var_gy < 0.35
-//   |                   AND gps_speed_used < 2 km/h AND |mean_gz| < 2.5 deg/s
+//   |     * nav_*     = CASIC NAV2-PVH shadow candidate, not yet a control source
+//   |     * nav_ok    = MQTT-only candidate flag; gps_speed_source remains actual source
+//   |   gps_fix_fresh = valid fix with age <= 1.5 s
+//   |   gps_stale is raised only after a previously acquired fix becomes stale
+//   |   cold-start 0-sat condition stays "NO FIX / acquiring", not "GPS LOST"
+//   |   is_stationary = variance warm-up complete
+//   |                   AND var_gz/gx/gy below VAR_STILLNESS_* thresholds
+//   |                   (AtomS3: 0.25/0.35, AtomS3R: 0.05/0.08 [(deg/s)^2])
+//   |                   AND gps_fix_fresh AND gps_speed_used < 2 km/h
+//   |                   AND |mean_gz| < 2.5 deg/s
 //   |
 //   | STEP 11a: Static ZARU
 //   |   If is_stationary: thermal_bias_g{x,y,z} = mean_g{x,y,z} (instant)
 //   |
 //   | STEP 11b: Straight-Line ZARU (v1.3.5)
 //   |   Triple gate, zero latency:
+//   |     pre-gate: !is_stationary AND gps_fix_fresh AND speed > 40 km/h
 //   |     gate 1: |lin_ax| < 0.05g                   (no lateral load)
 //   |     gate 2: |gz_r - thermal_bias_gz| < 2.0°/s  (RAW corrected, instant)
 //   |     gate 3: |cog_variation| < 0.10 rad          (COG stable, >15m baseline)
@@ -162,9 +176,17 @@
 //   |   Active: speed > 1.4 m/s AND |lin_ax| < 0.5g; R_nhc = 0.5 (m/s)^2
 //   |
 //   | STEP 14: ESKF Correct (on fresh GPS epoch, ~10Hz)
-//   |   WGS84 -> ENU, 3-stage sequential (pos/speed/COG), Joseph form
+//   |   Requires gps_fix_fresh, new epoch, sats >= 8, hdop <= 2.0
+//   |   First accepted fix sets ENU origin and resets ESKF 5D/6D
+//   |   WGS84 -> ENU, physical distance gate vs speed/dt/accel/HDOP envelope
+//   |   Accepted fix -> 3-stage sequential correct (pos/speed/COG), Joseph form
 //   |   Speed stage and COG baseline use gps_speed_used = sog_kmh
 //   |   COG variation feeds back into Straight-Line ZARU gate
+//   |
+//   | STEP 14b: Mount-Yaw Observation Sentinel (diagnostic only, v1.8.7)
+//   |   Detect straight accel/brake windows with GPS acceleration + yaw/COG gates
+//   |   Emit MOUNT_YAW_OBS / MOUNT_YAW_BOOT sentinel records for offline analysis
+//   |   MOUNT_YAW_APPLY_LIVE=false: no live frame rotation without nav reinit
 //   |
 //   |                          PHASE 3: end-of-pipe EMA
 //   |
@@ -182,11 +204,13 @@
 //   |
 //   |                          PHASE 5: SD record (no mutex)
 //   |
-//   | 202 bytes on AtomS3, 242 bytes on AtomS3R: EMA + Raw + GPS + ESKF 5D + 6D Shadow
+//   | 202 bytes on AtomS3, 256 bytes on AtomS3R v6:
+//   |   EMA + zero-latency pipeline channels + GPS + ESKF 5D + 6D Shadow
 //   |   + ZARU flags (bit 3: recalib) + tbias_gz + Bosch-direct acquisition truth
-//   |   + gps_fix_us + gps_valid + gps_sog_kmh
+//   |   + gps_fix_us + gps_valid (fresh-for-fusion flag) + gps_sog_kmh
 //   |   + nav_speed2d/nav_s_acc/nav_vel_n/nav_vel_e/nav_vel_valid
 //   |   + gps_speed_source + nav_fix_us + dhv_gdspd + dhv_fix_us
+//   |   + AtomS3R v6 tail: record_magic + seq + SD diagnostics + CRC16
 //   |   for deterministic SITL replay of the production SOG path plus GPS diagnostics
 //   | → xQueueSend(sd_queue, depth=SD_QUEUE_DEPTH=200) → Task_SD_Writer
 //   |
@@ -1431,6 +1455,50 @@
 //     instead of starting after the "SD setup..." phase. Telemetry task creation
 //     no longer waits for GPS to reach first valid fix.
 //
+// v1.8.7 - Fusion Freshness and Frame-Safety Audit Fixes
+//   - [GPS/ZARU] Static ZARU and Straight-Line ZARU now require a fresh GPS fix.
+//     TinyGPSPlus "valid" alone is no longer allowed to assert vehicle stillness,
+//     preventing cold-start/no-fix or stale-fix periods from learning gyro bias
+//     while the vehicle is actually moving.
+//   - [ESKF] External GPS position gate tightened from a broad fixed 80 m gate
+//     to a physical speed/dt/accel/HDOP envelope, with Serial diagnostics on
+//     rejected corrections. This reduces multipath-driven sawtooth corrections.
+//   - [IMU] BMI270 stale FIFO samples are skipped by Task_Filter instead of
+//     being integrated as fresh IMU data with a new timestamp. Recovery is
+//     logged when fresh samples resume.
+//   - [MOUNT] MOUNT_YAW_BOOT is now a logged recommendation only. Live frame
+//     rotation is disabled until a full navigation-state reinitialization or
+//     offline pre-pipeline rewrite path is implemented and mirrored by SITL.
+//   - [SD] Task_SD_Writer now checks writeBytesWithCommit() return status even
+//     though the current writer aborts internally on fatal backend errors.
+//
+// v1.8.8 - NAV2-PVH Diagnostic Probe
+//   - [GPS] CASIC binary parser now targets NAV2-PVH (0x11/0x03, 88 B) from the
+//     updated AT6668 protocol manual, mapping speed2D/sAcc/velN/velE/velflags
+//     into the existing nav_* diagnostic fields.
+//   - [GPS] Boot sends CFG-PRT to enable CASBIN+NMEA in/out, then sends
+//     CFG-MSG NAV2-PVH rate=1 only after CFG-PRT ACK.
+//   - [MQTT] Adds CFG-PRT/CFG-MSG ACK/NACK and NAV2 frame counters. The
+//     production speed source remains gps_sog_kmh until NAV2 10 Hz behavior is
+//     confirmed on hardware.
+//   - [TOOL][EXTRA] bin_to_csv.py now handles v6 preallocated logs whose tail
+//     contains stale non-zero cluster data: after a valid record sequence, bad
+//     record magic/CRC can mark logical EOF without forcing a resync scan across
+//     the full physical 128 MiB file. It still searches for a nearby valid
+//     stream continuation to avoid hiding real mid-file corruption.
+//   - [TOOL][EXTRA] bin_to_csv.py accepts raw NAV2-PVH nav_vel_valid values
+//     in the 0..7 range. The firmware still treats >=6 as velocity-valid; lower
+//     values such as 4 are retained as diagnostics, not converter corruption.
+//
+// v1.8.9 - NAV2-PVH Shadow Promotion
+//   - [GPS] Keeps the production control path on gps_sog_kmh, but evaluates
+//     NAV2-PVH as a shadow primary candidate with freshness/validity/accuracy
+//     gates.
+//   - [MQTT] Adds nav_ok, nav_age_us and nav_spd_kmh so outdoor tests can prove
+//     whether NAV2 is continuously eligible before it is allowed into ZARU/ESKF.
+//   - [DATA] TelemetryRecord and CSV schemas are unchanged; gps_speed_source
+//     still means the speed source actually used by the filter.
+//
 // --- TODO (deferred to v1.9.0 CAN format bump) ---
 //   - [TODO] Add CAN bus task (Core 0) for RPM, throttle, wheel speeds (×4),
 //     engine temp, steering angle. CanData struct + can_mutex pattern, mirroring
@@ -1465,11 +1533,10 @@
 //     checks, and a soft innovation limiter/gate so isolated GPS shifts do not
 //     create sawtooth corrections. Avoid map snap in the filter; road geometry is
 //     a visualization/debug reference unless a future map-aware mode is explicit.
-//   - [TODO] Keep AT6668 DHV/NAV-PV as diagnostics only. The tested module gives
-//     DHV at ~1 Hz and NACKs periodic NAV-PV enable, so production should remain
-//     on NMEA SOG for this hardware. If a future GNSS provider exposes real
-//     high-rate velN/velE/sAcc/cAcc, add provider capability flags and switch the
-//     ESKF speed/heading update to that vector source through the GPS HAL.
+//   - [TODO] Keep AT6668 DHV/NAV2-PVH as diagnostics only until NAV2-PVH is
+//     proven at 10 Hz on this module. If validated, promote it behind provider
+//     capability flags and switch the ESKF speed/heading update to that vector
+//     source through the GPS HAL.
 //
 // ==========================================================
 
@@ -2163,6 +2230,24 @@ void loop() {
         xSemaphoreGive(gps_mutex);
       }
       uint8_t mqtt_speed_source = GPS_SPD_NMEA_SOG;
+      const uint64_t mqtt_now_us = esp_timer_get_time();
+      const bool nav_age_valid = gps_snap.nav_fix_us > 0ULL &&
+                                 mqtt_now_us >= gps_snap.nav_fix_us;
+      const uint64_t nav_age_us = nav_age_valid
+                                      ? (mqtt_now_us - gps_snap.nav_fix_us)
+                                      : 0ULL;
+      const bool nav_speed_ok = isfinite(gps_snap.nav_speed2d) &&
+                                gps_snap.nav_speed2d >= 0.0f &&
+                                gps_snap.nav_speed2d < 140.0f;
+      const bool nav_acc_ok = isfinite(gps_snap.nav_s_acc) &&
+                              gps_snap.nav_s_acc >= 0.0f &&
+                              gps_snap.nav_s_acc < 10.0f;
+      const bool nav_shadow_ok = gps_snap.nav_vel_valid >= 6 &&
+                                 nav_age_valid &&
+                                 nav_age_us <= 150000ULL &&
+                                 nav_speed_ok &&
+                                 nav_acc_ok;
+      const float nav_speed_kmh = gps_snap.nav_speed2d * 3.6f;
       snprintf(buf, sizeof(buf),
                "{\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,"
                "\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,"
@@ -2170,9 +2255,12 @@ void loop() {
                "\"spd\":%.1f,\"alt\":%.1f,\"sats\":%d,\"hdop\":%.1f,"
                "\"gps_fix_us\":%llu,\"gps_epoch\":%lu,"
                "\"kfx\":%.2f,\"kfy\":%.2f,\"kfv\":%.2f,\"kfh\":%.3f,"
-               "\"nav_spd2d\":%.4f,\"nav_s_acc\":%.5f,"
-               "\"nav_vv\":%u,\"nav_fix_us\":%llu,"
-               "\"dhv_spd2d\":%.4f,\"dhv_fix_us\":%llu,\"spd_src\":%u}",
+               "\"nav_spd2d\":%.4f,\"nav_spd_kmh\":%.2f,\"nav_s_acc\":%.5f,"
+               "\"nav_vv\":%u,\"nav_fix_us\":%llu,\"nav_age_us\":%llu,\"nav_ok\":%u,"
+               "\"dhv_spd2d\":%.4f,\"dhv_fix_us\":%llu,\"spd_src\":%u,"
+               "\"dbg_prt_ack\":%u,\"dbg_prt_nack\":%u,"
+               "\"dbg_cfg_ack\":%u,\"dbg_cfg_nack\":%u,"
+               "\"dbg_nav2pvh\":%lu,\"dbg_nav2_vel\":%lu}",
                local_data.ema_ax, local_data.ema_ay, local_data.ema_az,
                local_data.ema_gx, local_data.ema_gy, local_data.ema_gz, lap_flag,
                gps_snap.lat, gps_snap.lon, gps_snap.sog_kmh, gps_snap.alt_m,
@@ -2181,12 +2269,20 @@ void loop() {
                (unsigned long)gps_snap.epoch,
                local_data.kf_x, local_data.kf_y,
                local_data.kf_vel, local_data.kf_heading,
-               gps_snap.nav_speed2d, gps_snap.nav_s_acc,
+               gps_snap.nav_speed2d, nav_speed_kmh, gps_snap.nav_s_acc,
                (unsigned)gps_snap.nav_vel_valid,
                (unsigned long long)gps_snap.nav_fix_us,
+               (unsigned long long)nav_age_us,
+               nav_shadow_ok ? 1U : 0U,
                gps_snap.dhv_gdspd,
                (unsigned long long)gps_snap.dhv_fix_us,
-               (unsigned)mqtt_speed_source);
+               (unsigned)mqtt_speed_source,
+               (unsigned)gps_snap.dbg_prt_ack,
+               (unsigned)gps_snap.dbg_prt_nack,
+               (unsigned)gps_snap.dbg_cfg_ack,
+               (unsigned)gps_snap.dbg_cfg_nack,
+               (unsigned long)gps_snap.dbg_nav2pvh,
+               (unsigned long)gps_snap.dbg_nav2_vel);
       if (!mqttClient.publish(cfg_mqtt_topic, buf)) {
         reconnect_network();
       }

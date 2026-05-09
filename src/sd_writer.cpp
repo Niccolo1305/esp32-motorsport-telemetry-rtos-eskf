@@ -160,12 +160,17 @@ void Task_SD_Writer(void *pvParameters) {
     }
 
     bool forced_sync = false;
-    logFile.writeBytesWithCommit(batch,
-                                 expected,
-                                 batch_first_seq,
-                                 batch_last_seq,
-                                 SD_VERIFY_EVERY_BATCH || partial_idle_batch,
-                                 forced_sync);
+    if (!logFile.writeBytesWithCommit(batch,
+                                      expected,
+                                      batch_first_seq,
+                                      batch_last_seq,
+                                      SD_VERIFY_EVERY_BATCH || partial_idle_batch,
+                                      forced_sync)) {
+      Serial.println("[SD] FATAL: writeBytesWithCommit returned false.");
+      sd_write_error = true;
+      logFile.close();
+      vTaskDelete(NULL);
+    }
 
     sd_records_written.fetch_add((uint32_t)records_to_write,
                                  std::memory_order_relaxed);

@@ -36,9 +36,14 @@ static constexpr uint64_t MOUNT_YAW_OBS_SENTINEL_TS = UINT64_MAX - 1ULL;
 static constexpr uint64_t MOUNT_YAW_BOOT_SENTINEL_TS = UINT64_MAX - 2ULL;
 static constexpr uint8_t ESKF_GPS_MIN_SATS = 8;
 static constexpr float ESKF_GPS_MAX_HDOP = 2.0f;
-static constexpr float ESKF_GPS_POS_GATE_MIN_M = 80.0f;
-static constexpr float ESKF_GPS_POS_GATE_MARGIN_M = 60.0f;
-static constexpr float ESKF_GPS_POS_GATE_SPEED_FACTOR = 2.5f;
+static constexpr uint64_t GPS_FRESH_MAX_US = 1500000ULL;
+static constexpr uint64_t GPS_STALE_US = 5000000ULL;
+static constexpr float ESKF_GPS_POS_GATE_MIN_M = 8.0f;
+static constexpr float ESKF_GPS_POS_GATE_MARGIN_M = 3.0f;
+static constexpr float ESKF_GPS_POS_GATE_SPEED_FACTOR = 1.35f;
+static constexpr float ESKF_GPS_POS_GATE_MAX_ACCEL_MS2 = 6.0f;
+static constexpr float ESKF_GPS_POS_GATE_HDOP_FACTOR_M = 4.0f;
+static constexpr bool MOUNT_YAW_APPLY_LIVE = false;
 static constexpr float MOUNT_YAW_MIN_SPEED_KMH = 18.0f;
 static constexpr float MOUNT_YAW_MAX_HDOP = 1.5f;
 static constexpr uint8_t MOUNT_YAW_MIN_SATS = 10;
@@ -196,6 +201,7 @@ static bool gps_correction_gate_allows(const GpsCorrectionGateState& gate,
                                        float east_m,
                                        float north_m,
                                        float speed_kmh,
+                                       float hdop,
                                        uint64_t fix_us) {
   if (!gate.has_ref || gate.fix_us == 0 || fix_us <= gate.fix_us) {
     return true;
@@ -207,8 +213,12 @@ static bool gps_correction_gate_allows(const GpsCorrectionGateState& gate,
   const float dn = north_m - gate.north_m;
   const float dist_m = sqrtf(de * de + dn * dn);
   const float ref_speed_ms = fmaxf(fmaxf(speed_kmh, gate.speed_kmh) / 3.6f, 3.0f);
+  const float hdop_m = fminf(fmaxf(isfinite(hdop) ? hdop : 2.0f, 0.5f), 10.0f)
+                     * ESKF_GPS_POS_GATE_HDOP_FACTOR_M;
   const float allowed_m = fmaxf(ESKF_GPS_POS_GATE_MIN_M,
                                 ref_speed_ms * dt_s * ESKF_GPS_POS_GATE_SPEED_FACTOR
+                                + 0.5f * ESKF_GPS_POS_GATE_MAX_ACCEL_MS2 * dt_s * dt_s
+                                + hdop_m
                                 + ESKF_GPS_POS_GATE_MARGIN_M);
   return dist_m <= allowed_m;
 }
@@ -557,6 +567,8 @@ static bool enqueue_mount_yaw_boot(const MountYawBootState& boot,
   rec.seq = record_seq++;
 #endif
   if (xQueueSend(sd_queue, &rec, 0) != pdTRUE) {
+    sd_enqueue_fail_count++;
+    sd_records_dropped++;
     return false;
   }
   Serial.printf("[MOUNT_YAW] BOOT yaw=%+.2f std=%.1f obs=%u q=%.2f corr=%.2f\n",
@@ -578,7 +590,7 @@ static bool consider_mount_yaw_boot(MountYawState& state,
                                     , uint32_t& record_seq
 #endif
 ) {
-  if (state.boot.active) return false;
+  if (state.boot.active || state.boot.emitted) return false;
   if (quality < MOUNT_YAW_BOOT_MIN_QUALITY ||
       long_corr < MOUNT_YAW_BOOT_MIN_LONG_CORR ||
       stability_std_deg > MOUNT_YAW_BOOT_MAX_OBS_STABILITY_STD_DEG) {
@@ -608,17 +620,26 @@ static bool consider_mount_yaw_boot(MountYawState& state,
   state.boot.yaw_rad = state.boot.yaw_deg * DEG2RAD;
   state.boot.sin_yaw = sinf(state.boot.yaw_rad);
   state.boot.cos_yaw = cosf(state.boot.yaw_rad);
-  state.boot.active = true;
-  state.boot.just_activated = true;
 
   if (!state.boot.emitted) {
-    enqueue_mount_yaw_boot(state.boot,
-                           now_us
+    state.boot.emitted = enqueue_mount_yaw_boot(state.boot,
+                                                now_us
 #ifdef USE_BMI270
-                           , record_seq
+                                                , record_seq
 #endif
     );
-    state.boot.emitted = true;
+    if (!state.boot.emitted) {
+      Serial.println("[MOUNT_YAW] BOOT recommendation dropped: SD queue unavailable/full.");
+      return false;
+    }
+  }
+  if (MOUNT_YAW_APPLY_LIVE) {
+    state.boot.active = true;
+    state.boot.just_activated = true;
+  } else {
+    state.boot.active = false;
+    state.boot.just_activated = false;
+    Serial.println("[MOUNT_YAW] BOOT recommendation logged only; live frame unchanged.");
   }
   return true;
 }
@@ -719,6 +740,7 @@ void Task_Filter(void *pvParameters) {
   float thermal_bias_gx = 0.0f;  // [°/s] v1.2.1
   float thermal_bias_gy = 0.0f;  // [°/s] v1.2.1
   GpsData last_gps = {};         // GPS snapshot cache (anti-Null-Island)
+  bool gps_ever_had_fix = false; // cold start "no fix yet" is not GPS lost
   float cog_ref_east = 0.0f;
   float cog_ref_north = 0.0f;
   float prev_cog_rad = 0.0f;  // AUDIT-NOTE (PIPELINE-MINOR-4, not applied):
@@ -735,9 +757,33 @@ void Task_Filter(void *pvParameters) {
   float prev_cent_x = 0.0f;      // v1.4.1: VGPL lateral rate limiter state
   float prev_long_y = 0.0f;      // v1.4.1: VGPL longitudinal rate limiter state
   float prev_v_eskf = 0.0f;      // v1.4.1: previous velocity for dv/dt
+#ifdef USE_BMI270
+  uint32_t imu_stale_consecutive = 0;
+#endif
 
   for (;;) {
     if (xQueueReceive(imuQueue, &data, portMAX_DELAY) == pdTRUE) {
+#ifdef USE_BMI270
+      if (!data.imu_sample_fresh) {
+        if (imu_stale_consecutive < UINT32_MAX) {
+          imu_stale_consecutive++;
+        }
+        if (imu_stale_consecutive == 1U ||
+            imu_stale_consecutive == 5U ||
+            (imu_stale_consecutive % 50U) == 0U) {
+          Serial.printf("[FILTER] IMU stale sample skipped: count=%lu backlog=%u overrun=%u\n",
+                        (unsigned long)imu_stale_consecutive,
+                        (unsigned)data.fifo_backlog,
+                        data.fifo_overrun ? 1U : 0U);
+        }
+        continue;
+      }
+      if (imu_stale_consecutive > 0U) {
+        Serial.printf("[FILTER] IMU fresh again after %lu stale sample(s).\n",
+                      (unsigned long)imu_stale_consecutive);
+        imu_stale_consecutive = 0;
+      }
+#endif
 
       // Dynamic DT from hardware timestamp: compensates scheduler jitter.
       float dt_real_sec = DT;
@@ -837,7 +883,7 @@ void Task_Filter(void *pvParameters) {
         ax_r = ax_r_raw - bias_ax;
         ay_r = ay_r_raw - bias_ay;
         az_r = az_r_raw - bias_az;
-        if (mount_yaw.boot.active) {
+        if (MOUNT_YAW_APPLY_LIVE && mount_yaw.boot.active) {
           rotate_mount_yaw_xy(mount_yaw.boot.yaw_rad, ax_r, ay_r);
         }
 
@@ -852,10 +898,10 @@ void Task_Filter(void *pvParameters) {
 
         rotate_3d(gx_clean, gy_clean, gz_clean, gx_r, gy_r, gz_r, cos_phi,
                  sin_phi, cos_theta, sin_theta);
-        if (mount_yaw.boot.active) {
+        if (MOUNT_YAW_APPLY_LIVE && mount_yaw.boot.active) {
           rotate_mount_yaw_xy(mount_yaw.boot.yaw_rad, gx_r, gy_r);
         }
-        if (mount_yaw.boot.just_activated) {
+        if (MOUNT_YAW_APPLY_LIVE && mount_yaw.boot.just_activated) {
           // The mount-yaw correction changes the vehicle X/Y basis. Clear
           // frame-dependent learnt state before the corrected frame feeds ZARU,
           // Madgwick and the ESKF on subsequent samples.
@@ -1057,13 +1103,26 @@ void Task_Filter(void *pvParameters) {
       // ── GPS Velocity Source Selection (v1.5.2) ────────────────────────────
       // Hardware investigation result (AT6668 module):
       //   - DHV (NMEA): capped at 1 Hz by AT6668 firmware regardless of PCAS03.
-      //   - NAV-PV (binary): CFG-MSG (0x06/0x01) NACKed even after CFG-PRT
-      //     enables binary output. Module does not support periodic NAV-PV.
+      //   - NAV2-PVH (binary): diagnostic 10 Hz candidate under test via CFG-MSG.
       //   - NMEA SOG (RMC, via TinyGPSPlus): 10 Hz, co-epoch with position fix.
       //     This is the receiver-reported Speed Over Ground exposed by NMEA.
-      // Primary source: sog_kmh. DHV and NAV-PV are logged for diagnostics only.
+      // Primary source stays sog_kmh for this diagnostic phase.
       float gps_speed_kmh_used = last_gps.sog_kmh;
       uint8_t gps_speed_source = GPS_SPD_NMEA_SOG;
+      const bool gps_has_fix = last_gps.valid && last_gps.fix_us > 0ULL;
+      const uint64_t gps_age_us =
+          (gps_has_fix && data.timestamp_us >= last_gps.fix_us)
+              ? (data.timestamp_us - last_gps.fix_us)
+              : UINT64_MAX;
+      const bool gps_fix_fresh = gps_has_fix && gps_age_us <= GPS_FRESH_MAX_US;
+      if (gps_has_fix) {
+        gps_ever_had_fix = true;
+      }
+      // Cold start with 0 satellites is "acquiring", not "lost". Raise the
+      // red GPS LOST alarm only after the unit has seen at least one real fix.
+      const bool gps_lost_after_fix =
+          gps_ever_had_fix && (!gps_has_fix || gps_age_us > GPS_STALE_US);
+      gps_stale = gps_lost_after_fix;
 
       // ── Stationary Condition (Statistical Engine + GPS) ───────────────────
       // is_stationary = true ONLY IF:
@@ -1071,11 +1130,11 @@ void Task_Filter(void *pvParameters) {
       //   2. gz, gx AND gy raw variance are all below their respective noise floors
       //      (3-axis gate: prevents false positives from chassis vibration coupling
       //      into roll/pitch even when gz happens to be quiet)
-      //   3. GPS speed (if available) is < 2 km/h (uses NMEA SOG in v1.5.2)
+      //   3. Fresh GPS speed is < 2 km/h (stale/no-fix GPS never asserts slow)
       //   4. |mean_gz| < 2.5°/s (Sanity Gate v0.9.9)
       bool is_stationary = false;
       if (var_gz >= 0.0f) { // warm-up complete
-        bool gps_slow = !last_gps.valid ||
+        bool gps_slow = gps_fix_fresh &&
                         (gps_speed_kmh_used < ZUPT_GPS_MAX_KMH);
         // Sanity Gate: mean_gz < 2.5°/s excludes slow rotational manoeuvres.
         // Real thermal bias does not exceed ~1.5°/s
@@ -1123,7 +1182,7 @@ void Task_Filter(void *pvParameters) {
       // has zero practical impact on bias convergence.
 
       bool straight_zaru_active = false;
-      if (!is_stationary && last_gps.valid &&
+      if (!is_stationary && gps_fix_fresh &&
           gps_speed_kmh_used > STRAIGHT_MIN_SPEED_KMH) {
         bool lat_gate = fabsf(lin_ax) < STRAIGHT_MAX_LAT_G;
         bool gz_gate  = fabsf(gz_r - thermal_bias_gz) < 2.0f;  // RAW corrected, zero latency
@@ -1169,19 +1228,13 @@ void Task_Filter(void *pvParameters) {
         nhc_active = true;
       }
 
-      // ── GPS Staleness Detection (v0.9.11) ─────────────────────────────────
-      // If the last valid GPS fix is older than 5 s, the GPS is considered
-      // lost. The ESKF continues in predict-only (IMU dead-reckoning) and
-      // correct is disabled to avoid anchoring position to a fossil fix.
-      // The gps_stale flag triggers the visual alarm in loop() (flashing red).
-      bool gps_is_stale = last_gps.valid &&
-                          (data.timestamp_us - last_gps.fix_us > 5000000ULL);
-      // Pre-fix: GPS is not yet "stale" — it simply has never fixed
-      if (!last_gps.valid) gps_is_stale = false;
-      gps_stale = gps_is_stale;
+      // ── GPS Correction Freshness ──────────────────────────────────────────
+      // gps_fix_fresh was computed before ZARU so stale/no-fix GPS cannot
+      // assert vehicle stillness. Corrections below also require a fresh epoch;
+      // gps_stale is only set after a previously acquired fix is lost/stale.
 
       // Correct: only if there is a new GPS fix AND it is not stale
-      if (last_gps.valid && last_gps.epoch != last_eskf_epoch && !gps_is_stale) {
+      if (gps_fix_fresh && last_gps.epoch != last_eskf_epoch) {
         bool gps_fix_accepted = gps_fix_quality_ok(last_gps);
         if (!gps_fix_accepted) {
           last_eskf_epoch = last_gps.epoch;
@@ -1206,6 +1259,7 @@ void Task_Filter(void *pvParameters) {
                                          east_m,
                                          north_m,
                                          gps_speed_kmh_used,
+                                         last_gps.hdop,
                                          last_gps.fix_us);
           if (gps_fix_accepted) {
             eskf.correct(east_m, north_m, gps_speed_kmh_used, last_gps.hdop);
@@ -1217,6 +1271,13 @@ void Task_Filter(void *pvParameters) {
                                        last_gps.fix_us);
           } else if (gps_gate.reject_count < 255) {
             gps_gate.reject_count++;
+            if (gps_gate.reject_count == 1U ||
+                (gps_gate.reject_count % 10U) == 0U) {
+              Serial.printf("[ESKF] GPS correction rejected: dist gate count=%u hdop=%.2f speed=%.1f\n",
+                            (unsigned)gps_gate.reject_count,
+                            last_gps.hdop,
+                            gps_speed_kmh_used);
+            }
           }
           last_eskf_epoch = last_gps.epoch;
 
@@ -1251,10 +1312,11 @@ void Task_Filter(void *pvParameters) {
       // ── Mount-yaw observation sentinel (v1.8.3, diagnostic only) ───────
       // Detects straight accel/brake windows and injects MOUNT_YAW_OBS records
       // into the SD stream. MOUNT_YAW_OBS stays diagnostic. MOUNT_YAW_BOOT is
-      // applied only after several strong, stable and mutually coherent
-      // observations, so tentative/high-dispersion evidence never rotates the
-      // live pipeline.
-      if (last_gps.valid && !gps_is_stale && gps_origin_set) {
+      // now a diagnostic boot recommendation only. Applying it live would
+      // rotate the IMU input frame while ESKF state/covariance still belong to
+      // the old frame, so the actual correction must be a pre-pipeline boot or
+      // offline rewrite step until a full nav reinit path exists.
+      if (gps_fix_fresh && gps_origin_set) {
         if (last_gps.epoch != mount_yaw.last_speed_epoch) {
           const float speed_ms = gps_speed_kmh_used / 3.6f;
           float acc_g = 0.0f;
@@ -1520,13 +1582,13 @@ void Task_Filter(void *pvParameters) {
         rec.sensor_gz = data.bmi_gyr_z_dps;
 #endif
         // GPS timing metadata (SITL, v1.4.2): enables deterministic offline replay of
-        // staleness detection and eskf.correct() gating.
+        // staleness detection and eskf.correct() gating. Since v1.8.7 gps_valid
+        // means "fresh enough for fusion", not merely TinyGPSPlus ever-valid.
         // fix_us uses same timebase as timestamp_us → (timestamp_us - gps_fix_us) > 5s.
         rec.gps_fix_us = last_gps.fix_us;
-        rec.gps_valid  = last_gps.valid ? 1 : 0;
+        rec.gps_valid  = gps_fix_fresh ? 1 : 0;
         // Extra GPS velocity metadata for SITL/offline analysis.
-        // NAV-PV remains a passive listener in v1.5.1; DHV is the active
-        // receiver-reported horizontal ground-speed path under test.
+        // NAV2-PVH and DHV remain diagnostic-only in this phase.
         rec.nav_speed2d     = last_gps.nav_speed2d;
         rec.nav_s_acc       = last_gps.nav_s_acc;
         rec.nav_vel_n       = last_gps.nav_vel_n;

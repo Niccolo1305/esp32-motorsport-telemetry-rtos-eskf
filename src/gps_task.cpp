@@ -2,8 +2,8 @@
 // gps_task.cpp — FreeRTOS Task_GPS (Core 0, priority 2)
 //
 // Receives an IGpsProvider* via pvParameters and polls it at 50 Hz.
-// When the provider decodes a complete NMEA fix, updates shared_gps_data
-// under gps_mutex for consumption by Task_Filter and loop().
+// When the provider decodes a complete NMEA fix or GPS diagnostic update,
+// updates shared_gps_data under gps_mutex for Task_Filter and loop().
 //
 // GPS update rate: 10 Hz (CASIC $PCAS02,100 command sent by provider::begin()).
 // Task polls every 20 ms: multiple NMEA sentences are consumed without
@@ -21,7 +21,7 @@ void Task_GPS(void *pvParameters) {
     GpsData data = {};
 
     for (;;) {
-        // Poll provider: drains UART, decodes NMEA, returns true on new fix.
+        // Poll provider: drains UART and returns true on new GPS data/diagnostics.
         if (provider->update(data)) {
             if (xSemaphoreTake(gps_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
                 shared_gps_data = data;

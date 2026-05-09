@@ -4,7 +4,7 @@ Dual-core FreeRTOS telemetry firmware for ESP32-S3 with 50Hz ESKF sensor fusion 
 # ESP32 Telemetria
 
 ![Firmware AtomS3](https://img.shields.io/badge/AtomS3-v1.5.2--clean-blue)
-![Firmware AtomS3R](https://img.shields.io/badge/AtomS3R-v1.7.0--atoms3r-blue)
+![Firmware AtomS3R](https://img.shields.io/badge/AtomS3R-v1.8.7--atoms3r-blue)
 ![Platform](https://img.shields.io/badge/platform-ESP32--S3-informational)
 ![License](https://img.shields.io/badge/license-GPL--3.0-green)
 
@@ -21,13 +21,13 @@ ESP32 Telemetria is a self-contained data-acquisition unit that fits in your han
 
 Two hardware targets are supported:
 - **AtomS3** (`v1.5.2-clean`): MPU-6886 6-DOF IMU, 202-byte records
-- **AtomS3R** (`v1.7.0-atoms3r`): BMI270 6-DOF IMU + BMM150 magnetometer via Bosch Sensor APIs with FIFO-based acquisition, 242-byte records with full acquisition-truth logging (native raw, physical channels, FIFO diagnostics)
+- **AtomS3R** (`v1.8.7-atoms3r`): BMI270 6-DOF IMU + BMM150 magnetometer via Bosch Sensor APIs with FIFO-based acquisition, 256-byte v6 records with acquisition-truth logging, SD diagnostics, sequence number, record magic, and CRC16
 
 Recorded sessions are stored in a compact binary format on a micro-SD card and can be post-processed through a Python toolchain that outputs interactive dashboards or native **MoTeC i2 Pro** log files — the same format used by professional motorsport engineers.
 
 The IMU and GPS stacks are abstracted behind `IImuProvider` / `IGpsProvider` interfaces, decoupling the pipeline from hardware. Every session logs sensor-frame raw IMU plus explicit GPS timing metadata and GPS diagnostic metadata (`gps_sog_kmh`, `dhv_gdspd`, `nav_speed2d`, `nav_s_acc`, `nav_vel_n/e`, `gps_speed_source`, `gps_fix_us`, `dhv_fix_us`, `nav_fix_us`). This enables offline SITL replay of the same production GPS path used by the firmware, while retaining enough evidence to audit unsupported GPS velocity channels.
 
-**Current firmware:** AtomS3 `v1.5.2-clean` · AtomS3R `v1.7.0-atoms3r`
+**Current firmware:** AtomS3 `v1.5.2-clean` · AtomS3R `v1.8.7-atoms3r`
 
 ---
 
@@ -81,12 +81,12 @@ The entire project is designed to be affordable, modular, and extremely compact.
 - **Error-State Kalman Filter (ESKF2D)** — 5-state `[px, py, vx, vy, θ]` fused with GPS at ~10 Hz; sequential 3-stage correction (position → speed → COG); Mahalanobis innovation gate
 - **Non-Holonomic Constraint (NHC)** — `v_lateral = 0` pseudo-measurement continuously corrects heading drift while in motion (> 5 km/h, disabled above 0.5 g lateral)
 - **Shadow ESKF_6D** — 6-state filter with independent online gyro-bias estimation, running in parallel for validation; logged as `kf6_*`
-- **GPS staleness detection** via monotonic IMU clock (`timestamp_us − fix_us > 5 s`), same timebase as IMU for deterministic SITL replay
+- **GPS staleness detection** after the first real fix (`timestamp_us - fix_us > 5 s`); cold-start 0-sat state remains `NO FIX` instead of `GPS LOST`
 - **Explicit GPS source/timing diagnostics** — logs NMEA SOG plus DHV and passive NAV-PV metadata so unsupported high-rate velocity channels can be audited offline without serial access
 - **Dependency-injection IMU/GPS providers** — `IImuProvider` / `IGpsProvider` virtual interfaces decouple hardware from the pipeline; `Mpu6886Provider` (AtomS3), `Bmi270Provider` with FIFO-based acquisition (AtomS3R)
-- **Bosch-direct acquisition truth** (AtomS3R) — v5 records log native BMI270 int16 raw, physical channels, BMM150 raw+compensated uT, and FIFO diagnostics alongside the pipeline output
+- **Bosch-direct acquisition truth** (AtomS3R) — v6 records log native BMI270 int16 raw, physical channels, BMM150 raw+compensated uT, FIFO diagnostics, SD queue diagnostics, sequence number, record magic, and CRC16 alongside the pipeline output
 - **Boot magnetometer reference** (AtomS3R) — calibration captures mag reference at boot, stored in FileHeader for future 9-DoF fusion
-- **Async SD logging** via FreeRTOS queue — 202 bytes/record (AtomS3) or 242 bytes/record (AtomS3R v5) at 50 Hz
+- **Async SD logging** via FreeRTOS queue — 202 bytes/record (AtomS3) or 256 bytes/record (AtomS3R v6) at 50 Hz
 - **MQTT publishing** at 10 Hz over Wi-Fi for live telemetry monitoring
 - **MoTeC i2 Pro export** — native `.ld` format, 12 channels (8 @ 50 Hz + 4 @ 10 Hz)
 - **Interactive dashboard** built with Plotly/Dash for post-session analysis
@@ -275,7 +275,7 @@ All tools are in `tools/` and accept `.bin` files directly or `.csv` files from 
 python tools/bin_to_csv.py <file.bin>
 ```
 
-Detects the record format automatically from the file header (supports 122 / 127 / 155 / 164 / 190 / 202 / 215 / 224 / 242-byte formats across all firmware versions). Launches an interactive lap-split menu for multi-lap sessions.
+Detects the record format automatically from the file header (supports 122 / 127 / 155 / 164 / 190 / 202 / 215 / 224 / 242 / 256-byte formats across all firmware versions). Launches an interactive lap-split menu for multi-lap sessions.
 
 ### 2 — Offline SITL Replay
 
@@ -284,7 +284,7 @@ python tools/sitl_hal/sitl_replay.py <file.csv>
 python tools/sitl_hal/sitl_replay.py <file.bin> --output <out_sitl.csv>
 ```
 
-Replays the exact firmware pipeline (`filter_task.cpp`) offline using the sensor-frame channels logged in the binary records. On AtomS3 this uses `sensor_ax/ay/az`, `sensor_gx/gy/gz`; on AtomS3R v5 logs it uses the native BMI270 physical channels (`bmi_acc_*_g`, `bmi_gyr_*_dps`). Produces a new CSV with re-computed EMA, ZARU, ESKF, and VGPL outputs — useful for tuning constants without reflashing.
+Replays the exact firmware pipeline (`filter_task.cpp`) offline using the sensor-frame channels logged in the binary records. On AtomS3 this uses `sensor_ax/ay/az`, `sensor_gx/gy/gz`; on AtomS3R v5/v6 logs it uses the native BMI270 physical channels (`bmi_acc_*_g`, `bmi_gyr_*_dps`). Produces a new CSV with re-computed EMA, ZARU, ESKF, and VGPL outputs — useful for tuning constants without reflashing.
 
 The replay mirrors the on-device production GPS path (`gps_sog_kmh`) and preserves DHV / passive NAV-PV metadata for diagnostics. Legacy logs still reproduce GPS staleness deterministically via `gps_fix_us` / `gps_valid`.
 
@@ -349,54 +349,56 @@ Produces a native `.ld` file openable in **i2 Pro** or **i2 Standard**:
 
 | Task | Core | Priority | Responsibility |
 |------|------|----------|----------------|
-| `Task_I2C` | 0 | 3 | Reads IMU via `IImuProvider*` every 20 ms (MPU-6886 or BMI270 FIFO); pushes to `imuQueue` (overwrite, depth 1) |
+| `Task_I2C` | 0 | 3 | Reads IMU via `IImuProvider*` every 20 ms (MPU-6886 or BMI270 FIFO); pushes to `imuQueue` (AtomS3 overwrite depth 1, AtomS3R diagnostic FIFO depth 4) |
 | `Task_GPS` | 0 | 2 | Polls UART1 via `IGpsProvider*`, parses NMEA, writes to `shared_gps_data` under `gps_mutex` |
 | `Task_Filter` | 1 | 2 | Consumes IMU queue, runs 5-phase signal chain, drives ESKF |
-| `Task_SD_Writer` | 1 | 1 | Async SD logging from `sd_queue` (depth 200), flushes every 50 samples |
+| `Task_SD_Writer` | 1 | 1 | Async SD logging from `sd_queue` (depth 200), writes 8-record batches, syncs every 32 records or after 250 ms idle |
 | `loop()` | 1 | — | Display refresh (5 Hz) · MQTT publish (10 Hz) · button handling |
 
-**IPC primitives:** `imuQueue` (overwrite), `sd_queue` (FIFO depth 200), `telemetry_mutex` (Filter↔loop), `gps_mutex` (GPS task↔Filter/loop).
+**IPC primitives:** `imuQueue` (overwrite mailbox on AtomS3, short FIFO on AtomS3R), `sd_queue` (FIFO depth 200), `telemetry_mutex` (Filter↔loop), `gps_mutex` (GPS task↔Filter/loop).
 
 ### Signal Processing Pipeline
 
 Each 20 ms cycle inside `Task_Filter` runs 5 phases. The key architectural principle is **"End-of-Pipe EMA + ZARU-to-Madgwick"**: the EMA filter is purely aesthetic (display/MQTT/SD) and sits after all navigation updates, while the ZARU thermal bias is fed back into the gyro *before* Madgwick each cycle.
 
-> Authoritative reference: in-source pipeline comment block in [`src/Telemetria.ino`](src/Telemetria.ino) (v1.7.0). The image below still reflects the older v1.4.2 graph and is pending a visual refresh.
+> Authoritative references: in-source pipeline comment block in [`src/Telemetria.ino`](src/Telemetria.ino) (v1.8.7) and the standalone Mermaid source in [`docs/pipeline/Mermaid pipeline v1.8.7.md`](docs/pipeline/Mermaid%20pipeline%20v1.8.7.md).
 
 ```mermaid
-flowchart LR
-    classDef hw    fill:#1a5276,stroke:#2e86c1,color:#fff,stroke-width:2px
+flowchart TD
+    classDef hw fill:#1a5276,stroke:#2e86c1,color:#fff,stroke-width:2px
+    classDef task fill:#154360,stroke:#5dade2,color:#fff,stroke-width:2px
+    classDef queue fill:#7d6608,stroke:#f4d03f,color:#fff,stroke-width:2px
     classDef phase fill:#145a32,stroke:#27ae60,color:#fff,stroke-width:2px
-    classDef ctrl  fill:#7d3c98,stroke:#a569bd,color:#fff,stroke-width:2px
-    classDef ema   fill:#1f618d,stroke:#3498db,color:#fff,stroke-width:2px
-    classDef out   fill:#b03a2e,stroke:#e74c3c,color:#fff,stroke-width:2px
+    classDef ctrl fill:#6c3483,stroke:#af7ac5,color:#fff,stroke-width:2px
+    classDef out fill:#922b21,stroke:#e74c3c,color:#fff,stroke-width:2px
 
-    IMU["MPU-6886 / BMI270+BMM150\n50 Hz\nIImuProvider"]:::hw
-    GPS["AT6668 GNSS\n10 Hz\nNMEA + CASIC NAV-PV"]:::hw
+    IMU["MPU-6886 / BMI270+BMM150\nIImuProvider\n50 Hz"]:::hw
+    GPS["AT6668 GNSS\nNMEA SOG 10 Hz\nDHV/NAV-PV diagnostics"]:::hw
+    I2C["Task_I2C\nCore 0\nIMU sample + timestamp_us"]:::task
+    GPST["Task_GPS\nCore 0\nshared_gps_data under gps_mutex"]:::task
+    IMUQ["imuQueue\nAtomS3 depth 1 overwrite\nAtomS3R depth 4 FIFO"]:::queue
+    GPSSTATE["GPS snapshot\nlat/lon/sog/alt/sats/hdop\nvalid/epoch/fix_us + diagnostics"]:::ctrl
 
-    P1["Phase 1\ntelemetry_mutex\n─────────────\nAxis remap (AtomS3R)\nEllipsoid cal\nGeometric align\nVGPL cent+long\nMadgwick AHRS\nGravity removal"]:::phase
-    P2["Phase 2\nno mutex\n─────────────\nVariance engine\nGPS snapshot + speed source select\nZARU 3-axis\nESKF 5D + 6D\nNHC · GPS correct"]:::ctrl
-    P3["Phase 3\nEnd-of-pipe EMA\n─────────────\nα=0.06 τ≈313ms\nZARU-corrected\ninput"]:::ema
-    P4["Phase 4\ntelemetry_mutex\n─────────────\nEMA write-back\nshared_telemetry"]:::ctrl
-
-    MQTT["MQTT\n10 Hz"]:::out
+    P1["Phase 1 - telemetry_mutex\nskip stale AtomS3R FIFO samples\ncompute dynamic dt\naxis remap -> ellipsoid cal -> alignment\ngyro bias + ZARU pre-correction\nVGPL + Madgwick -> gravity removal"]:::phase
+    P2["Phase 2 - no mutex\nraw gyro variance\nGPS freshness and SOG source\nGPS LOST only after previous fix\nstatic + straight-line ZARU\nESKF 5D + ESKF 6D predict\nNHC + gated GPS correction\nmount-yaw diagnostic sentinels"]:::ctrl
+    P3["Phase 3 - end-of-pipe EMA\npost-ZARU bias snapshot\nalpha=0.06\nEMA is display/MQTT/SD only"]:::phase
+    P4["Phase 4 - telemetry_mutex\nprev_* write-back\nshared_telemetry = EMA + ESKF 5D"]:::ctrl
+    P5["Phase 5 - SD record\noutside mutex\nAtomS3 202B / AtomS3R v6 256B\ngps_valid means fresh-for-fusion"]:::out
+    SDW["Task_SD_Writer\nfills AtomS3R magic/seq/SD diagnostics/CRC16\n8-record writes\nsync every 32 records or 250 ms idle"]:::out
+    LOOP["loop()\nCore 1 Arduino task"]:::task
+    MQTT["MQTT JSON\n10 Hz"]:::out
     DISP["LCD\n5 Hz"]:::out
-    SD["Task_SD_Writer\n202/242B · 50 Hz"]:::out
 
-    IMU --> P1
-    GPS --> P2
-    P1 --> P2 --> P3 --> P4
-    P4 --> MQTT
-    P4 --> DISP
-    P3 --> SD
+    IMU --> I2C --> IMUQ --> P1
+    GPS --> GPST --> GPSSTATE --> P2
+    P1 --> P2 --> P3 --> P4 --> LOOP
+    P3 --> P5
+    P2 -.->|ESKF + GPS + ZARU diagnostics| P5
+    P5 --> SDW
+    P2 -.->|thermal_bias next cycle| P1
+    LOOP --> MQTT
+    LOOP --> DISP
 ```
-
-<details>
-<summary>Detailed pipeline diagram — all nodes, all data paths (click to expand)</summary>
-
-![IMU and GPS Data Processing Pipeline v1.4.2](assets/images/IMU%20and%20GPS%20Data%20Processing-v1.4.2.png)
-
-</details>
 
 ### Kalman Filter (`src/eskf.h`)
 
@@ -450,23 +452,25 @@ To recalibrate:
 
 ## Binary Log Format
 
-### File Header (80 bytes, v5)
+### File Header
 
-Written once at the start of every `.bin` file:
+Written once at the start of every `.bin` file. AtomS3 writes the base 80-byte `FileHeader`; AtomS3R v6 writes `FileHeaderV6`, a 256-byte sector-aligned header whose first 80 bytes remain compatible with the base layout.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `magic` | 3 × uint8 | `"TEL"` — identifies this as a telemetry file |
-| `header_version` | uint8 | `5` (v1→v2: record_size widened to uint16; v2→v3: calibration params; v3→v5: flags + mag ref) |
-| `firmware_version` | char[16] | e.g. `"v1.7.0-atoms3r"` |
-| `record_size` | uint16 | Bytes per record (`202` for AtomS3, `242` for AtomS3R) |
+| `header_version` | uint8 | `5` for AtomS3 base header, `6` for AtomS3R `FileHeaderV6` |
+| `firmware_version` | char[16] | e.g. `"v1.8.7-atoms3r"` |
+| `record_size` | uint16 | Bytes per record (`202` for AtomS3, `256` for AtomS3R v6) |
 | `start_time_ms` | uint32 | `millis()` at file open |
 | `cal_sin_phi..cal_cos_theta` | 4 × float | Boot mounting rotation (φ, θ) |
 | `cal_bias_ax..cal_bias_gz` | 6 × float | Boot accel/gyro residual biases |
 | `header_flags` | uint16 | Bitmask: bit 0 = `FILE_HEADER_FLAG_MAG_REF_VALID` |
 | `mag_ref_ut_x..mag_ref_ut_z` | 3 × float | Boot magnetometer reference [uT] (AtomS3R only) |
 
-Legacy header sizes: 25 B (v1), 26 B (v2), 66 B (v3/v4).
+AtomS3R `FileHeaderV6` extension adds `header_size`, `data_offset`, endian marker, header CRC16, build flags, SD/IMU configuration, record magic/CRC offsets, reset reason, board/IMU/magnetometer IDs, selected BMI/BMM register snapshots, and log filename.
+
+Legacy header sizes: 25 B (v1), 26 B (v2), 66 B (v3/v4), 80 B (v5).
 
 ### Data Record — AtomS3 (202 bytes, `v1.5.2`)
 
@@ -488,7 +492,7 @@ Legacy header sizes: 25 B (v1), 26 B (v2), 66 B (v3/v4).
 | `tbias_gz` | float | 4 | Current learned thermal bias gz [°/s] |
 | `sensor_ax..sensor_gz` | 6 × float | 24 | Sensor-frame raw IMU pre-calibration (SITL input) |
 | `gps_fix_us` | uint64 | 8 | `esp_timer_get_time()` of last valid GPS fix |
-| `gps_valid` | uint8 | 1 | Mirror of `GpsData.valid` |
+| `gps_valid` | uint8 | 1 | Fresh enough for fusion (`gps_fix_fresh`), not merely "receiver has ever reported valid" |
 | `nav_speed2d..nav_vel_e` | 4 × float | 16 | CASIC NAV-PV diagnostics [m/s] |
 | `nav_vel_valid`, `gps_speed_source` | 2 × uint8 | 2 | NAV-PV validity + per-sample source tag |
 | `nav_fix_us` | uint64 | 8 | Timestamp of last parsed NAV-PV frame |
@@ -496,14 +500,14 @@ Legacy header sizes: 25 B (v1), 26 B (v2), 66 B (v3/v4).
 | `dhv_fix_us` | uint64 | 8 | Timestamp of last parsed DHV sentence |
 | **Total** | | **202** | |
 
-### Data Record — AtomS3R v5 (242 bytes, `v1.7.0`)
+### Data Record — AtomS3R v6 (256 bytes, `v1.8.7`)
 
-The AtomS3R record shares the same common block as AtomS3 up to `tbias_gz`, then replaces `sensor_ax..sensor_gz` (24 bytes) with explicit acquisition truth (64 bytes):
+The AtomS3R v6 record shares the common block up to `tbias_gz`, replaces the AtomS3 `sensor_ax..sensor_gz` block with explicit acquisition truth, and appends a sector-aligned integrity/diagnostic tail:
 
 | Field | Type | Bytes | Description |
 |-------|------|-------|-------------|
-| *(common block)* | | 130 | Same as AtomS3: `timestamp_us` through `tbias_gz` |
-| `bmi_raw_ax..bmi_raw_gz` | 6 × int16 | 12 | Native BMI270 register values (chip-frame, pre-remap) |
+| *(common block)* | | 131 | Same logical block as AtomS3: `timestamp_us` through `tbias_gz` |
+| `bmi_post_lpf20_prepipe_ax..gz` | 6 × int16 | 12 | Native BMI270 post-LPF, pre-pipeline FIFO values |
 | `bmi_acc_x_g..bmi_gyr_z_dps` | 6 × float | 24 | Physical BMI270 values [g, °/s] (chip-frame, pre-remap) |
 | `bmm_raw_x..bmm_raw_z` | 3 × int16 | 6 | Native BMM150 register values |
 | `bmm_rhall` | uint16 | 2 | BMM150 hall resistance |
@@ -515,11 +519,18 @@ The AtomS3R record shares the same common block as AtomS3 up to `tbias_gz`, then
 | `fifo_frames_drained` | uint8 | 1 | FIFO frames consumed this cycle |
 | `fifo_backlog` | uint8 | 1 | FIFO frames pending after drain |
 | `fifo_overrun` | uint8 | 1 | FIFO overflow detected |
-| `reserved0` | uint8 | 1 | Padding |
+| `sd_queue_hwm` | uint8 | 1 | Saturated SD queue high-water mark, filled by `Task_SD_Writer` |
 | *(GPS tail)* | | 47 | Same as AtomS3: `gps_fix_us` through `dhv_fix_us` |
-| **Total** | | **242** | |
+| `record_magic` | uint32 | 4 | `"TEL6"` little-endian marker for resync/repair |
+| `seq` | uint32 | 4 | Monotonic record sequence |
+| `sd_records_dropped` | uint8 | 1 | Saturated dropped-record snapshot |
+| `sd_partial_write_count` | uint8 | 1 | Saturated partial-write snapshot |
+| `sd_stall_count` | uint8 | 1 | Saturated write-stall snapshot |
+| `sd_reopen_count` | uint8 | 1 | Saturated reopen-recovery snapshot |
+| `crc16` | uint16 | 2 | CRC16 over all prior record bytes |
+| **Total** | | **256** | |
 
-`bin_to_csv.py` supports all legacy formats (122 / 127 / 155 / 164 / 190 / 202 / 215 / 224 / 242 bytes) with automatic detection from the file header.
+`bin_to_csv.py` supports all legacy formats (122 / 127 / 155 / 164 / 190 / 202 / 215 / 224 / 242 / 256 bytes) with automatic detection from the file header.
 
 ### CalibrationRecord (sentinel)
 
@@ -571,7 +582,7 @@ Default: `telemetry/<unit_id>/data` where `<unit_id>` is derived from the last 3
 }
 ```
 
-`records` = samples written to SD · `gps_stale` = no NMEA in last 2 s · `sd_err` = write error occurred · `stk_*` = FreeRTOS stack high-water marks (bytes free).
+`records` = samples written to SD · `gps_stale` = a previously acquired fix is now stale/lost · `sd_err` = write error occurred · `stk_*` = FreeRTOS stack high-water marks (bytes free).
 
 ### SD low-space warning (one-shot at boot)
 
@@ -589,7 +600,7 @@ esp32-telemetry-clean/
 ├── src/
 │   ├── Telemetria.ino           # Entry point: setup() + loop()
 │   ├── config.h                 # Constants, pins, calibration matrices (primary tuning file)
-│   ├── types.h                  # Struct definitions (TelemetryRecord 202/242B, FileHeader 80B, …)
+│   ├── types.h                  # Struct definitions (TelemetryRecord 202/256B, FileHeader 80B / v6 256B, …)
 │   ├── globals.h / globals.cpp  # Shared state (extern declarations + definitions)
 │   ├── eskf.h                   # Header-only ESKF library (ESKF2D + ESKF_6D)
 │   ├── madgwick.h               # Header-only Madgwick AHRS — single norm-gate adaptive β
@@ -616,7 +627,7 @@ esp32-telemetry-clean/
 │   └── atoms3r_bench/main.cpp   # BMI270+BMM150 characterization
 │
 ├── tools/
-│   ├── bin_to_csv.py            # Binary → CSV converter (all formats: 122–242B)
+│   ├── bin_to_csv.py            # Binary → CSV converter (all formats: 122–256B)
 │   ├── sitl_hal/
 │   │   ├── sitl_replay.py       # Offline SITL pipeline replay (production SOG path + diagnostics)
 │   │   └── schema_compat.py     # Schema compatibility helpers
@@ -627,7 +638,7 @@ esp32-telemetry-clean/
 │   ├── motec_exporter.py        # MoTeC i2 Pro .ld exporter
 │   └── requirements.txt         # Python dependencies
 │
-├── Pipeline/                    # Mermaid pipeline diagrams
+├── docs/pipeline/               # Mermaid pipeline diagrams and generated references
 ├── Reports/                     # Technical documentation (PDF)
 ├── assets/images/               # Screenshots used in this README
 │
@@ -716,10 +727,10 @@ If the device was moved during the 2-second boot tare, gyro bias will be off —
 
 | Item | Status | Notes |
 |------|--------|-------|
-| Binary session header | **Done** (v1.7.0) | FileHeader v5 (80 B): firmware string, record size, calibration params, header flags, boot mag reference |
+| Binary session header | **Done** (v1.8.7) | AtomS3 FileHeader v5 (80 B); AtomS3R FileHeaderV6 (256 B) with CRC, build flags, record offsets, reset/chip diagnostics |
 | SITL offline replay | **Done** (`v1.5.2+`) | `sitl_hal/sitl_replay.py` re-runs the full pipeline from sensor-frame logs; production SOG path replayed exactly |
 | VGPL longitudinal compensation | **Done** (v1.4.1) | `dv/dt / g` subtracted from ay before Madgwick alongside centripetal |
-| AtomS3R BMI270+BMM150 bring-up | **Done** (`v1.7.0`) | Bosch-direct provider with FIFO acquisition, 242-byte v5 record with full acquisition truth |
+| AtomS3R BMI270+BMM150 bring-up | **Done** (`v1.7.0+`) | Bosch-direct provider with FIFO acquisition; current AtomS3R logs use 256-byte v6 records with acquisition truth + SD integrity tail |
 | Boot magnetometer reference | **Done** (`v1.7.0`) | Captured at boot, stored in FileHeader; ready for future 9-DoF fusion |
 | Sensor bench test firmwares | **Done** (`v1.7.0`) | `atoms3_bench` / `atoms3r_bench` environments for bare-metal IMU characterization |
 | AtomS3R ellipsoidal calibration | Planned | Needs dedicated tumble test on BMI270; currently identity matrix |
@@ -732,6 +743,19 @@ If the device was moved during the 2-second boot tare, gyro bias will be off —
 ---
 
 ## Changelog
+
+### v1.8.9 - NAV2-PVH Shadow Promotion
+
+- **NAV2-PVH kept out of the production control path** while being evaluated as a shadow primary candidate with freshness, validity, and accuracy gates.
+- **MQTT shadow diagnostics** expose `nav_ok`, `nav_age_us`, and `nav_spd_kmh` so outdoor tests can prove continuous NAV2 eligibility before promotion into ZARU/ESKF.
+- **Record and CSV schemas unchanged**; `gps_speed_source` still reports the source actually used by the filter.
+
+### v1.8.8 - NAV2-PVH Diagnostic Probe
+
+- **CASIC binary parser retargeted to NAV2-PVH** (`0x11/0x03`, 88 B), mapping `speed2D`, `sAcc`, `velN/E`, and raw `velflags` into the existing `nav_*` diagnostics.
+- **GPS boot configuration** sends CFG-PRT for CASBIN+NMEA, then CFG-MSG NAV2-PVH rate=1 only after CFG-PRT ACK.
+- **Tooling extra note:** `bin_to_csv.py` now handles v6 preallocated logs whose tail contains stale non-zero cluster data by allowing bad record magic/CRC after a valid sequence to mark logical EOF, while still checking for nearby stream continuation to preserve real resync recovery.
+- **Tooling extra note:** `bin_to_csv.py` accepts raw NAV2-PVH `nav_vel_valid` values in the `0..7` range; firmware semantics remain `>=6` for velocity-valid, with lower values retained as diagnostics.
 
 ### v1.7.0 — AtomS3R v5 Record Layout + Acquisition Truth
 

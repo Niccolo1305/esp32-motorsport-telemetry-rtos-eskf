@@ -111,7 +111,7 @@ extern std::atomic<uint32_t> sd_current_segment_capacity; // allocated bytes in 
 extern std::atomic<uint32_t> sd_enqueue_fail_count; // Task_Filter/Calibration failed to enqueue to SD queue
 extern std::atomic<uint32_t> imu_queue_drop_count; // Task_I2C dropped oldest sample in diagnostic FIFO mode
 extern std::atomic<uint32_t> gps_mutex_timeout_count; // Task_Filter GPS snapshot lock timeouts
-extern std::atomic<bool> gps_stale;         // true if last GPS fix > 5 s ago
+extern std::atomic<bool> gps_stale;         // true if a previously acquired fix is now stale/lost
 extern std::atomic<int> system_state;       // 0=idle, 1=countdown, 2=racing
 extern std::atomic<bool> recalibration_pending; // v1.3.2: set by calibrate_alignment(), cleared by Task_Filter
 

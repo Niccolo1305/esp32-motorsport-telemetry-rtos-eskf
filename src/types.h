@@ -14,7 +14,7 @@ struct WifiCredential {
 };
 
 // GPS speed source actually used by Task_Filter for this sample.
-// 0 = NMEA RMC/VTG SOG fallback, 1 = passive NAV-PV listener, 2 = NMEA DHV.
+// 0 = NMEA RMC/VTG SOG fallback, 1 = CASIC NAV/NAV2 binary, 2 = NMEA DHV.
 enum GpsSpeedSource : uint8_t {
   GPS_SPD_NMEA_SOG = 0,
   GPS_SPD_NAV_PV   = 1,
@@ -242,7 +242,7 @@ struct GpsData {
   uint32_t epoch = 0;   // monotonic NMEA fix counter
   uint64_t fix_us = 0;  // esp_timer timestamp of last valid NMEA fix [us]
 
-  // Passive CASIC NAV-PV listener kept for diagnostics and future variants.
+  // CASIC NAV2-PVH listener kept diagnostic-only until 10 Hz behavior is proven.
   float nav_speed2d = 0.0f;
   float nav_s_acc = 0.0f;
   float nav_vel_n = 0.0f;
@@ -253,4 +253,12 @@ struct GpsData {
   // NMEA DHV receiver-reported horizontal ground speed [m/s].
   float dhv_gdspd = 0.0f;
   uint64_t dhv_fix_us = 0;
+
+  // Runtime-only GPS diagnostics for MQTT; not part of TelemetryRecord.
+  uint8_t dbg_prt_ack = 0;
+  uint8_t dbg_prt_nack = 0;
+  uint8_t dbg_cfg_ack = 0;
+  uint8_t dbg_cfg_nack = 0;
+  uint32_t dbg_nav2pvh = 0;
+  uint32_t dbg_nav2_vel = 0;
 };
