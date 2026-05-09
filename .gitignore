@@ -14,6 +14,18 @@ lib/.dependencies/
 *.hex
 *.map
 
+# Repository control Markdown files that must stay visible to Codex/agents.
+!AGENTS.md
+!ARCHITECTURE.md
+!CODESTYLE.md
+!DESIGN.md
+!PLANS.md
+!PRODUCT.md
+!ROADMAP.md
+!docs/PROJECT_STRUCTURE.md
+!plans/
+!plans/*.md
+
 # =========================
 # Python & Tooling
 # =========================
@@ -62,6 +74,7 @@ tools/testdrive_fix_madgwick_2gate.csv
 claude.exe
 cross_domain_audit_report.md
 data_pipeline_audit.md
+# Legacy local Claude guidance is replaced by tracked AGENTS.md.
 CLAUDE.md
 firmware/benchmarks/**/.pio/
 firmware/benchmarks/**/.vscode/
