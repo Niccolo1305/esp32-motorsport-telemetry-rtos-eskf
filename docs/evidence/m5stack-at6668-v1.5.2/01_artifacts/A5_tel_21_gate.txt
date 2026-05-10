@@ -1,4 +1,4 @@
-[GATE] Input: C:\Users\1305n\Desktop\esp32-telemetry-clean\Tool\sitl_hal\Bin_test_su_banco - v1.5.0\tel_21.bin
+[GATE] Input: C:\Users\1305n\Desktop\esp32-telemetry-clean\tools\sitl_hal\bench-bin-tests-v1.5.0\tel_21.bin
 [GATE] Rows analyzed: 2649
 
 [GATE] Static ZARU off reasons:

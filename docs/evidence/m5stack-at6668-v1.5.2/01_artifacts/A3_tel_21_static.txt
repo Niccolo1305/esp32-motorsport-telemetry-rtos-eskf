@@ -1,4 +1,4 @@
-[STATIC] Input: C:\Users\1305n\Desktop\esp32-telemetry-clean\Tool\sitl_hal\Bin_test_su_banco - v1.5.0\tel_21.bin
+[STATIC] Input: C:\Users\1305n\Desktop\esp32-telemetry-clean\tools\sitl_hal\bench-bin-tests-v1.5.0\tel_21.bin
 [STATIC] Rows: total=2750, selected=2649
 [STATIC] CALIB_BOOT: phi=+4.979 deg theta=-2.313 deg bias_a=(-0.00000, -0.00000, +0.06575) bias_g=(+0.23804, -0.00305, +0.04883)
 

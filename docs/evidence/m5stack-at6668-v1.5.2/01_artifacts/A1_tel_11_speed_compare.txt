@@ -1,4 +1,4 @@
-[GPSCMP] Input: C:\Users\1305n\Desktop\esp32-telemetry-clean\Tool\sitl_hal\Bin_test_su_banco\tel_11.bin
+[GPSCMP] Input: C:\Users\1305n\Desktop\esp32-telemetry-clean\tools\sitl_hal\bench-bin-tests\tel_11.bin
 [GPSCMP] Rows analyzed: 32350
 [GPSCMP] Unique valid GPS fixes: 6742
 [GPSCMP] Pairing: successive unique gps_fix_us values
