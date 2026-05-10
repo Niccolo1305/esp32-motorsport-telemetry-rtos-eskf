@@ -30,7 +30,7 @@ from datetime import datetime
 
 # ── Telemetry binary format ───────────────────────────────────────────────────
 # Matches struct TelemetryRecord in Telemetria.ino (__attribute__((packed)))
-# Supported sizes: 242 B (v1.7.0+ AtomS3R v5 raw/FIFO), 224 B (v1.6.1+ AtomS3R),
+# Supported sizes: 320 B (v1.8.11+ AtomS3R GPS supervisor), 256/242 B (AtomS3R raw/FIFO), 224 B (v1.6.1+ AtomS3R),
 # 215 B legacy AtomS3R, 202 B,
 # 190 B, 164 B, 155 B, 127 B (v1.3.1+), 122 B (v0.9.8-v1.3.0), 78 B (v0.8.0-v0.9.7)
 #
@@ -52,6 +52,7 @@ from datetime import datetime
 HEADER_MAGIC  = b'TEL'
 RECORD_FMT_256_V5 = '<Q7fBddffBf4f6f5fBf6h6f3hH3f8BQB4fBBQfQI5H'  # 256-byte header v5 record
 RECORD_FMT_256 = '<Q7fBddffBf4f6f5fBf6h6f3hH3f8BQB4fBBQfQII4BH'  # 256-byte header v6 record
+RECORD_FMT_320 = '<Q7fBddffBf4f6f5fBf6h6f3hH3f8BQB4fBBQfQddfBBH3fBB26xII4BH'  # 320-byte GPS supervisor record
 RECORD_FMT_242 = '<Q7fBddffBf4f6f5fBf6h6f3hH3f8BQB4fBBQfQ'  # 242-byte record (v1.7.0+, AtomS3R v5 raw/FIFO)
 RECORD_FMT_224 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3hH3fBB'  # 224-byte record (v1.6.1+, Bosch-direct mag)
 RECORD_FMT_215 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3fB'  # 215-byte record (v1.6.0 legacy, M5Unified mag)
@@ -64,6 +65,7 @@ RECORD_FMT_122 = '<I7fBddffBf4f6f5f'  # 122-byte record (v0.9.8+, raw IMU + 6D)
 RECORD_FMT_78  = '<I7fBddffBf4f'       # 78-byte record (v0.8.0–v0.9.7, EMA only)
 RECORD_SIZE_256_V5 = struct.calcsize(RECORD_FMT_256_V5)
 RECORD_SIZE_256 = struct.calcsize(RECORD_FMT_256)
+RECORD_SIZE_320 = struct.calcsize(RECORD_FMT_320)
 RECORD_SIZE_242 = struct.calcsize(RECORD_FMT_242)
 RECORD_SIZE_224 = struct.calcsize(RECORD_FMT_224)
 RECORD_SIZE_215 = struct.calcsize(RECORD_FMT_215)
@@ -121,6 +123,26 @@ FIELD_NAMES_242 = [
     'dhv_gdspd', 'dhv_fix_us',
 ]
 FIELD_NAMES_256 = FIELD_NAMES_242 + [
+    'record_magic',
+    'seq',
+    'sd_records_dropped',
+    'sd_partial_write_count',
+    'sd_stall_count',
+    'sd_reopen_count',
+    'crc16',
+]
+FIELD_NAMES_320 = FIELD_NAMES_242 + [
+    'nav_lat',
+    'nav_lon',
+    'nav_h_acc',
+    'nav_fix_flags',
+    'gps_supervisor_state',
+    'gps_supervisor_reason',
+    'gps_nmea_nav2_dist_m',
+    'gps_fix_step_speed_kmh',
+    'gps_eskf_innov_m',
+    'gps_supervisor_bad_count',
+    'gps_supervisor_good_count',
     'record_magic',
     'seq',
     'sd_records_dropped',
@@ -296,7 +318,11 @@ def read_bin(path):
         fw_version  = 'unknown'
         print(f'        No FileHeader (legacy file) — assuming {record_size}B record size')
 
-    if record_size == RECORD_SIZE_256:
+    if record_size == RECORD_SIZE_320:
+        fmt        = RECORD_FMT_320
+        fields     = FIELD_NAMES_320
+        has_raw    = True
+    elif record_size == RECORD_SIZE_256:
         if hdr and hdr.get('header_version', 0) < 6:
             fmt        = RECORD_FMT_256_V5
             fields     = FIELD_NAMES_256_V5
@@ -638,6 +664,8 @@ def main():
 
     if not has_raw:
         fmt_label = '78B (EMA only)'
+    elif records and 'gps_supervisor_state' in records[0]:
+        fmt_label = '320B (raw/FIFO + GPS supervisor shadow)'
     elif records and 'bmm_ut_x' in records[0]:
         fmt_label = '242B (v5 raw/FIFO + explicit Bosch acquisition truth)'
     elif records and 'mag_ut_x' in records[0]:

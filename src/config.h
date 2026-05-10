@@ -5,7 +5,7 @@
 #include <math.h>
 
 #ifdef USE_BMI270
-const char *const FIRMWARE_VERSION = "v1.8.10-nav2s";
+const char *const FIRMWARE_VERSION = "v1.8.11-gpssup";
 #else
 const char *const FIRMWARE_VERSION = "v1.5.5-nav2s";
 #endif
@@ -53,7 +53,7 @@ static constexpr float VAR_STILLNESS_GZ_THRESHOLD  = 0.25f; // [(deg/s)^2]
 static constexpr float VAR_STILLNESS_GXY_THRESHOLD = 0.35f; // [(deg/s)^2]
 #endif
 static constexpr float ZUPT_GPS_MAX_KMH = 2.0f; // [km/h] GPS speed threshold
-static constexpr int SD_WRITE_BATCH_RECORDS = 8;    // 8 x 256 B = 2048 B = 4 full SD sectors
+static constexpr int SD_WRITE_BATCH_RECORDS = 8;    // AtomS3R v7: 8 x 320 B = 2560 B = 5 full SD sectors
 static constexpr int SD_FLUSH_EVERY_BATCHES = 4;    // 4 batches = 32 records ~= 640 ms at 50 Hz
 static constexpr int SD_BATCH_IDLE_FLUSH_MS = 250;  // write/verify a partial batch if producer goes idle
 static constexpr int SD_FLUSH_EVERY = SD_WRITE_BATCH_RECORDS * SD_FLUSH_EVERY_BATCHES;

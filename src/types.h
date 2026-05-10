@@ -25,7 +25,7 @@ enum GpsSpeedSource : uint8_t {
 // Binary SD record written by Task_Filter to sd_queue.
 // Compact packed struct:
 //   - AtomS3   : 202 bytes/sample (legacy stable layout)
-//   - AtomS3R  : 256 bytes/sample (v6 sector-aligned raw/FIFO layout)
+//   - AtomS3R  : 320 bytes/sample (v7 GPS-supervisor raw/FIFO layout)
 //
 // AtomS3R v5+ logs the BMI270 FIFO signal explicitly as the post-LPF,
 // pre-pipeline acquisition truth used by the current vehicle-dynamics path.
@@ -108,7 +108,22 @@ struct __attribute__((packed)) TelemetryRecord {
   uint64_t dhv_fix_us;   // 8
 
 #ifdef USE_BMI270
-  // Sector-aligned tail: record magic + seq + compact SD diagnostics + CRC16.
+  // v1.8.11 GPS Supervisor shadow diagnostics. These do not gate production
+  // ESKF corrections yet; they provide complete evidence for threshold tuning.
+  double nav_lat;         // 8, CASIC NAV2-PVH latitude [deg]
+  double nav_lon;         // 8, CASIC NAV2-PVH longitude [deg]
+  float nav_h_acc;        // 4, NAV2-PVH horizontal accuracy estimate [m]
+  uint8_t nav_fix_flags;  // 1, raw NAV2-PVH position validity flags
+  uint8_t gps_supervisor_state; // 1, GpsSupervisorState
+  uint16_t gps_supervisor_reason; // 2, GpsSupervisorReason bitmask
+  float gps_nmea_nav2_dist_m; // 4, NMEA-vs-NAV2 position delta [m]
+  float gps_fix_step_speed_kmh; // 4, speed implied by successive NMEA fixes
+  float gps_eskf_innov_m; // 4, pre-correction ESKF position innovation [m]
+  uint8_t gps_supervisor_bad_count; // 1, saturated consecutive bad fixes
+  uint8_t gps_supervisor_good_count; // 1, saturated consecutive good fixes
+  uint8_t gps_supervisor_reserved[26]; // 26, reserved to keep record 320 B
+
+  // Integrity tail: record magic + seq + compact SD diagnostics + CRC16.
   uint32_t record_magic; // 4
   uint32_t seq; // 4
   uint8_t sd_records_dropped; // 1, saturated snapshot
@@ -119,7 +134,7 @@ struct __attribute__((packed)) TelemetryRecord {
 #endif
 };
 #ifdef USE_BMI270
-static_assert(sizeof(TelemetryRecord) == 256, "TelemetryRecord must be 256 bytes (AtomS3R v6 sector-aligned)");
+static_assert(sizeof(TelemetryRecord) == 320, "TelemetryRecord must be 320 bytes (AtomS3R v7 GPS-supervisor layout)");
 #else
 static_assert(sizeof(TelemetryRecord) == 202, "TelemetryRecord must be 202 bytes");
 #endif
@@ -243,13 +258,18 @@ struct GpsData {
   uint32_t epoch = 0;   // monotonic NMEA fix counter
   uint64_t fix_us = 0;  // esp_timer timestamp of last valid NMEA fix [us]
 
-  // CASIC NAV2-PVH speed channel. speed2D is the primary scalar speed when fresh.
+  // CASIC NAV2-PVH channel. speed2D is the primary scalar speed when fresh;
+  // position/fix flags remain diagnostics until GPS Supervisor active gating.
   float nav_speed2d = 0.0f;
   float nav_s_acc = 0.0f;
   float nav_vel_n = 0.0f;
   float nav_vel_e = 0.0f;
   uint8_t nav_vel_valid = 0;
   uint64_t nav_fix_us = 0;
+  double nav_lat = 0.0;
+  double nav_lon = 0.0;
+  float nav_h_acc = 0.0f;
+  uint8_t nav_fix_flags = 0;
 
   // NMEA DHV receiver-reported horizontal ground speed [m/s].
   float dhv_gdspd = 0.0f;

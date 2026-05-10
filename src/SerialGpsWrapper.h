@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SerialGpsWrapper.h - Concrete IGpsProvider backed by HardwareSerial + TinyGPSPlus
 //                    + NMEA DHV parser (1 Hz diagnostics on the tested AT6668 module)
-//                    + CASIC NAV2-PVH binary speed channel
+//                    + CASIC NAV2-PVH binary position/speed channel
 //
 // Encapsulates all GPS hardware concerns:
 //   - HardwareSerial (UART1, RX/TX pins, baud rate, RX buffer size)
 //   - TinyGPSPlus sentence decoding (position, NMEA SOG, sats, hdop)
 //   - NMEA DHV parser (gdspd, dhv_fix_us)
-//   - CASIC NAV2-PVH binary parser (speed2D, sAcc, velN/E, velValid)
+//   - CASIC NAV2-PVH binary parser (lat/lon, hAcc, speed2D, sAcc, velN/E,
+//     fix/velocity flags)
 //   - UART overflow ISR callback (atomic counter, captured by reference)
 //   - AT6668 chip-startup delay + CASIC $PCAS02 rate command (10 Hz positioning)
 //   - Explicit $PCAS03 sentence selection (GGA/RMC/DHV only)
@@ -480,12 +481,18 @@ private:
         }
 
         const uint8_t* p = _casicBuf;
+        const uint8_t fixFlags = p[8];
         const uint8_t velFlags = p[9];
 
+        double lon, lat;
         float velE, velN, speed2D, sAcc_mps;
+        float hAcc_m;
+        memcpy(&lon,      p + 24, 8);
+        memcpy(&lat,      p + 32, 8);
         memcpy(&velE,     p + 48, 4);
         memcpy(&velN,     p + 52, 4);
         memcpy(&speed2D,  p + 64, 4);
+        memcpy(&hAcc_m,   p + 72, 4);
         memcpy(&sAcc_mps, p + 80, 4);
 
         out.nav_speed2d = speed2D;
@@ -493,6 +500,10 @@ private:
         out.nav_vel_n = velN;
         out.nav_vel_e = velE;
         out.nav_vel_valid = velFlags;
+        out.nav_lat = lat;
+        out.nav_lon = lon;
+        out.nav_h_acc = hAcc_m;
+        out.nav_fix_flags = fixFlags;
         out.nav_fix_us = esp_timer_get_time();
 
         _nav2PvhCount++;
@@ -501,8 +512,8 @@ private:
 
         if (!_loggedFirstNav2Pvh) {
             Serial.printf(
-                "[GPSDBG] First NAV2-PVH parsed: velflags=%u speed2D=%.3f m/s velN=%.3f velE=%.3f sAcc=%.3f m/s\n",
-                velFlags, speed2D, velN, velE, sAcc_mps
+                "[GPSDBG] First NAV2-PVH parsed: fixflags=%u velflags=%u lat=%.7f lon=%.7f hAcc=%.2f m speed2D=%.3f m/s velN=%.3f velE=%.3f sAcc=%.3f m/s\n",
+                fixFlags, velFlags, lat, lon, hAcc_m, speed2D, velN, velE, sAcc_mps
             );
             _loggedFirstNav2Pvh = true;
         }

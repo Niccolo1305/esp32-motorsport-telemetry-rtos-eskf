@@ -96,7 +96,9 @@ VGPL_BETA_FLOOR = 0.005
 LEGACY_GPS_FIX_PERIOD_US = 90_000
 
 INT_COLUMNS = {"t_us", "lap", "gps_sats", "zaru_flags", "gps_fix_us", "gps_valid",
-               "nav_vel_valid", "gps_speed_source", "nav_fix_us", "dhv_fix_us"}
+               "nav_vel_valid", "gps_speed_source", "nav_fix_us", "dhv_fix_us",
+               "nav_fix_flags", "gps_supervisor_state", "gps_supervisor_reason",
+               "gps_supervisor_bad_count", "gps_supervisor_good_count"}
 # Optional NAV/NAV2 binary columns present only in v1.5.0+ logs
 NAV_PV_COLUMNS = {"nav_speed2d", "nav_s_acc", "nav_vel_n", "nav_vel_e",
                   "nav_vel_valid", "gps_speed_source", "nav_fix_us"}

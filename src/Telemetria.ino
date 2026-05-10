@@ -135,16 +135,17 @@
 //   |   last_gps = shared_gps_data copy
 //   |   NMEA fix path: lat/lon/sog_kmh/alt/sats/hdop + valid/epoch/fix_us
 //   |   NMEA DHV path: dhv_gdspd + dhv_fix_us     [logged for diagnostics only]
-//   |   CASIC NAV2-PVH path: nav_* fields used for primary scalar speed when valid
+//   |   CASIC NAV2-PVH path: nav_* speed + position/accuracy diagnostics
 //   |
 //   | STEP 10: GPS Velocity Selection + Freshness + Stationary Condition
 //   |   gps_speed_used = NAV2-PVH speed2D when fresh/valid, else sog_kmh
 //   |   Source semantics:
-//   |     * nav_*     = CASIC NAV2-PVH primary scalar speed source at 10 Hz
+//   |     * nav_*     = CASIC NAV2-PVH primary scalar speed source + diagnostics
 //   |     * sog_kmh   = NMEA RMC receiver-reported Speed Over Ground fallback
 //   |     * dhv_gdspd = NMEA DHV, observed 1 Hz on AT6668, diagnostics only
 //   |     * nav_ok    = MQTT flag showing NAV2 eligibility for production speed
 //   |   gps_fix_fresh = valid fix with age <= 1.5 s
+//   |   GPS Supervisor v1.8.11 = shadow-only NMEA/NAV2/ESKF consistency state
 //   |   gps_stale is raised only after a previously acquired fix becomes stale
 //   |   cold-start 0-sat condition stays "NO FIX / acquiring", not "GPS LOST"
 //   |   is_stationary = variance warm-up complete
@@ -204,13 +205,14 @@
 //   |
 //   |                          PHASE 5: SD record (no mutex)
 //   |
-//   | 202 bytes on AtomS3, 256 bytes on AtomS3R v6:
+//   | 202 bytes on AtomS3, 320 bytes on AtomS3R v7:
 //   |   EMA + zero-latency pipeline channels + GPS + ESKF 5D + 6D Shadow
 //   |   + ZARU flags (bit 3: recalib) + tbias_gz + Bosch-direct acquisition truth
 //   |   + gps_fix_us + gps_valid (fresh-for-fusion flag) + gps_sog_kmh
 //   |   + nav_speed2d/nav_s_acc/nav_vel_n/nav_vel_e/nav_vel_valid
 //   |   + gps_speed_source + nav_fix_us + dhv_gdspd + dhv_fix_us
-//   |   + AtomS3R v6 tail: record_magic + seq + SD diagnostics + CRC16
+//   |   + NAV2 position + GPS Supervisor shadow state/reasons/metrics
+//   |   + AtomS3R v7 tail: record_magic + seq + SD diagnostics + CRC16
 //   |   for deterministic SITL replay of the production NAV2/SOG speed path
 //   | → xQueueSend(sd_queue, depth=SD_QUEUE_DEPTH=200) → Task_SD_Writer
 //   |
@@ -1508,6 +1510,20 @@
 //     Raw NMEA SOG remains visible as `sog_kmh`; `nav_ok` means NAV2 eligible.
 //   - [HEADER] Firmware version shortened to fit FileHeader.firmware_version[16].
 //   - [DATA] TelemetryRecord and CSV schemas are unchanged.
+//
+// v1.8.11 - GPS Supervisor Shadow
+//   - [GPS] Parses NAV2-PVH position diagnostics in addition to speed:
+//     nav_lat/nav_lon, nav_h_acc and nav_fix_flags.
+//   - [PIPELINE] Adds a shadow GPS supervisor with OK/SUSPECT/QUARANTINE/
+//     RECOVERING states and a reason bitmask. It checks NMEA-vs-NAV2 position
+//     coherence, implied speed from successive NMEA fixes, low-speed jumps,
+//     NAV2 fix/hAcc quality, ESKF pre-correction innovation, and frozen
+//     positions while motion evidence exists.
+//   - [SAFETY] Shadow only: v1.8.11 does not block eskf.correct(), does not
+//     alter gps_slow/stationary, and does not restart the GPS module. The goal
+//     is collecting real-road evidence before active gating in a later patch.
+//   - [DATA] AtomS3R TelemetryRecord grows from 256 B to 320 B. Legacy 256 B
+//     logs remain supported by the Python converter.
 //
 // --- TODO (deferred to v1.9.0 CAN format bump) ---
 //   - [TODO] Add CAN bus task (Core 0) for RPM, throttle, wheel speeds (×4),

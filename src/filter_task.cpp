@@ -44,6 +44,23 @@ static constexpr float ESKF_GPS_POS_GATE_MARGIN_M = 3.0f;
 static constexpr float ESKF_GPS_POS_GATE_SPEED_FACTOR = 1.35f;
 static constexpr float ESKF_GPS_POS_GATE_MAX_ACCEL_MS2 = 6.0f;
 static constexpr float ESKF_GPS_POS_GATE_HDOP_FACTOR_M = 4.0f;
+static constexpr uint64_t GPS_SUP_NAV2_STALE_US = 500000ULL;
+static constexpr float GPS_SUP_NMEA_NAV2_BASE_M = 10.0f;
+static constexpr float GPS_SUP_NMEA_NAV2_HACC_FACTOR = 3.0f;
+static constexpr float GPS_SUP_NMEA_NAV2_HDOP_FACTOR_M = 4.0f;
+static constexpr float GPS_SUP_MAX_IMPLIED_SPEED_KMH = 160.0f;
+static constexpr float GPS_SUP_IMPLIED_SPEED_MARGIN_KMH = 60.0f;
+static constexpr float GPS_SUP_LOW_SPEED_KMH = 5.0f;
+static constexpr float GPS_SUP_LOW_SPEED_JUMP_M = 12.0f;
+static constexpr float GPS_SUP_FREEZE_STEP_M = 0.35f;
+static constexpr float GPS_SUP_FREEZE_SPEED_KMH = 10.0f;
+static constexpr float GPS_SUP_FREEZE_ACCEL_G = 0.08f;
+static constexpr float GPS_SUP_FREEZE_GZ_DPS = 5.0f;
+static constexpr float GPS_SUP_ESKF_INNOV_MIN_M = 50.0f;
+static constexpr float GPS_SUP_ESKF_INNOV_SPEED_WINDOW_S = 3.0f;
+static constexpr float GPS_SUP_ESKF_INNOV_HDOP_FACTOR_M = 10.0f;
+static constexpr uint8_t GPS_SUP_QUARANTINE_BAD_FIXES = 5;
+static constexpr uint8_t GPS_SUP_RECOVERY_GOOD_FIXES = 20;
 static constexpr bool MOUNT_YAW_APPLY_LIVE = false;
 static constexpr float MOUNT_YAW_MIN_SPEED_KMH = 18.0f;
 static constexpr float MOUNT_YAW_MAX_HDOP = 1.5f;
@@ -155,6 +172,23 @@ struct GpsCorrectionGateState {
   uint8_t reject_count = 0;
 };
 
+struct GpsSupervisorShadowState {
+  uint8_t state = GPS_SUPERVISOR_OK;
+  uint16_t reason = GPS_SUP_REASON_NONE;
+  uint8_t bad_count = 0;
+  uint8_t good_count = 0;
+  bool has_prev_fix = false;
+  double prev_lat = 0.0;
+  double prev_lon = 0.0;
+  uint64_t prev_fix_us = 0;
+  uint32_t last_epoch = 0;
+  float nmea_nav2_dist_m = -1.0f;
+  float fix_step_speed_kmh = -1.0f;
+  float eskf_innov_m = -1.0f;
+  uint8_t last_reported_state = 255;
+  uint16_t last_reported_reason = 0xFFFF;
+};
+
 static float clamp01f(float value) {
   if (!isfinite(value)) return 0.0f;
   if (value < 0.0f) return 0.0f;
@@ -196,6 +230,152 @@ static bool gps_fix_quality_ok(const GpsData& gps) {
          gps.hdop <= ESKF_GPS_MAX_HDOP &&
          isfinite(gps.lat) && isfinite(gps.lon) &&
          fabs(gps.lat) > 1.0e-9 && fabs(gps.lon) > 1.0e-9;
+}
+
+static float gps_position_delta_m(double lat_a, double lon_a,
+                                  double lat_b, double lon_b) {
+  float east_m = 0.0f;
+  float north_m = 0.0f;
+  wgs84_to_enu(lat_b, lon_b, lat_a, lon_a, east_m, north_m);
+  return sqrtf(east_m * east_m + north_m * north_m);
+}
+
+static void update_gps_supervisor_shadow(GpsSupervisorShadowState& sup,
+                                         const GpsData& gps,
+                                         const Nav2PvhSelection& nav2,
+                                         bool gps_fix_fresh,
+                                         bool gps_origin_set,
+                                         float gps_east_m,
+                                         float gps_north_m,
+                                         float eskf_x_m,
+                                         float eskf_y_m,
+                                         float gps_speed_kmh_used,
+                                         float lin_ax_g,
+                                         float lin_ay_g,
+                                         float gz_corr_dps) {
+  if (!gps_fix_fresh || gps.epoch == sup.last_epoch) {
+    return;
+  }
+  sup.last_epoch = gps.epoch;
+  sup.reason = GPS_SUP_REASON_NONE;
+  sup.nmea_nav2_dist_m = -1.0f;
+  sup.fix_step_speed_kmh = -1.0f;
+  sup.eskf_innov_m = -1.0f;
+
+  if (!gps_fix_quality_ok(gps)) {
+    sup.reason |= GPS_SUP_REASON_BAD_HACC_HDOP_SATS;
+  }
+
+  const bool nav2_seen = gps.nav_fix_us > 0ULL;
+  if (nav2_seen && nav2.age_us > GPS_SUP_NAV2_STALE_US) {
+    sup.reason |= GPS_SUP_REASON_NAV2_STALE;
+  }
+  if (nav2_seen && nav2.age_us <= GPS_SUP_NAV2_STALE_US) {
+    if (nav2.fix_flags < 6U) {
+      sup.reason |= GPS_SUP_REASON_BAD_FIXFLAGS;
+    }
+    if (!isfinite(nav2.h_acc_m) || nav2.h_acc_m < 0.0f ||
+        nav2.h_acc_m > NAV2_MAX_H_ACC_M) {
+      sup.reason |= GPS_SUP_REASON_BAD_HACC_HDOP_SATS;
+    }
+  }
+  if (nav2.pos_ok) {
+    sup.nmea_nav2_dist_m =
+        gps_position_delta_m(gps.lat, gps.lon, nav2.lat, nav2.lon);
+    const float hdop_term =
+        fminf(fmaxf(isfinite(gps.hdop) ? gps.hdop : 2.0f, 0.5f), 10.0f)
+        * GPS_SUP_NMEA_NAV2_HDOP_FACTOR_M;
+    const float mismatch_limit =
+        fmaxf(GPS_SUP_NMEA_NAV2_BASE_M,
+              nav2.h_acc_m * GPS_SUP_NMEA_NAV2_HACC_FACTOR + hdop_term);
+    if (sup.nmea_nav2_dist_m > mismatch_limit) {
+      sup.reason |= GPS_SUP_REASON_NMEA_NAV2_POS_MISMATCH;
+    }
+  }
+
+  if (sup.has_prev_fix && gps.fix_us > sup.prev_fix_us) {
+    const float dt_s = (float)(gps.fix_us - sup.prev_fix_us) / 1000000.0f;
+    if (dt_s > 0.05f && dt_s < 2.0f) {
+      const float step_dist_m =
+          gps_position_delta_m(sup.prev_lat, sup.prev_lon, gps.lat, gps.lon);
+      sup.fix_step_speed_kmh = (step_dist_m / dt_s) * 3.6f;
+      const float ref_speed_kmh =
+          fmaxf(gps_speed_kmh_used,
+                fmaxf(gps.sog_kmh, nav2.ok ? nav2.speed_kmh : 0.0f));
+      const float implied_limit =
+          fmaxf(GPS_SUP_MAX_IMPLIED_SPEED_KMH,
+                ref_speed_kmh * 2.0f + GPS_SUP_IMPLIED_SPEED_MARGIN_KMH);
+      if (sup.fix_step_speed_kmh > implied_limit) {
+        sup.reason |= GPS_SUP_REASON_IMPLIED_SPEED_BAD;
+      }
+      if (ref_speed_kmh < GPS_SUP_LOW_SPEED_KMH &&
+          step_dist_m > GPS_SUP_LOW_SPEED_JUMP_M) {
+        sup.reason |= GPS_SUP_REASON_LOW_SPEED_POSITION_JUMP;
+      }
+      const float planar_acc_g = sqrtf(lin_ax_g * lin_ax_g + lin_ay_g * lin_ay_g);
+      const bool moving_evidence =
+          ref_speed_kmh > GPS_SUP_FREEZE_SPEED_KMH ||
+          planar_acc_g > GPS_SUP_FREEZE_ACCEL_G ||
+          fabsf(gz_corr_dps) > GPS_SUP_FREEZE_GZ_DPS;
+      if (step_dist_m < GPS_SUP_FREEZE_STEP_M && moving_evidence) {
+        sup.reason |= GPS_SUP_REASON_POSITION_FROZEN_WHILE_MOVING;
+      }
+    }
+  }
+
+  if (gps_origin_set) {
+    const float de = gps_east_m - eskf_x_m;
+    const float dn = gps_north_m - eskf_y_m;
+    sup.eskf_innov_m = sqrtf(de * de + dn * dn);
+    const float innov_limit =
+        fmaxf(GPS_SUP_ESKF_INNOV_MIN_M,
+              (gps_speed_kmh_used / 3.6f) * GPS_SUP_ESKF_INNOV_SPEED_WINDOW_S
+              + fminf(fmaxf(isfinite(gps.hdop) ? gps.hdop : 2.0f, 0.5f), 10.0f)
+                    * GPS_SUP_ESKF_INNOV_HDOP_FACTOR_M);
+    if (sup.eskf_innov_m > innov_limit) {
+      sup.reason |= GPS_SUP_REASON_ESKF_INNOVATION_BAD;
+    }
+  }
+
+  if (sup.reason != GPS_SUP_REASON_NONE) {
+    if (sup.bad_count < 255U) sup.bad_count++;
+    sup.good_count = 0;
+    sup.state = (sup.bad_count >= GPS_SUP_QUARANTINE_BAD_FIXES)
+                    ? GPS_SUPERVISOR_QUARANTINE
+                    : GPS_SUPERVISOR_SUSPECT;
+  } else {
+    if (sup.state == GPS_SUPERVISOR_QUARANTINE ||
+        sup.state == GPS_SUPERVISOR_RECOVERING) {
+      if (sup.good_count < 255U) sup.good_count++;
+      sup.bad_count = 0;
+      sup.state = (sup.good_count >= GPS_SUP_RECOVERY_GOOD_FIXES)
+                      ? GPS_SUPERVISOR_OK
+                      : GPS_SUPERVISOR_RECOVERING;
+    } else {
+      sup.state = GPS_SUPERVISOR_OK;
+      sup.bad_count = 0;
+      if (sup.good_count < 255U) sup.good_count++;
+    }
+  }
+
+  sup.prev_lat = gps.lat;
+  sup.prev_lon = gps.lon;
+  sup.prev_fix_us = gps.fix_us;
+  sup.has_prev_fix = true;
+
+  if (sup.state != sup.last_reported_state ||
+      sup.reason != sup.last_reported_reason) {
+    Serial.printf("[GPS_SUP] shadow state=%u reason=0x%04X bad=%u good=%u nmea_nav2=%.1fm step=%.1fkmh innov=%.1fm\n",
+                  (unsigned)sup.state,
+                  (unsigned)sup.reason,
+                  (unsigned)sup.bad_count,
+                  (unsigned)sup.good_count,
+                  sup.nmea_nav2_dist_m,
+                  sup.fix_step_speed_kmh,
+                  sup.eskf_innov_m);
+    sup.last_reported_state = sup.state;
+    sup.last_reported_reason = sup.reason;
+  }
 }
 
 static bool gps_correction_gate_allows(const GpsCorrectionGateState& gate,
@@ -725,6 +905,7 @@ void Task_Filter(void *pvParameters) {
   uint64_t last_timestamp_us = 0;
   MountYawState mount_yaw;
   GpsCorrectionGateState gps_gate;
+  GpsSupervisorShadowState gps_supervisor;
 #ifdef USE_BMI270
   uint32_t record_seq = 0;
 #endif
@@ -1128,6 +1309,30 @@ void Task_Filter(void *pvParameters) {
       const bool gps_lost_after_fix =
           gps_ever_had_fix && (!gps_has_fix || gps_age_us > GPS_STALE_US);
       gps_stale = gps_lost_after_fix;
+
+      // ── GPS Supervisor Shadow (v1.8.11) ──────────────────────────────────
+      // Diagnostic only: computes receiver/PVT plausibility and records state
+      // in the SD stream, but does not alter gps_slow or eskf.correct() yet.
+      float gps_supervisor_east_m = 0.0f;
+      float gps_supervisor_north_m = 0.0f;
+      if (gps_fix_fresh && gps_origin_set && gps_fix_quality_ok(last_gps)) {
+        wgs84_to_enu(last_gps.lat, last_gps.lon,
+                     gps_origin_lat, gps_origin_lon,
+                     gps_supervisor_east_m, gps_supervisor_north_m);
+      }
+      update_gps_supervisor_shadow(gps_supervisor,
+                                   last_gps,
+                                   nav2_speed,
+                                   gps_fix_fresh,
+                                   gps_origin_set,
+                                   gps_supervisor_east_m,
+                                   gps_supervisor_north_m,
+                                   eskf.px(),
+                                   eskf.py(),
+                                   gps_speed_kmh_used,
+                                   lin_ax,
+                                   lin_ay,
+                                   gz_r - thermal_bias_gz);
 
       // ── Stationary Condition (Statistical Engine + GPS) ───────────────────
       // is_stationary = true ONLY IF:
@@ -1604,6 +1809,17 @@ void Task_Filter(void *pvParameters) {
         rec.dhv_gdspd       = last_gps.dhv_gdspd;
         rec.dhv_fix_us      = last_gps.dhv_fix_us;
 #ifdef USE_BMI270
+        rec.nav_lat = last_gps.nav_lat;
+        rec.nav_lon = last_gps.nav_lon;
+        rec.nav_h_acc = last_gps.nav_h_acc;
+        rec.nav_fix_flags = last_gps.nav_fix_flags;
+        rec.gps_supervisor_state = gps_supervisor.state;
+        rec.gps_supervisor_reason = gps_supervisor.reason;
+        rec.gps_nmea_nav2_dist_m = gps_supervisor.nmea_nav2_dist_m;
+        rec.gps_fix_step_speed_kmh = gps_supervisor.fix_step_speed_kmh;
+        rec.gps_eskf_innov_m = gps_supervisor.eskf_innov_m;
+        rec.gps_supervisor_bad_count = gps_supervisor.bad_count;
+        rec.gps_supervisor_good_count = gps_supervisor.good_count;
         rec.seq = record_seq++;
 #endif
         if (xQueueSend(sd_queue, &rec, 0) != pdTRUE) {

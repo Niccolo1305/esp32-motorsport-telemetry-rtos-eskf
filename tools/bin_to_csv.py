@@ -272,6 +272,43 @@ HEADER_256 = HEADER_256_BASE + [
 COL_FMT_256 = COL_FMT_242 + ['{:d}'] * 7
 assert struct.calcsize(FMT_256) == 256, f"FMT_256 mismatch: {struct.calcsize(FMT_256)}"
 
+# 320-byte record (v1.8.11 AtomS3R): GPS Supervisor shadow diagnostics.
+FMT_320 = FMT_242 + 'ddfBBH3fBB26xII4BH'
+HEADER_320 = HEADER_256_BASE + [
+    'nav_lat (°)',
+    'nav_lon (°)',
+    'nav_h_acc (m)',
+    'nav_fix_flags',
+    'gps_supervisor_state',
+    'gps_supervisor_reason',
+    'gps_nmea_nav2_dist_m (m)',
+    'gps_fix_step_speed_kmh (km/h)',
+    'gps_eskf_innov_m (m)',
+    'gps_supervisor_bad_count',
+    'gps_supervisor_good_count',
+    'record_magic',
+    'seq',
+    'sd_records_dropped',
+    'sd_partial_write_count',
+    'sd_stall_count',
+    'sd_reopen_count',
+    'crc16',
+]
+COL_FMT_320 = COL_FMT_242 + [
+    '{:.7f}',
+    '{:.7f}',
+    '{:.3f}',
+    '{:d}',
+    '{:d}',
+    '{:d}',
+    '{:.3f}',
+    '{:.2f}',
+    '{:.3f}',
+    '{:d}',
+    '{:d}',
+] + ['{:d}'] * 7
+assert struct.calcsize(FMT_320) == 320, f"FMT_320 mismatch: {struct.calcsize(FMT_320)}"
+
 # Default aliases (used for legacy files without header)
 FMT_DEFAULT = FMT_122
 HEADER = HEADER_122
@@ -279,6 +316,8 @@ COL_FMT = COL_FMT_122
 
 def get_format(record_size, header_version=None):
     """Return (struct_fmt, header_list, col_fmt_list) for a given record size."""
+    if record_size == 320:
+        return FMT_320, HEADER_320, COL_FMT_320
     if record_size == 256:
         if header_version is not None and header_version < 6:
             return FMT_256_V5, HEADER_256_V5, COL_FMT_256_V5
@@ -644,9 +683,9 @@ def build_csv_preamble_lines(hdr):
             "# COLUMN_NOTE: mag_valid=1 means the compensated reading is valid; "
             "mag_fresh=1 means the BMI270 AUX interface reported a fresh mag sample."
         )
-    if hdr and hdr.get('record_size', 0) in (242, 256):
+    if hdr and hdr.get('record_size', 0) in (242, 256, 320):
         lines.append(
-            "# COLUMN_NOTE: v5 AtomS3R schema. pipe_lin_* / pipe_body_* are zero-latency "
+            "# COLUMN_NOTE: AtomS3R raw/FIFO schema. pipe_lin_* / pipe_body_* are zero-latency "
             "pipeline diagnostics; bmi_* / bmm_* are Bosch-direct acquisition truth."
         )
         lines.append(
@@ -657,6 +696,11 @@ def build_csv_preamble_lines(hdr):
             lines.append(
                 "# COLUMN_NOTE: 256B v5 logs use seq + uint16 SD snapshots; header v6 logs add record_magic/crc16 and compact SD snapshots."
             )
+        if hdr.get('record_size', 0) == 320:
+            lines.append(
+                "# COLUMN_NOTE: 320B v7 logs add NAV2-PVH position and GPS Supervisor shadow diagnostics; supervisor fields are diagnostic only."
+            )
+        if hdr.get('record_size', 0) in (256, 320):
             if hdr.get('header_version', 0) >= 6 and 'v6' in hdr:
                 v6 = hdr['v6']
                 lines.append(
@@ -893,14 +937,31 @@ def _record_plausible(vals, fields, prev_ts_us=None, raw=None):
     if value is not None and value != 0.0 and not _range_ok(value, -180.0, 180.0):
         return False
 
+    value = _field_value(vals, fields, 'nav_lat')
+    if value is not None and value != 0.0 and not _range_ok(value, -90.0, 90.0):
+        return False
+
+    value = _field_value(vals, fields, 'nav_lon')
+    if value is not None and value != 0.0 and not _range_ok(value, -180.0, 180.0):
+        return False
+
     range_checks = (
         ('gps_sog_kmh', 0.0, 500.0),
         ('gps_alt_m', -1000.0, 10000.0),
         ('gps_sats', 0, 80),
         ('gps_hdop', 0.0, 100.0),
+        ('nav_h_acc', 0.0, 10000.0),
+        ('gps_nmea_nav2_dist_m', -1.0, 100000.0),
+        ('gps_fix_step_speed_kmh', -1.0, 1000.0),
+        ('gps_eskf_innov_m', -1.0, 100000.0),
         ('lap', 0, 255),
         ('fifo_frames_drained', 0, 64),
         ('fifo_backlog', 0, 255),
+        ('nav_fix_flags', 0, 255),
+        ('gps_supervisor_state', 0, 3),
+        ('gps_supervisor_reason', 0, 65535),
+        ('gps_supervisor_bad_count', 0, 255),
+        ('gps_supervisor_good_count', 0, 255),
     )
     for name, lo, hi in range_checks:
         value = _field_value(vals, fields, name)
@@ -960,7 +1021,7 @@ def _is_preallocated_log(hdr):
     return (
         hdr is not None
         and hdr.get('header_version', 0) >= 6
-        and hdr.get('record_size') == 256
+        and hdr.get('record_size') in (256, 320)
         and (hdr.get('v6', {}).get('build_flags', 0) & FILE_HEADER_V6_FLAG_LOG_PREALLOCATED)
     )
 
