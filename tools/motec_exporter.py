@@ -56,7 +56,7 @@ RECORD_FMT_242 = '<Q7fBddffBf4f6f5fBf6h6f3hH3f8BQB4fBBQfQ'  # 242-byte record (v
 RECORD_FMT_224 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3hH3fBB'  # 224-byte record (v1.6.1+, Bosch-direct mag)
 RECORD_FMT_215 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ3fB'  # 215-byte record (v1.6.0 legacy, M5Unified mag)
 RECORD_FMT_202 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQfQ'  # 202-byte record (v1.5.1+, + DHV speed/timestamp)
-RECORD_FMT_190 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQ'  # 190-byte record (v1.5.0+, + NAV-PV velocity)
+RECORD_FMT_190 = '<Q7fBddffBf4f6f5fBf6fQB4fBBQ'  # 190-byte record (v1.5.0+, + NAV/NAV2 velocity)
 RECORD_FMT_164 = '<Q7fBddffBf4f6f5fBf6fQB'  # 164-byte record (v1.4.2+, + GPS timing metadata)
 RECORD_FMT_155 = '<Q7fBddffBf4f6f5fBf6f'  # 155-byte record (v1.4.0, uint64 ts + sensor raw)
 RECORD_FMT_127 = '<I7fBddffBf4f6f5fBf'  # 127-byte record (v1.3.1+, + zaru_flags + tbias_gz)
@@ -157,7 +157,7 @@ FIELD_NAMES_190 = [
     'sensor_gx', 'sensor_gy', 'sensor_gz',
     'gps_fix_us', 'gps_valid',  # SITL timing metadata
     'nav_speed2d', 'nav_s_acc', 'nav_vel_n', 'nav_vel_e',
-    'nav_vel_valid', 'gps_speed_source', 'nav_fix_us',  # NAV-PV velocity (v1.5.0)
+    'nav_vel_valid', 'gps_speed_source', 'nav_fix_us',  # NAV/NAV2 velocity
 ]
 
 FIELD_NAMES_164 = [
@@ -563,7 +563,7 @@ def export_motec_ld(records, has_raw, output_path, venue, fw_version, input_name
                                                         r.get('gps_alt', 0.0)))),
         ('GPS Speed (SOG)', 'GPSSpd',  'km/h',  10,  lambda r: float(r.get('gps_sog_kmh', r.get('gps_speed_kmh', 0.0)))),
         ('GPS Speed (DHV)', 'DhvSpd',  'm/s',   10,  lambda r: float(r.get('dhv_gdspd', 0.0))),
-        ('GPS Speed (nav)', 'NavSpd',  'm/s',   10,  lambda r: float(r.get('nav_speed2d', 0.0))),
+        ('GPS Speed (NAV2)', 'NavSpd',  'm/s',   10,  lambda r: float(r.get('nav_speed2d', 0.0))),
         ('GPS Speed Acc',  'SpdAcc',  'm/s',  10, lambda r: float(r.get('nav_s_acc', 0.0))),
         ('Sensor Temp',    'Temp',    'C',     50,  lambda r: r.get('temp_c', 0.0)),
         ('Mag X Legacy',   'MagXLeg', 'arb',   10,  lambda r: float(r.get('mag_mx_legacy', 0.0))),

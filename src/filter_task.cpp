@@ -29,6 +29,7 @@
 #include "filter_task.h"
 
 #include "globals.h"
+#include "gps_nav2.h"
 #include "imu_axis_remap.h"
 #include "math_utils.h"
 
@@ -1100,15 +1101,19 @@ void Task_Filter(void *pvParameters) {
         gps_mutex_timeout_count++;
       }
 
-      // ── GPS Velocity Source Selection (v1.5.2) ────────────────────────────
-      // Hardware investigation result (AT6668 module):
-      //   - DHV (NMEA): capped at 1 Hz by AT6668 firmware regardless of PCAS03.
-      //   - NAV2-PVH (binary): diagnostic 10 Hz candidate under test via CFG-MSG.
-      //   - NMEA SOG (RMC, via TinyGPSPlus): 10 Hz, co-epoch with position fix.
-      //     This is the receiver-reported Speed Over Ground exposed by NMEA.
-      // Primary source stays sog_kmh for this diagnostic phase.
-      float gps_speed_kmh_used = last_gps.sog_kmh;
-      uint8_t gps_speed_source = GPS_SPD_NMEA_SOG;
+      // ── GPS Velocity Source Selection (v1.8.10) ───────────────────────────
+      // NAV2-PVH speed2D is the primary scalar speed when fresh/valid. NMEA SOG
+      // remains the fallback. DHV is retained as a 1 Hz diagnostic only.
+      // NAV2 velE/velN are transformed by evaluate_nav2_pvh() for diagnostics
+      // and future vector correction, but this patch uses only scalar speed2D.
+      const Nav2PvhSelection nav2_speed =
+          evaluate_nav2_pvh(last_gps, data.timestamp_us);
+      float gps_speed_kmh_used = nav2_speed.ok
+                                     ? nav2_speed.speed_kmh
+                                     : last_gps.sog_kmh;
+      uint8_t gps_speed_source = nav2_speed.ok
+                                     ? GPS_SPD_NAV2_PVH
+                                     : GPS_SPD_NMEA_SOG;
       const bool gps_has_fix = last_gps.valid && last_gps.fix_us > 0ULL;
       const uint64_t gps_age_us =
           (gps_has_fix && data.timestamp_us >= last_gps.fix_us)
@@ -1588,7 +1593,7 @@ void Task_Filter(void *pvParameters) {
         rec.gps_fix_us = last_gps.fix_us;
         rec.gps_valid  = gps_fix_fresh ? 1 : 0;
         // Extra GPS velocity metadata for SITL/offline analysis.
-        // NAV2-PVH and DHV remain diagnostic-only in this phase.
+        // NAV2-PVH is the primary scalar speed when fresh; DHV remains diagnostic-only.
         rec.nav_speed2d     = last_gps.nav_speed2d;
         rec.nav_s_acc       = last_gps.nav_s_acc;
         rec.nav_vel_n       = last_gps.nav_vel_n;

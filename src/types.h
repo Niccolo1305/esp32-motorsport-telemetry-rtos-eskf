@@ -14,10 +14,11 @@ struct WifiCredential {
 };
 
 // GPS speed source actually used by Task_Filter for this sample.
-// 0 = NMEA RMC/VTG SOG fallback, 1 = CASIC NAV/NAV2 binary, 2 = NMEA DHV.
+// 0 = NMEA RMC/VTG SOG fallback, 1 = CASIC NAV2-PVH binary, 2 = NMEA DHV.
 enum GpsSpeedSource : uint8_t {
   GPS_SPD_NMEA_SOG = 0,
-  GPS_SPD_NAV_PV   = 1,
+  GPS_SPD_NAV2_PVH = 1,
+  GPS_SPD_NAV_PV   = GPS_SPD_NAV2_PVH, // compatibility alias for older code/tools
   GPS_SPD_NMEA_DHV = 2,
 };
 
@@ -242,7 +243,7 @@ struct GpsData {
   uint32_t epoch = 0;   // monotonic NMEA fix counter
   uint64_t fix_us = 0;  // esp_timer timestamp of last valid NMEA fix [us]
 
-  // CASIC NAV2-PVH listener kept diagnostic-only until 10 Hz behavior is proven.
+  // CASIC NAV2-PVH speed channel. speed2D is the primary scalar speed when fresh.
   float nav_speed2d = 0.0f;
   float nav_s_acc = 0.0f;
   float nav_vel_n = 0.0f;

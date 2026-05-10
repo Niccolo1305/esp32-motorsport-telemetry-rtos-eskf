@@ -5,9 +5,9 @@
 #include <math.h>
 
 #ifdef USE_BMI270
-const char *const FIRMWARE_VERSION = "v1.8.9-nav2-shadow";
+const char *const FIRMWARE_VERSION = "v1.8.10-nav2s";
 #else
-const char *const FIRMWARE_VERSION = "v1.5.4-nav2-shadow";
+const char *const FIRMWARE_VERSION = "v1.5.5-nav2s";
 #endif
 
 #if !defined(LOG_BACKEND_SD_H) && !defined(LOG_BACKEND_SDFAT)

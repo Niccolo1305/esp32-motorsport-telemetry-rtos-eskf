@@ -33,9 +33,11 @@ import numpy as np
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TOOL_DIR = REPO_ROOT / "Tool"
-if str(TOOL_DIR) not in sys.path:
-    sys.path.insert(0, str(TOOL_DIR))
+TOOL_DIR = REPO_ROOT / "tools"
+SITL_TOOL_DIR = TOOL_DIR / "sitl_hal"
+for path in (TOOL_DIR, SITL_TOOL_DIR):
+    if str(path) not in sys.path:
+        sys.path.insert(0, str(path))
 
 import bin_to_csv  # type: ignore  # local tool module
 from schema_compat import (
@@ -95,7 +97,7 @@ LEGACY_GPS_FIX_PERIOD_US = 90_000
 
 INT_COLUMNS = {"t_us", "lap", "gps_sats", "zaru_flags", "gps_fix_us", "gps_valid",
                "nav_vel_valid", "gps_speed_source", "nav_fix_us", "dhv_fix_us"}
-# Optional NAV-PV columns present only in v1.5.0+ logs
+# Optional NAV/NAV2 binary columns present only in v1.5.0+ logs
 NAV_PV_COLUMNS = {"nav_speed2d", "nav_s_acc", "nav_vel_n", "nav_vel_e",
                   "nav_vel_valid", "gps_speed_source", "nav_fix_us"}
 DHV_COLUMNS = {"dhv_gdspd", "dhv_fix_us"}
@@ -170,7 +172,7 @@ class GpsState:
     valid: bool = False
     epoch: int = 0
     fix_us: int = 0
-    # NAV-PV fields (v1.5.0); zero-default for pre-v1.5.0 logs
+    # NAV/NAV2 binary fields; zero-default for legacy logs.
     nav_speed2d: float = 0.0
     nav_s_acc: float = 0.0
     nav_vel_n: float = 0.0
@@ -179,6 +181,24 @@ class GpsState:
     nav_fix_us: int = 0
     dhv_gdspd: float = 0.0
     dhv_fix_us: int = 0
+
+
+def nav2_speed_selection(gps: GpsState, now_us: int) -> tuple[bool, int, float]:
+    """Return (ok, age_us, speed_kmh) using the firmware v1.8.10 policy."""
+    if gps.nav_fix_us <= 0 or now_us < gps.nav_fix_us:
+        return False, 0, gps.sog_kmh
+    age_us = now_us - gps.nav_fix_us
+    speed_ok = math.isfinite(gps.nav_speed2d) and 0.0 <= gps.nav_speed2d < 140.0
+    acc_ok = math.isfinite(gps.nav_s_acc) and 0.0 <= gps.nav_s_acc < 10.0
+    vel_ok = math.isfinite(gps.nav_vel_n) and math.isfinite(gps.nav_vel_e)
+    ok = (
+        gps.nav_vel_valid >= 6
+        and age_us <= NAV_FRESH_THRESHOLD_US
+        and speed_ok
+        and acc_ok
+        and vel_ok
+    )
+    return ok, age_us, gps.nav_speed2d * 3.6 if ok else gps.sog_kmh
 
 
 @dataclass
@@ -691,12 +711,12 @@ class SITLReplayer:
         self._update_variance_buffers(gx_r, gy_r, gz_r)
         var_gx, var_gy, var_gz, mean_gx, mean_gy, mean_gz = self._variance_snapshot()
 
-        # ── GPS velocity source selection (mirrors firmware v1.5.2) ──────────
-        # DHV is hardware-capped to 1 Hz on AT6668 (confirmed via MQTT logs).
-        # NAV-PV cannot be enabled via CFG-MSG on this module (NACK confirmed).
-        # Primary source: sog_kmh (NMEA RMC, 10 Hz receiver-reported SOG).
-        # DHV and NAV-PV fields are retained in the binary record for diagnostics only.
-        gps_speed_kmh_used = self.last_gps.sog_kmh
+        # ── GPS velocity source selection (mirrors firmware v1.8.10) ─────────
+        # NAV2-PVH speed2D is primary when fresh/valid; NMEA SOG is fallback.
+        # DHV remains logged as a 1 Hz diagnostic source only.
+        _nav2_ok, _nav2_age_us, gps_speed_kmh_used = nav2_speed_selection(
+            self.last_gps, t_us
+        )
 
         is_stationary = False
         if var_gz >= 0.0:
@@ -916,7 +936,7 @@ class SITLReplayer:
                     fix_us = t_us
                 self.last_gps_key = key
 
-        # NAV-PV fields: read from log if present, else preserve previous values.
+        # NAV/NAV2 fields: read from log if present, else preserve previous values.
         nav_speed2d  = float(row.get("nav_speed2d",  self.last_gps.nav_speed2d))
         nav_s_acc    = float(row.get("nav_s_acc",    self.last_gps.nav_s_acc))
         nav_vel_n    = float(row.get("nav_vel_n",    self.last_gps.nav_vel_n))

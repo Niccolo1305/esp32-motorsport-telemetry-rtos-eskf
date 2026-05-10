@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // SerialGpsWrapper.h - Concrete IGpsProvider backed by HardwareSerial + TinyGPSPlus
 //                    + NMEA DHV parser (1 Hz diagnostics on the tested AT6668 module)
-//                    + CASIC NAV2-PVH binary diagnostics listener
+//                    + CASIC NAV2-PVH binary speed channel
 //
 // Encapsulates all GPS hardware concerns:
 //   - HardwareSerial (UART1, RX/TX pins, baud rate, RX buffer size)
@@ -11,7 +11,7 @@
 //   - UART overflow ISR callback (atomic counter, captured by reference)
 //   - AT6668 chip-startup delay + CASIC $PCAS02 rate command (10 Hz positioning)
 //   - Explicit $PCAS03 sentence selection (GGA/RMC/DHV only)
-//   - CFG-PRT + CFG-MSG NAV2-PVH diagnostic enable sequence
+//   - CFG-PRT + CFG-MSG NAV2-PVH enable sequence
 //
 // CASIC Binary Protocol (CASBIN):
 //   Frame: [0xBA][0xCE][len_lo][len_hi][class][id][payload x len][cksum x 4]

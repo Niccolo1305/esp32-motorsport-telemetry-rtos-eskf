@@ -135,15 +135,15 @@
 //   |   last_gps = shared_gps_data copy
 //   |   NMEA fix path: lat/lon/sog_kmh/alt/sats/hdop + valid/epoch/fix_us
 //   |   NMEA DHV path: dhv_gdspd + dhv_fix_us     [logged for diagnostics only]
-//   |   CASIC NAV2-PVH path: nav_* fields diagnostic listener only
+//   |   CASIC NAV2-PVH path: nav_* fields used for primary scalar speed when valid
 //   |
 //   | STEP 10: GPS Velocity Selection + Freshness + Stationary Condition
-//   |   gps_speed_used = sog_kmh
+//   |   gps_speed_used = NAV2-PVH speed2D when fresh/valid, else sog_kmh
 //   |   Source semantics:
-//   |     * sog_kmh   = NMEA RMC receiver-reported Speed Over Ground at 10 Hz
+//   |     * nav_*     = CASIC NAV2-PVH primary scalar speed source at 10 Hz
+//   |     * sog_kmh   = NMEA RMC receiver-reported Speed Over Ground fallback
 //   |     * dhv_gdspd = NMEA DHV, observed 1 Hz on AT6668, diagnostics only
-//   |     * nav_*     = CASIC NAV2-PVH shadow candidate, not yet a control source
-//   |     * nav_ok    = MQTT-only candidate flag; gps_speed_source remains actual source
+//   |     * nav_ok    = MQTT flag showing NAV2 eligibility for production speed
 //   |   gps_fix_fresh = valid fix with age <= 1.5 s
 //   |   gps_stale is raised only after a previously acquired fix becomes stale
 //   |   cold-start 0-sat condition stays "NO FIX / acquiring", not "GPS LOST"
@@ -180,7 +180,7 @@
 //   |   First accepted fix sets ENU origin and resets ESKF 5D/6D
 //   |   WGS84 -> ENU, physical distance gate vs speed/dt/accel/HDOP envelope
 //   |   Accepted fix -> 3-stage sequential correct (pos/speed/COG), Joseph form
-//   |   Speed stage and COG baseline use gps_speed_used = sog_kmh
+//   |   Speed stage and COG baseline use gps_speed_used = NAV2 speed2D or SOG fallback
 //   |   COG variation feeds back into Straight-Line ZARU gate
 //   |
 //   | STEP 14b: Mount-Yaw Observation Sentinel (diagnostic only, v1.8.7)
@@ -211,7 +211,7 @@
 //   |   + nav_speed2d/nav_s_acc/nav_vel_n/nav_vel_e/nav_vel_valid
 //   |   + gps_speed_source + nav_fix_us + dhv_gdspd + dhv_fix_us
 //   |   + AtomS3R v6 tail: record_magic + seq + SD diagnostics + CRC16
-//   |   for deterministic SITL replay of the production SOG path plus GPS diagnostics
+//   |   for deterministic SITL replay of the production NAV2/SOG speed path
 //   | → xQueueSend(sd_queue, depth=SD_QUEUE_DEPTH=200) → Task_SD_Writer
 //   |
 // ==============================================================================================
@@ -1481,12 +1481,12 @@
 //   - [MQTT] Adds CFG-PRT/CFG-MSG ACK/NACK and NAV2 frame counters. The
 //     production speed source remains gps_sog_kmh until NAV2 10 Hz behavior is
 //     confirmed on hardware.
-//   - [TOOL][EXTRA] bin_to_csv.py now handles v6 preallocated logs whose tail
+//   - [TOOL] bin_to_csv.py now handles v6 preallocated logs whose tail
 //     contains stale non-zero cluster data: after a valid record sequence, bad
 //     record magic/CRC can mark logical EOF without forcing a resync scan across
 //     the full physical 128 MiB file. It still searches for a nearby valid
 //     stream continuation to avoid hiding real mid-file corruption.
-//   - [TOOL][EXTRA] bin_to_csv.py accepts raw NAV2-PVH nav_vel_valid values
+//   - [TOOL] bin_to_csv.py accepts raw NAV2-PVH nav_vel_valid values
 //     in the 0..7 range. The firmware still treats >=6 as velocity-valid; lower
 //     values such as 4 are retained as diagnostics, not converter corruption.
 //
@@ -1498,6 +1498,16 @@
 //     whether NAV2 is continuously eligible before it is allowed into ZARU/ESKF.
 //   - [DATA] TelemetryRecord and CSV schemas are unchanged; gps_speed_source
 //     still means the speed source actually used by the filter.
+//
+// v1.8.10 - NAV2-PVH Scalar Speed Promotion
+//   - [GPS] Promotes NAV2-PVH speed2D to the primary scalar speed source when
+//     fresh/valid. NMEA SOG remains the fallback; DHV stays diagnostic-only.
+//   - [PIPELINE] The selected speed feeds stationary detection, straight-ZARU
+//     speed gates, ESKF scalar speed update and mount-yaw speed history.
+//   - [MQTT] `spd` and `spd_src` now report the selected control speed/source.
+//     Raw NMEA SOG remains visible as `sog_kmh`; `nav_ok` means NAV2 eligible.
+//   - [HEADER] Firmware version shortened to fit FileHeader.firmware_version[16].
+//   - [DATA] TelemetryRecord and CSV schemas are unchanged.
 //
 // --- TODO (deferred to v1.9.0 CAN format bump) ---
 //   - [TODO] Add CAN bus task (Core 0) for RPM, throttle, wheel speeds (×4),
@@ -1551,6 +1561,7 @@
 #include "crc16.h"
 #include "display.h"
 #include "calibration.h"
+#include "gps_nav2.h"
 #include "wifi_manager.h"
 #include "imu_task.h"
 #include "filter_task.h"
@@ -2229,30 +2240,24 @@ void loop() {
         gps_snap = shared_gps_data;
         xSemaphoreGive(gps_mutex);
       }
-      uint8_t mqtt_speed_source = GPS_SPD_NMEA_SOG;
       const uint64_t mqtt_now_us = esp_timer_get_time();
-      const bool nav_age_valid = gps_snap.nav_fix_us > 0ULL &&
-                                 mqtt_now_us >= gps_snap.nav_fix_us;
-      const uint64_t nav_age_us = nav_age_valid
-                                      ? (mqtt_now_us - gps_snap.nav_fix_us)
-                                      : 0ULL;
-      const bool nav_speed_ok = isfinite(gps_snap.nav_speed2d) &&
-                                gps_snap.nav_speed2d >= 0.0f &&
-                                gps_snap.nav_speed2d < 140.0f;
-      const bool nav_acc_ok = isfinite(gps_snap.nav_s_acc) &&
-                              gps_snap.nav_s_acc >= 0.0f &&
-                              gps_snap.nav_s_acc < 10.0f;
-      const bool nav_shadow_ok = gps_snap.nav_vel_valid >= 6 &&
-                                 nav_age_valid &&
-                                 nav_age_us <= 150000ULL &&
-                                 nav_speed_ok &&
-                                 nav_acc_ok;
-      const float nav_speed_kmh = gps_snap.nav_speed2d * 3.6f;
+      const Nav2PvhSelection nav2_speed =
+          evaluate_nav2_pvh(gps_snap, mqtt_now_us);
+      const uint64_t nav_age_us = (nav2_speed.age_us == UINT64_MAX)
+                                      ? 0ULL
+                                      : nav2_speed.age_us;
+      const float nav_speed_kmh = nav2_speed.speed_kmh;
+      const float selected_speed_kmh = nav2_speed.ok
+                                           ? nav2_speed.speed_kmh
+                                           : gps_snap.sog_kmh;
+      const uint8_t mqtt_speed_source = nav2_speed.ok
+                                            ? GPS_SPD_NAV2_PVH
+                                            : GPS_SPD_NMEA_SOG;
       snprintf(buf, sizeof(buf),
                "{\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,"
                "\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,"
                "\"lap\":%d,\"lat\":%.6f,\"lon\":%.6f,"
-               "\"spd\":%.1f,\"alt\":%.1f,\"sats\":%d,\"hdop\":%.1f,"
+               "\"spd\":%.1f,\"sog_kmh\":%.1f,\"alt\":%.1f,\"sats\":%d,\"hdop\":%.1f,"
                "\"gps_fix_us\":%llu,\"gps_epoch\":%lu,"
                "\"kfx\":%.2f,\"kfy\":%.2f,\"kfv\":%.2f,\"kfh\":%.3f,"
                "\"nav_spd2d\":%.4f,\"nav_spd_kmh\":%.2f,\"nav_s_acc\":%.5f,"
@@ -2263,7 +2268,8 @@ void loop() {
                "\"dbg_nav2pvh\":%lu,\"dbg_nav2_vel\":%lu}",
                local_data.ema_ax, local_data.ema_ay, local_data.ema_az,
                local_data.ema_gx, local_data.ema_gy, local_data.ema_gz, lap_flag,
-               gps_snap.lat, gps_snap.lon, gps_snap.sog_kmh, gps_snap.alt_m,
+               gps_snap.lat, gps_snap.lon, selected_speed_kmh,
+               gps_snap.sog_kmh, gps_snap.alt_m,
                (int)gps_snap.sats, gps_snap.hdop,
                (unsigned long long)gps_snap.fix_us,
                (unsigned long)gps_snap.epoch,
@@ -2273,7 +2279,7 @@ void loop() {
                (unsigned)gps_snap.nav_vel_valid,
                (unsigned long long)gps_snap.nav_fix_us,
                (unsigned long long)nav_age_us,
-               nav_shadow_ok ? 1U : 0U,
+               nav2_speed.ok ? 1U : 0U,
                gps_snap.dhv_gdspd,
                (unsigned long long)gps_snap.dhv_fix_us,
                (unsigned)mqtt_speed_source,
@@ -2425,8 +2431,13 @@ void loop() {
         xSemaphoreGive(gps_mutex);
       }
       if (gps_disp.valid) {
+        const Nav2PvhSelection disp_nav2 =
+            evaluate_nav2_pvh(gps_disp, esp_timer_get_time());
+        const float disp_speed_kmh = disp_nav2.ok
+                                         ? disp_nav2.speed_kmh
+                                         : gps_disp.sog_kmh;
         snprintf(buf, sizeof(buf), "Sats:%d Spd:%.0f", (int)gps_disp.sats,
-                 gps_disp.sog_kmh);
+                 disp_speed_kmh);
       } else {
         snprintf(buf, sizeof(buf), "Sats:%d NO FIX", (int)gps_disp.sats);
       }
