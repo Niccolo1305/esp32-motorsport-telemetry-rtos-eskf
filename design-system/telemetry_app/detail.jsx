@@ -12,15 +12,16 @@ function DetailView({d, laps, xAxis, setXAxis, showRaw, setShowRaw, mode3D, setM
   const mapPtsRef = useRefD([]);
   const mapHoverPtsRef = useRefD([]);
   const [mapHover, setMapHover] = useStateD(null);
+  const [mapSource, setMapSource] = useStateD('kf');
+  const mapPrefer = mapSource === 'gps' ? 'gps_only' : 'kf';
 
   const syncEls = () => [plotRefs.current.yaw, plotRefs.current.tl].filter(Boolean);
   const clearCursorSync = () => TelemetryCharts.clearCursorLines(syncEls());
   const applyRawIndex = (idx, p=null, skipEl=null) => {
     if(idx == null) return;
     if(onHoverIdx) onHoverIdx(idx);
-    const lat = p ? p.lat : (d.gps_lat[idx]||d.kf_lat[idx]);
-    const lon = p ? p.lon : (d.gps_lon[idx]||d.kf_lon[idx]);
-    if(mapCurRef.current && lat && lon) mapCurRef.current.setLatLng([lat,lon]);
+    const coord = p ? p : TelemetryCharts.mapCoordForIndex(d, idx, mapPrefer);
+    if(mapCurRef.current && coord) mapCurRef.current.setLatLng([coord.lat, coord.lon]);
     const xVal = TelemetryCharts.xValueForIndex(d, idx, xAxis);
     TelemetryCharts.setCursorLines(syncEls(), xVal, skipEl);
   };
@@ -65,8 +66,8 @@ function DetailView({d, laps, xAxis, setXAxis, showRaw, setShowRaw, mode3D, setM
     const map = mapInstRef.current;
     if(map){
       mapLineRef.current.forEach(s=>map.removeLayer(s)); mapLineRef.current=[];
-      const pts = TelemetryCharts.mapPoints(d, TelemetryCharts.mapDrawMaxPoints(d), 'kf');
-      const hoverPts = TelemetryCharts.mapPoints(d, TelemetryCharts.mapHoverMaxPoints(d), 'kf');
+      const pts = TelemetryCharts.mapPoints(d, TelemetryCharts.mapDrawMaxPoints(d), mapPrefer);
+      const hoverPts = TelemetryCharts.mapPoints(d, TelemetryCharts.mapHoverMaxPoints(d), mapPrefer);
       mapPtsRef.current = pts;
       mapHoverPtsRef.current = hoverPts.length ? hoverPts : pts;
       if(pts.length){
@@ -85,9 +86,14 @@ function DetailView({d, laps, xAxis, setXAxis, showRaw, setShowRaw, mode3D, setM
         if(!mapCurRef.current){
           mapCurRef.current = L.circleMarker([pts[0].lat,pts[0].lon],
             {radius:7,color:'#fff',weight:2,fillColor:'#00E676',fillOpacity:1}).addTo(map);
+        } else {
+          mapCurRef.current.setLatLng([pts[0].lat,pts[0].lon]);
         }
         map.fitBounds(L.latLngBounds(pts.map(p=>[p.lat,p.lon])), {padding:[16,16]});
         setTimeout(()=>map.invalidateSize(), 50);
+      } else if(mapCurRef.current){
+        map.removeLayer(mapCurRef.current);
+        mapCurRef.current = null;
       }
     }
     const r = plotRefs.current;
@@ -111,7 +117,7 @@ function DetailView({d, laps, xAxis, setXAxis, showRaw, setShowRaw, mode3D, setM
         }
       });
     };
-  }, [d, laps, xAxis, showRaw, mode3D]);
+  }, [d, laps, xAxis, showRaw, mode3D, mapPrefer]);
 
   const attach = (el, key) => { plotRefs.current[key] = el; };
 
@@ -139,13 +145,20 @@ function DetailView({d, laps, xAxis, setXAxis, showRaw, setShowRaw, mode3D, setM
 
       <div className="row-2" style={{marginBottom:12}}>
         <div className="card flat" style={{height:440}}>
-          <div className="head"><div className="t">GPS · track (speed heat)</div><div className="freq">● racing line</div></div>
+          <div className="head"><div className="t">Track · speed heat</div><div className="freq">● {mapSource === 'gps' ? 'gps only' : 'eskf'}</div></div>
           <div className="detail-map-host"
             onMouseMoveCapture={handleMapHover}
             onPointerMoveCapture={handleMapHover}
-            onMouseLeaveCapture={clearMapHover}
-            onPointerLeaveCapture={clearMapHover}>
+            onMouseLeave={clearMapHover}
+            onPointerLeave={clearMapHover}>
             <div ref={mapRef} style={{height:'100%', background:'#000'}}></div>
+            <div className="map-source-toggle">
+              <span>Source</span>
+              <div className="seg mini">
+                <button className={mapSource==='kf'?'on':''} onClick={()=>setMapSource('kf')}>ESKF</button>
+                <button className={mapSource==='gps'?'on':''} onClick={()=>setMapSource('gps')}>GPS</button>
+              </div>
+            </div>
             {mapHover && (
               <div className="map-hover-float"
                 style={{left:mapHover.x, top:mapHover.y}}

@@ -51,7 +51,9 @@ function HeroMap({d, laps, activeIdx, onHoverPoint, onHoverEnd}){
   const onHoverRef = useRef(onHoverPoint);
   const onHoverEndRef = useRef(onHoverEnd);
   const [hoverInfo, setHoverInfo] = useState(null);
+  const [mapSource, setMapSource] = useState('kf');
   const insights = useMemo(()=> TelemetryCompute.computeInsights(d, laps), [d, laps]);
+  const mapPrefer = mapSource === 'gps' ? 'gps_only' : 'kf';
 
   useEffect(()=>{
     onHoverRef.current = onHoverPoint;
@@ -79,11 +81,14 @@ function HeroMap({d, laps, activeIdx, onHoverPoint, onHoverEnd}){
     segmentsRef.current.forEach(s => map.removeLayer(s)); segmentsRef.current = [];
     annotMarkersRef.current.forEach(s => map.removeLayer(s)); annotMarkersRef.current = [];
 
-    const pts = TelemetryCharts.mapPoints(d, TelemetryCharts.mapDrawMaxPoints(d), 'kf');
-    const hoverPts = TelemetryCharts.mapPoints(d, TelemetryCharts.mapHoverMaxPoints(d), 'kf');
+    const pts = TelemetryCharts.mapPoints(d, TelemetryCharts.mapDrawMaxPoints(d), mapPrefer);
+    const hoverPts = TelemetryCharts.mapPoints(d, TelemetryCharts.mapHoverMaxPoints(d), mapPrefer);
     ptsRef.current = pts;
     hoverPtsRef.current = hoverPts.length ? hoverPts : pts;
-    if(!pts.length) return;
+    if(!pts.length){
+      if(markerRef.current){ map.removeLayer(markerRef.current); markerRef.current = null; }
+      return;
+    }
 
     // Compute v range for colors
     let vmin = Infinity, vmax = -Infinity;
@@ -145,15 +150,14 @@ function HeroMap({d, laps, activeIdx, onHoverPoint, onHoverEnd}){
     const latlngs = pts.map(p => [p.lat, p.lon]);
     map.fitBounds(L.latLngBounds(latlngs), {padding: [24, 24]});
     setTimeout(()=>map.invalidateSize(), 50);
-  }, [d]);
+  }, [d, mapPrefer]);
 
   // Move cursor marker on sync
   useEffect(()=>{
     const map = instRef.current; if(!map || !markerRef.current || activeIdx==null) return;
-    const lat = d.gps_lat[activeIdx]||d.kf_lat[activeIdx];
-    const lon = d.gps_lon[activeIdx]||d.kf_lon[activeIdx];
-    if(lat && lon) markerRef.current.setLatLng([lat, lon]);
-  }, [activeIdx, d]);
+    const coord = TelemetryCharts.mapCoordForIndex(d, activeIdx, mapPrefer);
+    if(coord) markerRef.current.setLatLng([coord.lat, coord.lon]);
+  }, [activeIdx, d, mapPrefer]);
 
   const clearMapHover = () => {
     setHoverInfo(null);
@@ -189,9 +193,16 @@ function HeroMap({d, laps, activeIdx, onHoverPoint, onHoverEnd}){
     <div className="hero-map"
       onMouseMoveCapture={handleMapHover}
       onPointerMoveCapture={handleMapHover}
-      onMouseLeaveCapture={clearMapHover}
-      onPointerLeaveCapture={clearMapHover}>
+      onMouseLeave={clearMapHover}
+      onPointerLeave={clearMapHover}>
       <div id="leaflet-map" ref={mapRef}></div>
+      <div className="map-source-toggle">
+        <span>Source</span>
+        <div className="seg mini">
+          <button className={mapSource==='kf'?'on':''} onClick={()=>setMapSource('kf')}>ESKF</button>
+          <button className={mapSource==='gps'?'on':''} onClick={()=>setMapSource('gps')}>GPS</button>
+        </div>
+      </div>
       {hoverInfo && (
         <div className="map-hover-float"
           style={{left:hoverInfo.x, top:hoverInfo.y}}
@@ -204,6 +215,7 @@ function HeroMap({d, laps, activeIdx, onHoverPoint, onHoverEnd}){
       </div>
       <div className="hero-overlay">
         <div className="chip">Racing line · <b>speed heat</b></div>
+        <div className="chip">Source · <b>{mapSource === 'gps' ? 'GPS only' : 'ESKF'}</b></div>
         <div className="chip">Samples · <b>{d._N.toLocaleString()}</b></div>
       </div>
     </div>

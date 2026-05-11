@@ -363,14 +363,19 @@
     if(!lat || !lon) return 0;
     let count = 0;
     for(let i=0; i<lat.length; i++){
-      if(Number.isFinite(lat[i]) && Number.isFinite(lon[i]) && lat[i] !== 0 && lon[i] !== 0) count++;
+      if(isValidCoord(lat[i], lon[i])) count++;
     }
     return count;
+  }
+
+  function isValidCoord(lat, lon){
+    return Number.isFinite(lat) && Number.isFinite(lon) && lat !== 0 && lon !== 0;
   }
 
   function chooseMapCoords(series, prefer='kf'){
     const kfValid = validCoordCount(series.kf_lat, series.kf_lon);
     const gpsValid = validCoordCount(series.gps_lat, series.gps_lon);
+    if(prefer === 'gps_only') return {lat:series.gps_lat, lon:series.gps_lon, source:'gps'};
     if(prefer === 'gps' && gpsValid > 1) return {lat:series.gps_lat, lon:series.gps_lon, source:'gps'};
     if(kfValid > 1) return {lat:series.kf_lat, lon:series.kf_lon, source:'kf'};
     if(gpsValid > 1) return {lat:series.gps_lat, lon:series.gps_lon, source:'gps'};
@@ -384,12 +389,25 @@
     const lat = pos.lat || [];
     const lon = pos.lon || [];
     for(let i=0; i<lat.length; i++){
-      if(Number.isFinite(lat[i]) && Number.isFinite(lon[i]) && lat[i] !== 0 && lon[i] !== 0){
+      if(isValidCoord(lat[i], lon[i])){
         pts.push({lat:lat[i], lon:lon[i], v:s.vel_kmh[i], idx:s.idx ? s.idx[i] : i});
       }
     }
     pts.source = pos.source;
     return pts;
+  }
+
+  function mapCoordForIndex(d, idx, prefer='kf'){
+    if(idx == null) return null;
+    const gps = isValidCoord(d.gps_lat && d.gps_lat[idx], d.gps_lon && d.gps_lon[idx])
+      ? {lat:d.gps_lat[idx], lon:d.gps_lon[idx], source:'gps'}
+      : null;
+    const kf = isValidCoord(d.kf_lat && d.kf_lat[idx], d.kf_lon && d.kf_lon[idx])
+      ? {lat:d.kf_lat[idx], lon:d.kf_lon[idx], source:'kf'}
+      : null;
+    if(prefer === 'gps_only') return gps;
+    if(prefer === 'gps') return gps || kf;
+    return kf || gps;
   }
 
   function mapPointHtml(d, idx){
@@ -522,6 +540,7 @@
     renderGG, renderLapHistogram, renderTimeline,
     bindCursorSync, findSampleAtX, eventRawIndex, mapSeries,
     mapDrawMaxPoints, mapHoverMaxPoints, mapPoints,
+    mapCoordForIndex,
     xValueForIndex, setCursorLines, clearCursorLines,
     mapPointHtml, nearestMapPoint, bindMapHover,
   };

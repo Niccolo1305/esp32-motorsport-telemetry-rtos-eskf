@@ -260,6 +260,28 @@
     text-transform: uppercase;
   }
   .hero-overlay .chip b { color: var(--color-fg-1); font-weight: 500; }
+  .map-source-toggle {
+    position: absolute;
+    top: 12px;
+    left: 52px;
+    z-index: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: rgba(0,0,0,0.75);
+    border: 1px solid var(--color-border-2);
+    border-radius: 2px;
+    padding: 5px 6px 5px 8px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    color: var(--color-fg-3);
+  }
+  .seg.mini button {
+    font-size: 10px;
+    padding: 4px 8px;
+  }
 
   /* Plot container reset so Plotly dark works */
   .plot { width: 100%; }
@@ -396,12 +418,12 @@
 <body data-screen-label="telemetria-app">
 <div id="root"></div>
 
-<script src="compute.js?v=20260504-map-hover6"></script>
-<script src="session_binary.js?v=20260504-map-hover6"></script>
-<script type="text/babel" src="charts.jsx?v=20260504-map-hover6"></script>
-<script type="text/babel" src="overall.jsx?v=20260504-map-hover6"></script>
-<script type="text/babel" src="detail.jsx?v=20260504-map-hover6"></script>
-<script type="text/babel" src="app.jsx?v=20260504-map-hover6"></script>
+<script src="compute.js?v=20260511-map-source2"></script>
+<script src="session_binary.js?v=20260511-map-source2"></script>
+<script type="text/babel" src="charts.jsx?v=20260511-map-source2"></script>
+<script type="text/babel" src="overall.jsx?v=20260511-map-source2"></script>
+<script type="text/babel" src="detail.jsx?v=20260511-map-source2"></script>
+<script type="text/babel" src="app.jsx?v=20260511-map-source2"></script>
 
 </body>
 </html>
