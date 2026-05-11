@@ -87,6 +87,15 @@ inline void wgs84_to_enu(double lat, double lon,
 // ========================================================================
 // ESKF2D — Primary 5D filter
 // ========================================================================
+struct EskfGpsCorrectionResult {
+    bool position_update_ok = false;
+    bool r_inflated = false;
+    bool numerical_ok = true;
+    float innovation_m = 0.0f;
+    float d2_initial = 0.0f;
+    float d2_after_inflation = 0.0f;
+};
+
 class ESKF2D {
 public:
     Matrix<5, 1> X;
@@ -164,8 +173,9 @@ public:
     }
 
     // -- Correct (~10 Hz, 3-stage Sequential Update) --
-    void correct(float gps_east_m, float gps_north_m, float gps_speed_kmh,
-                 float hdop = 1.0f) {
+    EskfGpsCorrectionResult correct(float gps_east_m, float gps_north_m, float gps_speed_kmh,
+                                    float hdop = 1.0f) {
+        EskfGpsCorrectionResult result;
 
         if (hdop < 0.5f || hdop > 50.0f) hdop = 1.0f;
         float r_dynamic = 0.05f * (hdop * hdop);
@@ -175,7 +185,6 @@ public:
         R_pos.Fill(0.0f);
         R_pos(0, 0) = r_dynamic;
         R_pos(1, 1) = r_dynamic;
-        bool position_update_ok = false;
 
         // UPDATE 1: 2D POSITION
         // BUG-2 fix: do-while(0) allows break instead of return on degenerate
@@ -190,6 +199,7 @@ public:
             HX(1) = X(1);
 
             Matrix<2, 1> y = z - HX;
+            result.innovation_m = sqrtf(y(0) * y(0) + y(1) * y(1));
 
             Matrix<2, 2> S;
             S(0, 0) = P(0, 0) + R_pos(0, 0);
@@ -209,7 +219,10 @@ public:
                 // Innovation Gate (Mahalanobis, v0.9.7)
                 float d2 = y(0) * (S_inv(0, 0) * y(0) + S_inv(0, 1) * y(1))
                          + y(1) * (S_inv(1, 0) * y(0) + S_inv(1, 1) * y(1));
+                result.d2_initial = d2;
+                result.d2_after_inflation = d2;
                 if (d2 > 11.83f) {
+                    result.r_inflated = true;
                     R_pos(0, 0) *= 50.0f;
                     R_pos(1, 1) *= 50.0f;
                     S(0, 0) = P(0, 0) + R_pos(0, 0);
@@ -217,7 +230,10 @@ public:
                     S(1, 0) = P(1, 0);
                     S(1, 1) = P(1, 1) + R_pos(1, 1);
                     det = S(0, 0) * S(1, 1) - S(0, 1) * S(1, 0);
-                    if (fabsf(det) < 1e-10f) break; // BUG-2: was return (v0.9.11)
+                    if (fabsf(det) < 1e-10f) {
+                        result.numerical_ok = false;
+                        break; // BUG-2: was return (v0.9.11)
+                    }
                     inv_det = 1.0f / det;
                     S_inv(0, 0) =  S(1, 1) * inv_det;
                     S_inv(0, 1) = -S(0, 1) * inv_det;
@@ -225,7 +241,9 @@ public:
                     S_inv(1, 1) =  S(0, 0) * inv_det;
                     d2 = y(0) * (S_inv(0, 0) * y(0) + S_inv(0, 1) * y(1))
                        + y(1) * (S_inv(1, 0) * y(0) + S_inv(1, 1) * y(1));
-                    if (d2 > 11.83f) break; // v1.8.4: hard-reject toxic jumps
+                    result.d2_after_inflation = d2;
+                    // Soft gate only: external GPS quality/kinematic gates decide
+                    // toxicity. Here a high d2 only weakens GPS influence via R_pos.
                 }
 
                 Matrix<5, 2> PHt;
@@ -246,7 +264,9 @@ public:
                 }
                 P = I_KH * P * (~I_KH) + K * R_pos * (~K);
                 symmetrize_P();
-                position_update_ok = true;
+                result.position_update_ok = true;
+            } else {
+                result.numerical_ok = false;
             }
         } while (0);
 
@@ -289,7 +309,7 @@ public:
 
         // UPDATE 3: COURSE OVER GROUND (1D)
         // Threshold 5 km/h (v0.9.7), adaptive R_th (v0.9.3)
-        if (position_update_ok && has_last_gps_ && gps_speed_kmh > 5.0f) {
+        if (result.position_update_ok && has_last_gps_ && gps_speed_kmh > 5.0f) {
             float dx = gps_east_m - last_gps_east_;
             float dy = gps_north_m - last_gps_north_;
             float dist = sqrtf(dx * dx + dy * dy);
@@ -333,7 +353,7 @@ public:
             }
         }
 
-        if (position_update_ok) {
+        if (result.position_update_ok) {
             last_gps_east_  = gps_east_m;
             last_gps_north_ = gps_north_m;
             has_last_gps_   = true;
@@ -341,6 +361,7 @@ public:
 
         while (X(4) > (float)M_PI)  X(4) -= 2.0f * (float)M_PI;
         while (X(4) < -(float)M_PI) X(4) += 2.0f * (float)M_PI;
+        return result;
     }
 
     // -- NHC: Non-Holonomic Constraint (v1.3.1) --
@@ -524,8 +545,9 @@ public:
     }
 
     // -- Correct (Sequential Update, 6×N matrices) --
-    void correct(float gps_east_m, float gps_north_m, float gps_speed_kmh,
-                 float hdop = 1.0f) {
+    EskfGpsCorrectionResult correct(float gps_east_m, float gps_north_m, float gps_speed_kmh,
+                                    float hdop = 1.0f) {
+        EskfGpsCorrectionResult result;
 
         if (hdop < 0.5f || hdop > 50.0f) hdop = 1.0f;
         float r_dynamic = 0.05f * (hdop * hdop);
@@ -534,7 +556,6 @@ public:
         R_pos.Fill(0.0f);
         R_pos(0, 0) = r_dynamic;
         R_pos(1, 1) = r_dynamic;
-        bool position_update_ok = false;
 
         // UPDATE 1: 2D POSITION
         // BUG-2 fix: do-while(0) allows break instead of return (see ESKF2D)
@@ -548,6 +569,7 @@ public:
             HX(1) = X(1);
 
             Matrix<2, 1> y = z - HX;
+            result.innovation_m = sqrtf(y(0) * y(0) + y(1) * y(1));
 
             Matrix<2, 2> S;
             S(0, 0) = P(0, 0) + R_pos(0, 0);
@@ -567,7 +589,10 @@ public:
                 // Innovation Gate (Mahalanobis)
                 float d2 = y(0) * (S_inv(0, 0) * y(0) + S_inv(0, 1) * y(1))
                          + y(1) * (S_inv(1, 0) * y(0) + S_inv(1, 1) * y(1));
+                result.d2_initial = d2;
+                result.d2_after_inflation = d2;
                 if (d2 > 11.83f) {
+                    result.r_inflated = true;
                     R_pos(0, 0) *= 50.0f;
                     R_pos(1, 1) *= 50.0f;
                     S(0, 0) = P(0, 0) + R_pos(0, 0);
@@ -575,7 +600,10 @@ public:
                     S(1, 0) = P(1, 0);
                     S(1, 1) = P(1, 1) + R_pos(1, 1);
                     det = S(0, 0) * S(1, 1) - S(0, 1) * S(1, 0);
-                    if (fabsf(det) < 1e-10f) break; // BUG-2: was return (v0.9.11)
+                    if (fabsf(det) < 1e-10f) {
+                        result.numerical_ok = false;
+                        break; // BUG-2: was return (v0.9.11)
+                    }
                     inv_det = 1.0f / det;
                     S_inv(0, 0) =  S(1, 1) * inv_det;
                     S_inv(0, 1) = -S(0, 1) * inv_det;
@@ -583,7 +611,9 @@ public:
                     S_inv(1, 1) =  S(0, 0) * inv_det;
                     d2 = y(0) * (S_inv(0, 0) * y(0) + S_inv(0, 1) * y(1))
                        + y(1) * (S_inv(1, 0) * y(0) + S_inv(1, 1) * y(1));
-                    if (d2 > 11.83f) break; // v1.8.4: hard-reject toxic jumps
+                    result.d2_after_inflation = d2;
+                    // Soft gate only: external GPS quality/kinematic gates decide
+                    // toxicity. Here a high d2 only weakens GPS influence via R_pos.
                 }
 
                 Matrix<6, 2> PHt;
@@ -604,7 +634,9 @@ public:
                 }
                 P = I_KH * P * (~I_KH) + K * R_pos * (~K);
                 symmetrize_P();
-                position_update_ok = true;
+                result.position_update_ok = true;
+            } else {
+                result.numerical_ok = false;
             }
         } while (0);
 
@@ -646,7 +678,7 @@ public:
         }
 
         // UPDATE 3: COURSE OVER GROUND (1D)
-        if (position_update_ok && has_last_gps_ && gps_speed_kmh > 5.0f) {
+        if (result.position_update_ok && has_last_gps_ && gps_speed_kmh > 5.0f) {
             float dx = gps_east_m - last_gps_east_;
             float dy = gps_north_m - last_gps_north_;
             float dist = sqrtf(dx * dx + dy * dy);
@@ -690,7 +722,7 @@ public:
             }
         }
 
-        if (position_update_ok) {
+        if (result.position_update_ok) {
             last_gps_east_  = gps_east_m;
             last_gps_north_ = gps_north_m;
             has_last_gps_   = true;
@@ -698,6 +730,7 @@ public:
 
         while (X(4) > (float)M_PI)  X(4) -= 2.0f * (float)M_PI;
         while (X(4) < -(float)M_PI) X(4) += 2.0f * (float)M_PI;
+        return result;
     }
 
     // -- Correct bias (ZUPT on bias at standstill) --

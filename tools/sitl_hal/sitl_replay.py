@@ -94,6 +94,13 @@ VGPL_RATE_LIMIT = 0.15
 VGPL_BETA = 0.1
 VGPL_BETA_FLOOR = 0.005
 LEGACY_GPS_FIX_PERIOD_US = 90_000
+ESKF_GPS_MIN_SATS = 8
+ESKF_GPS_MAX_HDOP = 2.0
+ESKF_GPS_POS_GATE_MIN_M = 8.0
+ESKF_GPS_POS_GATE_MARGIN_M = 3.0
+ESKF_GPS_POS_GATE_SPEED_FACTOR = 1.35
+ESKF_GPS_POS_GATE_MAX_ACCEL_MS2 = 6.0
+ESKF_GPS_POS_GATE_HDOP_FACTOR_M = 4.0
 
 INT_COLUMNS = {"t_us", "lap", "gps_sats", "zaru_flags", "gps_fix_us", "gps_valid",
                "nav_vel_valid", "gps_speed_source", "nav_fix_us", "dhv_fix_us",
@@ -201,6 +208,81 @@ def nav2_speed_selection(gps: GpsState, now_us: int) -> tuple[bool, int, float]:
         and vel_ok
     )
     return ok, age_us, gps.nav_speed2d * 3.6 if ok else gps.sog_kmh
+
+
+@dataclass
+class GpsCorrectionGateState:
+    has_ref: bool = False
+    east_m: float = 0.0
+    north_m: float = 0.0
+    speed_kmh: float = 0.0
+    fix_us: int = 0
+    reject_count: int = 0
+
+
+@dataclass
+class GpsCorrectionResult:
+    position_update_ok: bool = False
+    r_inflated: bool = False
+    numerical_ok: bool = True
+    innovation_m: float = 0.0
+    d2_initial: float = 0.0
+    d2_after_inflation: float = 0.0
+
+
+def gps_fix_quality_ok(gps: GpsState) -> bool:
+    return (
+        gps.valid
+        and gps.sats >= ESKF_GPS_MIN_SATS
+        and gps.hdop <= ESKF_GPS_MAX_HDOP
+        and math.isfinite(gps.lat)
+        and math.isfinite(gps.lon)
+        and abs(gps.lat) > 1.0e-9
+        and abs(gps.lon) > 1.0e-9
+    )
+
+
+def gps_correction_gate_allows(
+    gate: GpsCorrectionGateState,
+    east_m: float,
+    north_m: float,
+    speed_kmh: float,
+    hdop: float,
+    fix_us: int,
+) -> bool:
+    if (not gate.has_ref) or gate.fix_us == 0 or fix_us <= gate.fix_us:
+        return True
+    dt_s = (fix_us - gate.fix_us) / 1_000_000.0
+    if dt_s <= 0.0:
+        return False
+    de = east_m - gate.east_m
+    dn = north_m - gate.north_m
+    dist_m = math.sqrt(de * de + dn * dn)
+    ref_speed_ms = max(max(speed_kmh, gate.speed_kmh) / 3.6, 3.0)
+    hdop_m = min(max(hdop if math.isfinite(hdop) else 2.0, 0.5), 10.0) * ESKF_GPS_POS_GATE_HDOP_FACTOR_M
+    allowed_m = max(
+        ESKF_GPS_POS_GATE_MIN_M,
+        ref_speed_ms * dt_s * ESKF_GPS_POS_GATE_SPEED_FACTOR
+        + 0.5 * ESKF_GPS_POS_GATE_MAX_ACCEL_MS2 * dt_s * dt_s
+        + hdop_m
+        + ESKF_GPS_POS_GATE_MARGIN_M,
+    )
+    return dist_m <= allowed_m
+
+
+def gps_correction_gate_accept(
+    gate: GpsCorrectionGateState,
+    east_m: float,
+    north_m: float,
+    speed_kmh: float,
+    fix_us: int,
+) -> None:
+    gate.has_ref = True
+    gate.east_m = east_m
+    gate.north_m = north_m
+    gate.speed_kmh = speed_kmh
+    gate.fix_us = fix_us
+    gate.reject_count = 0
 
 
 @dataclass
@@ -352,7 +434,8 @@ class ESKF2D:
         self._symmetrize()
 
     def correct(self, gps_east_m: float, gps_north_m: float, gps_speed_kmh: float,
-                hdop: float = 1.0) -> None:
+                hdop: float = 1.0) -> GpsCorrectionResult:
+        result = GpsCorrectionResult()
         if hdop < 0.5 or hdop > 50.0:
             hdop = 1.0
 
@@ -367,6 +450,7 @@ class ESKF2D:
         hx = self.x[:2].copy()
         y = z - hx
         raw_innov_m = math.sqrt(float(y @ y))
+        result.innovation_m = raw_innov_m
         soft_scale = 1.0
         if self.gps_soft_cap_m > 0.0 and raw_innov_m > 1e-9:
             ratio = raw_innov_m / self.gps_soft_cap_m
@@ -380,14 +464,20 @@ class ESKF2D:
         if abs(det) > 1e-10:
             s_inv = np.linalg.inv(s)
             d2 = float(y.T @ s_inv @ y)
+            result.d2_initial = d2
+            result.d2_after_inflation = d2
             if d2 > 11.83:
+                result.r_inflated = True
                 r_pos *= 50.0
                 s = self.p[:2, :2] + r_pos
                 det = float(np.linalg.det(s))
                 if abs(det) <= 1e-10:
                     s = None
+                    result.numerical_ok = False
                 else:
                     s_inv = np.linalg.inv(s)
+                    d2 = float(y.T @ s_inv @ y)
+                    result.d2_after_inflation = d2
             if s is not None:
                 ph_t = self.p[:, :2]
                 k = ph_t @ s_inv
@@ -396,6 +486,9 @@ class ESKF2D:
                 i_kh[:, :2] -= k
                 self.p = i_kh @ self.p @ i_kh.T + k @ r_pos @ k.T
                 self._symmetrize()
+                result.position_update_ok = True
+        else:
+            result.numerical_ok = False
 
         gps_speed_ms = gps_speed_kmh / 3.6
         eskf_speed = self.speed_ms()
@@ -414,7 +507,7 @@ class ESKF2D:
                 self.p = i_kh_v @ self.p @ i_kh_v.T + kk_t_v * r_v
                 self._symmetrize()
 
-        if self.has_last_gps and gps_speed_kmh > 5.0:
+        if result.position_update_ok and self.has_last_gps and gps_speed_kmh > 5.0:
             dx = gps_east_m - self.last_gps_east
             dy = gps_north_m - self.last_gps_north
             dist = math.sqrt(dx * dx + dy * dy)
@@ -436,10 +529,12 @@ class ESKF2D:
                     self.p = i_kh_th @ self.p @ i_kh_th.T + kk_t_th * r_th
                     self._symmetrize()
 
-        self.last_gps_east = gps_east_m
-        self.last_gps_north = gps_north_m
-        self.has_last_gps = True
+        if result.position_update_ok:
+            self.last_gps_east = gps_east_m
+            self.last_gps_north = gps_north_m
+            self.has_last_gps = True
         self.x[4] = wrap_angle(self.x[4])
+        return result
 
     def correct_nhc(self, r_nhc: float) -> None:
         vx, vy, theta = self.x[2], self.x[3], self.x[4]
@@ -589,6 +684,8 @@ class SITLReplayer:
         self.last_gps_key: Optional[Tuple[float, float, float, float, int, float]] = None
         self.last_eskf_epoch = 0
         self.last_processed_fix_us = 0
+        self.gps_gate = GpsCorrectionGateState()
+        self.eskf_internal_reject_count = 0
         self.using_logged_gps_timing: Optional[bool] = None
         self.legacy_timing_warning_emitted = False
 
@@ -768,30 +865,56 @@ class SITLReplayer:
             has_new_fix = self.last_gps.valid and (self.last_gps.epoch != self.last_eskf_epoch)
 
         if has_new_fix and not gps_is_stale:
-            if not self.gps_origin_set:
-                self.gps_origin_lat = self.last_gps.lat
-                self.gps_origin_lon = self.last_gps.lon
-                self.gps_origin_set = True
-                self.eskf.reset()
+            gps_fix_accepted = gps_fix_quality_ok(self.last_gps)
+            east_m = 0.0
+            north_m = 0.0
+            if gps_fix_accepted:
+                if not self.gps_origin_set:
+                    self.gps_origin_lat = self.last_gps.lat
+                    self.gps_origin_lon = self.last_gps.lon
+                    self.gps_origin_set = True
+                    self.eskf.reset()
+                    self.gps_gate = GpsCorrectionGateState()
 
-            east_m, north_m = wgs84_to_enu(
-                self.last_gps.lat,
-                self.last_gps.lon,
-                self.gps_origin_lat,
-                self.gps_origin_lon,
-            )
-            self.eskf.correct(
-                east_m,
-                north_m,
-                gps_speed_kmh_used,
-                self.last_gps.hdop,
-            )
+                east_m, north_m = wgs84_to_enu(
+                    self.last_gps.lat,
+                    self.last_gps.lon,
+                    self.gps_origin_lat,
+                    self.gps_origin_lon,
+                )
+                gps_fix_accepted = gps_correction_gate_allows(
+                    self.gps_gate,
+                    east_m,
+                    north_m,
+                    gps_speed_kmh_used,
+                    self.last_gps.hdop,
+                    self.last_gps.fix_us,
+                )
+            if gps_fix_accepted:
+                correction = self.eskf.correct(
+                    east_m,
+                    north_m,
+                    gps_speed_kmh_used,
+                    self.last_gps.hdop,
+                )
+                gps_fix_accepted = correction.position_update_ok
+                if correction.position_update_ok:
+                    gps_correction_gate_accept(
+                        self.gps_gate,
+                        east_m,
+                        north_m,
+                        gps_speed_kmh_used,
+                        self.last_gps.fix_us,
+                    )
+                    self.eskf_internal_reject_count = 0
+                else:
+                    self.eskf_internal_reject_count += 1
             if self.using_logged_gps_timing:
                 self.last_processed_fix_us = self.last_gps.fix_us
             else:
                 self.last_eskf_epoch = self.last_gps.epoch
 
-            if gps_speed_kmh_used > 20.0:
+            if gps_fix_accepted and gps_speed_kmh_used > 20.0:
                 if not self.has_cog_ref:
                     self.cog_ref_east = east_m
                     self.cog_ref_north = north_m

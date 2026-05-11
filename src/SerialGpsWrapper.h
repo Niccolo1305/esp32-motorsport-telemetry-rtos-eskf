@@ -174,6 +174,18 @@ public:
             outData.sog_kmh = _gps.speed.isValid() ? (float)_gps.speed.kmph() : outData.sog_kmh;
             outData.alt_m = _gps.altitude.isValid() ? (float)_gps.altitude.meters() : outData.alt_m;
             outData.hdop = _gps.hdop.isValid() ? (float)_gps.hdop.hdop() : outData.hdop;
+            if (_gps.date.isValid() && _gps.time.isValid() &&
+                _gps.date.year() >= 2024 &&
+                _gps.date.month() >= 1 && _gps.date.month() <= 12 &&
+                _gps.date.day() >= 1 && _gps.date.day() <= 31) {
+                outData.utc_valid = true;
+                outData.utc_year = (uint16_t)_gps.date.year();
+                outData.utc_month = (uint8_t)_gps.date.month();
+                outData.utc_day = (uint8_t)_gps.date.day();
+                outData.utc_hour = (uint8_t)_gps.time.hour();
+                outData.utc_minute = (uint8_t)_gps.time.minute();
+                outData.utc_second = (uint8_t)_gps.time.second();
+            }
         }
 
         // v1.8.4: Only a fresh location sentence may advance fix_us/epoch.

@@ -1525,6 +1525,41 @@
 //   - [DATA] AtomS3R TelemetryRecord grows from 256 B to 320 B. Legacy 256 B
 //     logs remain supported by the Python converter.
 //
+// v1.8.11-hotfix - ESKF/GPS Gate Contract Repair
+//   - [ROOT CAUSE] v1.8.4 made the internal ESKF Mahalanobis gate hard-reject
+//     large position innovations after the R x50 retry. Because eskf.correct()
+//     returned void, Task_Filter still advanced the external GPS correction
+//     gate as if the position update had been applied. A good GPS could then
+//     remain decoupled from ESKF until a later kilometre-scale snap.
+//   - [FIX] eskf.correct() now returns an explicit correction result. The
+//     external GPS gate is marked accepted only when the primary 5D ESKF really
+//     applied the position update; 6D remains shadow-only.
+//   - [FIX] The internal Mahalanobis check is again a soft gate: high d2 inflates
+//     R_pos and weakens GPS influence, but no longer vetoes a GPS measurement
+//     already accepted by freshness, quality, and physical position gates.
+//   - [SAFETY] GPS_SUP_REASON_ESKF_INNOVATION_BAD is treated as ESKF/GPS
+//     consistency evidence, not GPS toxicity. Supervisor quarantine remains
+//     reserved for receiver/PVT plausibility failures.
+//
+// v1.8.12 - Panic Breadcrumb and v7 Memory Margin
+//   - [DIAG] Adds an RTC no-init crash breadcrumb printed on the next boot:
+//     last pipeline/task phase, source line, record seq, uptime, heap/min-heap,
+//     SD counters, and task stack watermarks. This is diagnostic-only and does
+//     not change TelemetryRecord, FileHeader, CSV, or SITL formats.
+//   - [RAM] AtomS3R SD_QUEUE_DEPTH reduced from 200 to 100 for 320 B v7 records.
+//     Real road logs showed sd_queue_hwm <= 4, so 200 wasted about 32 KB of
+//     queue RAM.
+//   - [STACK] AtomS3R Task_SD_Writer stack increased from 8192 to 16384 bytes
+//     to restore margin for SdFat/preallocated write/verify with 2.5 KB batches.
+//   - [STACK] MountYawState history storage moved out of Task_Filter stack into
+//     file-scope storage on AtomS3R. Behaviour is unchanged; stack headroom is
+//     recovered for ESKF/GPS supervisor work.
+//   - [SD] Diagnostic log names keep the chronological tel index and add compact
+//     context without changing the binary format: if GPS UTC is available at log
+//     creation, tel_0184_YYMMDDHHMM_v1812d.bin; otherwise
+//     tel_0184_boot_v1812d_r4.bin. The repair scanner accepts both old tel_N.bin
+//     names and the new diagnostic names.
+//
 // --- TODO (deferred to v1.9.0 CAN format bump) ---
 //   - [TODO] Add CAN bus task (Core 0) for RPM, throttle, wheel speeds (×4),
 //     engine temp, steering angle. CanData struct + can_mutex pattern, mirroring
@@ -1671,9 +1706,75 @@ static bool build_log_header(const char *filename, uint8_t *header_buf, size_t& 
   return true;
 }
 
+static void build_firmware_filename_tag(char *tag, size_t tag_size) {
+  if (tag_size == 0) {
+    return;
+  }
+  size_t out = 0;
+  tag[out++] = 'v';
+  for (const char *p = FIRMWARE_VERSION; *p != '\0' && out + 1 < tag_size; ++p) {
+    if (*p >= '0' && *p <= '9') {
+      tag[out++] = *p;
+    }
+  }
+  if (strstr(FIRMWARE_VERSION, "diag") != nullptr && out + 1 < tag_size) {
+    tag[out++] = 'd';
+  }
+  tag[out] = '\0';
+}
+
+static bool format_log_filename(uint32_t idx, char *filename, size_t filename_size) {
+  char fw_tag[7] = {};
+  build_firmware_filename_tag(fw_tag, sizeof(fw_tag));
+  bool utc_valid = false;
+  uint16_t utc_year = 0;
+  uint8_t utc_month = 0;
+  uint8_t utc_day = 0;
+  uint8_t utc_hour = 0;
+  uint8_t utc_minute = 0;
+  if (gps_mutex != nullptr && xSemaphoreTake(gps_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+    if (shared_gps_data.utc_valid) {
+      utc_valid = true;
+      utc_year = shared_gps_data.utc_year;
+      utc_month = shared_gps_data.utc_month;
+      utc_day = shared_gps_data.utc_day;
+      utc_hour = shared_gps_data.utc_hour;
+      utc_minute = shared_gps_data.utc_minute;
+    }
+    xSemaphoreGive(gps_mutex);
+  }
+  int written = 0;
+  if (utc_valid) {
+    const uint8_t yy = (uint8_t)(utc_year % 100U);
+    written = snprintf(filename, filename_size,
+                       "/tel_%04lu_%02u%02u%02u%02u%02u_%s.bin",
+                       (unsigned long)idx,
+                       (unsigned)yy,
+                       (unsigned)utc_month,
+                       (unsigned)utc_day,
+                       (unsigned)utc_hour,
+                       (unsigned)utc_minute,
+                       fw_tag);
+  } else {
+    written = snprintf(filename, filename_size,
+                       "/tel_%04lu_boot_%s_r%u.bin",
+                       (unsigned long)idx,
+                       fw_tag,
+                       (unsigned)esp_reset_reason());
+  }
+  return written > 0 && (size_t)written < filename_size;
+}
+
 static bool find_next_log_filename(char *filename, size_t filename_size) {
-  for (int idx = 0; idx < 10000; ++idx) {
-    snprintf(filename, filename_size, "/tel_%d.bin", idx);
+  uint32_t max_idx = 0;
+  char latest[64] = {};
+  uint32_t idx = storage.scanTelemetryLogs(max_idx, latest, sizeof(latest))
+      ? max_idx + 1U
+      : 0U;
+  for (; idx < 10000U; ++idx) {
+    if (!format_log_filename(idx, filename, filename_size)) {
+      break;
+    }
     if (!storage.exists(filename)) {
       return true;
     }
@@ -1683,25 +1784,8 @@ static bool find_next_log_filename(char *filename, size_t filename_size) {
 }
 
 static bool find_latest_log_filename(char *filename, size_t filename_size) {
-  char previous[32] = {};
-  char candidate[32];
-  for (int idx = 0; idx < 10000; ++idx) {
-    snprintf(candidate, sizeof(candidate), "/tel_%d.bin", idx);
-    if (!storage.exists(candidate)) {
-      if (idx == 0 || previous[0] == '\0') {
-        filename[0] = '\0';
-        return false;
-      }
-      strncpy(filename, previous, filename_size - 1);
-      filename[filename_size - 1] = '\0';
-      return true;
-    }
-    strncpy(previous, candidate, sizeof(previous) - 1);
-    previous[sizeof(previous) - 1] = '\0';
-  }
-  strncpy(filename, previous, filename_size - 1);
-  filename[filename_size - 1] = '\0';
-  return previous[0] != '\0';
+  uint32_t max_idx = 0;
+  return storage.scanTelemetryLogs(max_idx, filename, filename_size);
 }
 
 bool create_next_log_segment(char *filename, size_t filename_size) {
@@ -1787,6 +1871,8 @@ void setup() {
   cfg.internal_imu = false;
 #endif
   M5.begin(cfg);
+  breadcrumb_init_after_reset((uint32_t)esp_reset_reason());
+  BREADCRUMB_MARK(BREADCRUMB_PHASE_BOOT_SETUP, 0);
 
   // ── 1. DISPLAY FIRST ─────────────────────────────────────────────────────
   // Display turned on as the very first operation: any subsequent error will
@@ -1814,6 +1900,7 @@ void setup() {
   // AtomS3: MPU-6886 via direct Wire init + register verification.
   // AtomS3R: Bosch-direct BMI270/BMM150 init over M5.In_I2C with explicit
   // range, ODR, LPF, AUX, and chip-ID verification.
+  BREADCRUMB_MARK(BREADCRUMB_PHASE_BOOT_IMU, 0);
   imuProvider.begin();
   if (!imuProvider.verifyConfig()) {
     setLabel(30, "IMU: ERROR!", RED, BLACK);
@@ -1840,6 +1927,7 @@ void setup() {
 
   const uint32_t gps_boot_t0_ms = millis();
   setLabel(30, "GPS: init...");
+  BREADCRUMB_MARK(BREADCRUMB_PHASE_BOOT_GPS, 0);
   gpsWrapper.begin();
   setLabel(30, "");
   BaseType_t task_gps_rc = xTaskCreatePinnedToCore(
@@ -1856,6 +1944,7 @@ void setup() {
                 (unsigned long)millis(),
                 (unsigned long)(millis() - gps_boot_t0_ms));
 
+  BREADCRUMB_MARK(BREADCRUMB_PHASE_BOOT_SD, 0);
   if (storage.begin()) {
     sd_mounted = true;
     load_wifi_config(); // populates wifi_networks[], cfg_mqtt_*, mqtt_enabled
@@ -2008,6 +2097,7 @@ void setup() {
 
     setLabel(10, "SD setup...");
     setLabel(30, "Preparing log");
+    BREADCRUMB_MARK(BREADCRUMB_PHASE_BOOT_SD, 0);
     const uint32_t sd_setup_t0_ms = millis();
     repair_latest_preallocated_log();
 
@@ -2046,6 +2136,7 @@ void setup() {
   // acquisition cannot hold back telemetry boot.
   // ─────────────────────────────────────────────────────────────────────────
 
+  BREADCRUMB_MARK(BREADCRUMB_PHASE_BOOT_TASKS, 0);
   BaseType_t task_i2c_rc = xTaskCreatePinnedToCore(
       Task_I2C, "I2C", 4096, &imuProvider, 3, &TaskI2CHandle, 0);
   // Stack 16 KB: ESKF 6D uses temporary 6×6 matrices (~2.5 KB per full correct())
@@ -2071,6 +2162,7 @@ void setup() {
 
 void loop() {
   vTaskDelay(pdMS_TO_TICKS(1000 / LOOP_HZ));
+  BREADCRUMB_MARK(BREADCRUMB_PHASE_LOOP, (uint32_t)sd_records_written.load());
   M5.update();
 
   // ---- BUTTON ----

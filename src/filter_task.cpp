@@ -189,6 +189,13 @@ struct GpsSupervisorShadowState {
   uint16_t last_reported_reason = 0xFFFF;
 };
 
+#ifdef USE_BMI270
+// v1.8.12: keep the ~6 KB mount-yaw history out of Task_Filter stack. The
+// filter task is single-instance, so file-scope storage preserves behaviour
+// while restoring stack headroom for ESKF/GPS supervisor work.
+static MountYawState g_mount_yaw_state;
+#endif
+
 static float clamp01f(float value) {
   if (!isfinite(value)) return 0.0f;
   if (value < 0.0f) return 0.0f;
@@ -338,11 +345,21 @@ static void update_gps_supervisor_shadow(GpsSupervisorShadowState& sup,
   }
 
   if (sup.reason != GPS_SUP_REASON_NONE) {
-    if (sup.bad_count < 255U) sup.bad_count++;
-    sup.good_count = 0;
-    sup.state = (sup.bad_count >= GPS_SUP_QUARANTINE_BAD_FIXES)
-                    ? GPS_SUPERVISOR_QUARANTINE
-                    : GPS_SUPERVISOR_SUSPECT;
+    const uint16_t gps_toxic_reasons =
+        sup.reason & (uint16_t)~GPS_SUP_REASON_ESKF_INNOVATION_BAD;
+    if (gps_toxic_reasons != GPS_SUP_REASON_NONE) {
+      if (sup.bad_count < 255U) sup.bad_count++;
+      sup.good_count = 0;
+      sup.state = (sup.bad_count >= GPS_SUP_QUARANTINE_BAD_FIXES)
+                      ? GPS_SUPERVISOR_QUARANTINE
+                      : GPS_SUPERVISOR_SUSPECT;
+    } else {
+      // ESKF innovation alone means the filter and a plausibly good GPS disagree.
+      // It is a navigation-consistency warning, not evidence that GPS is toxic.
+      sup.bad_count = 0;
+      sup.good_count = 0;
+      sup.state = GPS_SUPERVISOR_SUSPECT;
+    }
   } else {
     if (sup.state == GPS_SUPERVISOR_QUARANTINE ||
         sup.state == GPS_SUPERVISOR_RECOVERING) {
@@ -503,6 +520,40 @@ static void start_mount_yaw_window(MountYawWindow& w, uint64_t timestamp_us) {
   w.active = true;
   w.start_us = timestamp_us;
   w.end_us = timestamp_us;
+}
+
+static void reset_mount_yaw_state(MountYawState& state) {
+  reset_mount_yaw_window(state.win);
+  state.boot = MountYawBootState{};
+  state.obs_id = 0;
+  state.cooldown_until_us = 0;
+  state.last_speed_epoch = 0;
+  state.last_speed_fix_us = 0;
+  state.last_speed_ms = 0.0f;
+  state.gps_acc_ema_g = 0.0f;
+  state.has_speed = false;
+  state.speed_hist_idx = 0;
+  state.speed_hist_count = 0;
+  for (uint8_t i = 0; i < MOUNT_YAW_SPEED_HIST_N; ++i) {
+    state.speed_hist_fix_us[i] = 0;
+    state.speed_hist_ms[i] = 0.0f;
+  }
+  state.gps_acc_lag_us = 0;
+  state.imu_hist_idx = 0;
+  state.imu_hist_count = 0;
+  for (uint16_t i = 0; i < MOUNT_YAW_IMU_HIST_N; ++i) {
+    state.imu_hist_us[i] = 0;
+    state.imu_hist_ax[i] = 0.0f;
+    state.imu_hist_ay[i] = 0.0f;
+    state.imu_hist_az[i] = 0.0f;
+  }
+  state.last_cog_epoch = 0;
+  state.last_cog_fix_us = 0;
+  state.last_east_m = 0.0f;
+  state.last_north_m = 0.0f;
+  state.last_cog_rad = 0.0f;
+  state.cog_rate_ema_dps = 0.0f;
+  state.has_cog = false;
 }
 
 static void flush_mount_yaw_stability_segment(MountYawWindow& w) {
@@ -903,12 +954,16 @@ void Task_Filter(void *pvParameters) {
   ImuRawData data;
   uint32_t last_eskf_epoch = 0; // last GPS epoch processed by the ESKF
   uint64_t last_timestamp_us = 0;
+#ifdef USE_BMI270
+  MountYawState& mount_yaw = g_mount_yaw_state;
+#else
   MountYawState mount_yaw;
+#endif
   GpsCorrectionGateState gps_gate;
   GpsSupervisorShadowState gps_supervisor;
-#ifdef USE_BMI270
+  uint32_t eskf_internal_reject_count = 0;
   uint32_t record_seq = 0;
-#endif
+  BREADCRUMB_MARK(BREADCRUMB_PHASE_FILTER_WAIT, record_seq);
 
   // ── v1.3.2: function-scope state (was static inside loop) ─────────────────
   // Moved here so calibrate_alignment() can trigger a full reset via
@@ -944,7 +999,9 @@ void Task_Filter(void *pvParameters) {
 #endif
 
   for (;;) {
+    BREADCRUMB_MARK(BREADCRUMB_PHASE_FILTER_WAIT, record_seq);
     if (xQueueReceive(imuQueue, &data, portMAX_DELAY) == pdTRUE) {
+      BREADCRUMB_MARK(BREADCRUMB_PHASE_FILTER_SAMPLE, record_seq);
 #ifdef USE_BMI270
       if (!data.imu_sample_fresh) {
         if (imu_stale_consecutive < UINT32_MAX) {
@@ -1035,8 +1092,9 @@ void Task_Filter(void *pvParameters) {
           prev_cent_x = 0.0f;  // VGPL: reset stale centripetal compensation
           prev_long_y = 0.0f;  // VGPL: reset stale longitudinal compensation
           prev_v_eskf = 0.0f;
-          mount_yaw = MountYawState{};
+          reset_mount_yaw_state(mount_yaw);
           gps_gate = GpsCorrectionGateState{};
+          eskf_internal_reject_count = 0;
           Serial.println("[FILTER] Recalibration reset complete.");
           xSemaphoreGive(telemetry_mutex);
           continue; // discard stale IMU sample, start fresh
@@ -1275,6 +1333,7 @@ void Task_Filter(void *pvParameters) {
       // ──────────────────────────────────────────────────────────────────────
 
       // GPS snapshot for SD and ESKF
+      BREADCRUMB_MARK(BREADCRUMB_PHASE_FILTER_GPS, record_seq);
       if (xSemaphoreTake(gps_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
         last_gps = shared_gps_data;
         xSemaphoreGive(gps_mutex);
@@ -1313,6 +1372,10 @@ void Task_Filter(void *pvParameters) {
       // ── GPS Supervisor Shadow (v1.8.11) ──────────────────────────────────
       // Diagnostic only: computes receiver/PVT plausibility and records state
       // in the SD stream, but does not alter gps_slow or eskf.correct() yet.
+      // GPS_SUP_REASON_ESKF_INNOVATION_BAD is an ESKF consistency warning, not
+      // a GPS toxicity bit: future active gates must not reject GPS for bit 0x20
+      // unless another receiver/PVT plausibility reason is also present.
+      BREADCRUMB_MARK(BREADCRUMB_PHASE_FILTER_SUPERVISOR, record_seq);
       float gps_supervisor_east_m = 0.0f;
       float gps_supervisor_north_m = 0.0f;
       if (gps_fix_fresh && gps_origin_set && gps_fix_quality_ok(last_gps)) {
@@ -1417,6 +1480,7 @@ void Task_Filter(void *pvParameters) {
       //     comparison purpose.
       // Having two independent bias estimates (ZARU statistical vs Kalman
       // model-based) enables offline A/B validation via kf6_bgz in the CSV.
+      BREADCRUMB_MARK(BREADCRUMB_PHASE_FILTER_PREDICT, record_seq);
       eskf.predict(lin_ax, lin_ay, gz_rad, dt_real_sec, is_stationary);
 
       eskf6.predict(lin_ax, lin_ay, gz_rad_raw, dt_real_sec, is_stationary);
@@ -1445,6 +1509,7 @@ void Task_Filter(void *pvParameters) {
 
       // Correct: only if there is a new GPS fix AND it is not stale
       if (gps_fix_fresh && last_gps.epoch != last_eskf_epoch) {
+        BREADCRUMB_MARK(BREADCRUMB_PHASE_FILTER_CORRECT, record_seq);
         bool gps_fix_accepted = gps_fix_quality_ok(last_gps);
         if (!gps_fix_accepted) {
           last_eskf_epoch = last_gps.epoch;
@@ -1472,13 +1537,35 @@ void Task_Filter(void *pvParameters) {
                                          last_gps.hdop,
                                          last_gps.fix_us);
           if (gps_fix_accepted) {
-            eskf.correct(east_m, north_m, gps_speed_kmh_used, last_gps.hdop);
-            eskf6.correct(east_m, north_m, gps_speed_kmh_used, last_gps.hdop);
-            gps_correction_gate_accept(gps_gate,
-                                       east_m,
-                                       north_m,
-                                       gps_speed_kmh_used,
-                                       last_gps.fix_us);
+            const EskfGpsCorrectionResult r5 =
+                eskf.correct(east_m, north_m, gps_speed_kmh_used, last_gps.hdop);
+            const EskfGpsCorrectionResult r6 =
+                eskf6.correct(east_m, north_m, gps_speed_kmh_used, last_gps.hdop);
+            (void)r6; // 6D is shadow; the primary 5D result owns production gating.
+            if (r5.position_update_ok) {
+              gps_correction_gate_accept(gps_gate,
+                                         east_m,
+                                         north_m,
+                                         gps_speed_kmh_used,
+                                         last_gps.fix_us);
+              eskf_internal_reject_count = 0;
+            } else {
+              if (eskf_internal_reject_count < UINT32_MAX) {
+                eskf_internal_reject_count++;
+              }
+              if (eskf_internal_reject_count == 1U ||
+                  (eskf_internal_reject_count % 10U) == 0U) {
+                Serial.printf("[ESKF] GPS correction internal numeric reject count=%lu innov=%.1fm d2=%.2f d2_inf=%.2f inflated=%u hdop=%.2f speed=%.1f\n",
+                              (unsigned long)eskf_internal_reject_count,
+                              r5.innovation_m,
+                              r5.d2_initial,
+                              r5.d2_after_inflation,
+                              r5.r_inflated ? 1U : 0U,
+                              last_gps.hdop,
+                              gps_speed_kmh_used);
+              }
+              gps_fix_accepted = false;
+            }
           } else if (gps_gate.reject_count < 255) {
             gps_gate.reject_count++;
             if (gps_gate.reject_count == 1U ||
@@ -1526,6 +1613,7 @@ void Task_Filter(void *pvParameters) {
       // rotate the IMU input frame while ESKF state/covariance still belong to
       // the old frame, so the actual correction must be a pre-pipeline boot or
       // offline rewrite step until a full nav reinit path exists.
+      BREADCRUMB_MARK(BREADCRUMB_PHASE_FILTER_MOUNT_YAW, record_seq);
       if (gps_fix_fresh && gps_origin_set) {
         if (last_gps.epoch != mount_yaw.last_speed_epoch) {
           const float speed_ms = gps_speed_kmh_used / 3.6f;
@@ -1713,6 +1801,7 @@ void Task_Filter(void *pvParameters) {
       // data.temp_c already available from the IMU queue: no extra I2C call.
       // GPS: snapshot already acquired above for the ESKF.
       if (sd_queue != NULL) {
+        BREADCRUMB_MARK(BREADCRUMB_PHASE_FILTER_SD_ENQUEUE, record_seq);
         TelemetryRecord rec = {};
         rec.timestamp_us = data.timestamp_us;
         // EMA accel/gyro: already ZARU-corrected (no "- tb_*" subtraction needed)

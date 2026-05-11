@@ -18,7 +18,9 @@ void Task_I2C(void *pvParameters) {
 
   for (;;) {
     vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    BREADCRUMB_MARK(BREADCRUMB_PHASE_I2C_UPDATE, 0);
     imu->update(data);
+    BREADCRUMB_MARK(BREADCRUMB_PHASE_I2C_QUEUE, 0);
     if (IMU_QUEUE_DEPTH == 1) {
       // Mailbox mode: always keep the latest sample for realtime display/control.
       xQueueOverwrite(imuQueue, &data);

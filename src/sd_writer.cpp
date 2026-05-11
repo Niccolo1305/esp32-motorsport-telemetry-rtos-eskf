@@ -102,6 +102,7 @@ void Task_SD_Writer(void *pvParameters) {
   int unsaved_batches = 0;
 
   for (;;) {
+    BREADCRUMB_MARK(BREADCRUMB_PHASE_SD_WAIT, batch_last_seq);
     const TickType_t wait_ticks = (batch_records > 0)
         ? pdMS_TO_TICKS(SD_BATCH_IDLE_FLUSH_MS)
         : portMAX_DELAY;
@@ -139,6 +140,7 @@ void Task_SD_Writer(void *pvParameters) {
              &rec,
              sizeof(TelemetryRecord));
       batch_records++;
+      BREADCRUMB_MARK(BREADCRUMB_PHASE_SD_BATCH, batch_last_seq);
 
       if (batch_records < (size_t)SD_WRITE_BATCH_RECORDS) {
         continue;
@@ -160,6 +162,7 @@ void Task_SD_Writer(void *pvParameters) {
     }
 
     bool forced_sync = false;
+    BREADCRUMB_MARK(BREADCRUMB_PHASE_SD_WRITE, batch_first_seq);
     if (!logFile.writeBytesWithCommit(batch,
                                       expected,
                                       batch_first_seq,
@@ -187,6 +190,7 @@ void Task_SD_Writer(void *pvParameters) {
         (partial_idle_batch ||
          unsaved_batches >= SD_FLUSH_EVERY_BATCHES ||
          unsaved_records >= SD_FLUSH_EVERY)) {
+      BREADCRUMB_MARK(BREADCRUMB_PHASE_SD_FLUSH, batch_last_seq);
       flush_log_file(logFile, unsaved_records);
       unsaved_batches = 0;
     }

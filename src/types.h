@@ -257,6 +257,13 @@ struct GpsData {
   bool valid = false;
   uint32_t epoch = 0;   // monotonic NMEA fix counter
   uint64_t fix_us = 0;  // esp_timer timestamp of last valid NMEA fix [us]
+  bool utc_valid = false;
+  uint16_t utc_year = 0;
+  uint8_t utc_month = 0;
+  uint8_t utc_day = 0;
+  uint8_t utc_hour = 0;
+  uint8_t utc_minute = 0;
+  uint8_t utc_second = 0;
 
   // CASIC NAV2-PVH channel. speed2D is the primary scalar speed when fresh;
   // position/fix flags remain diagnostics until GPS Supervisor active gating.

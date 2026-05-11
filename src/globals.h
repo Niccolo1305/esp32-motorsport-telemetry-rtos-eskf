@@ -28,6 +28,64 @@ extern TaskHandle_t TaskFilterHandle;
 extern TaskHandle_t TaskSDHandle;
 extern TaskHandle_t TaskGPSHandle;
 
+// Crash breadcrumb: survives ESP_RST_PANIC / watchdog resets in RTC no-init RAM
+// and is printed at the next boot. Diagnostic only, not part of SD record format.
+enum BootBreadcrumbPhase : uint16_t {
+  BREADCRUMB_PHASE_NONE = 0,
+  BREADCRUMB_PHASE_BOOT_SETUP = 1,
+  BREADCRUMB_PHASE_BOOT_IMU = 2,
+  BREADCRUMB_PHASE_BOOT_GPS = 3,
+  BREADCRUMB_PHASE_BOOT_SD = 4,
+  BREADCRUMB_PHASE_BOOT_TASKS = 5,
+  BREADCRUMB_PHASE_LOOP = 10,
+  BREADCRUMB_PHASE_GPS_UPDATE = 20,
+  BREADCRUMB_PHASE_GPS_PUBLISH = 21,
+  BREADCRUMB_PHASE_I2C_UPDATE = 30,
+  BREADCRUMB_PHASE_I2C_QUEUE = 31,
+  BREADCRUMB_PHASE_FILTER_WAIT = 40,
+  BREADCRUMB_PHASE_FILTER_SAMPLE = 41,
+  BREADCRUMB_PHASE_FILTER_GPS = 42,
+  BREADCRUMB_PHASE_FILTER_SUPERVISOR = 43,
+  BREADCRUMB_PHASE_FILTER_PREDICT = 44,
+  BREADCRUMB_PHASE_FILTER_CORRECT = 45,
+  BREADCRUMB_PHASE_FILTER_MOUNT_YAW = 46,
+  BREADCRUMB_PHASE_FILTER_SD_ENQUEUE = 47,
+  BREADCRUMB_PHASE_SD_WAIT = 60,
+  BREADCRUMB_PHASE_SD_BATCH = 61,
+  BREADCRUMB_PHASE_SD_WRITE = 62,
+  BREADCRUMB_PHASE_SD_FLUSH = 63,
+};
+
+struct BootBreadcrumb {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t phase;
+  uint32_t boot_count;
+  uint32_t last_reset_reason;
+  uint32_t uptime_ms;
+  uint32_t seq;
+  uint16_t line;
+  uint16_t core_id;
+  uint32_t heap_free;
+  uint32_t heap_min;
+  uint32_t stk_filter;
+  uint32_t stk_i2c;
+  uint32_t stk_sd;
+  uint32_t sd_written;
+  uint32_t sd_hwm;
+  uint32_t sd_last_seq;
+  uint32_t resource_sample_ms;
+};
+
+extern BootBreadcrumb boot_breadcrumb;
+
+const char* breadcrumb_phase_name(uint16_t phase);
+void breadcrumb_init_after_reset(uint32_t reset_reason);
+void breadcrumb_mark(uint16_t phase, uint32_t seq, uint16_t line);
+
+#define BREADCRUMB_MARK(phase, seq) \
+  breadcrumb_mark((uint16_t)(phase), (uint32_t)(seq), (uint16_t)__LINE__)
+
 // ── Shared Telemetry Data ──────────────────────────────────────────────────
 extern FilteredTelemetry shared_telemetry;
 extern GpsData shared_gps_data;
@@ -118,7 +176,7 @@ extern std::atomic<bool> recalibration_pending; // v1.3.2: set by calibrate_alig
 // ── SD State ───────────────────────────────────────────────────────────────
 extern bool sd_mounted;
 extern bool sd_low_space;
-extern char current_log_filename[32];
+extern char current_log_filename[64];
 
 // ── Loop / UI State ────────────────────────────────────────────────────────
 extern int prev_system_state;

@@ -78,7 +78,7 @@ private:
                                const uint8_t *bytes,
                                size_t expected);
 
-  char path_[32];
+  char path_[64];
   uint32_t allocated_size_;
   uint32_t final_size_;
 #if defined(LOG_BACKEND_SDFAT)
@@ -96,6 +96,7 @@ public:
   bool exists(const char *path);
   bool openRead(const char *path, StorageReadFile& file);
   bool createLogFile(const char *path, const uint8_t *header, size_t header_size);
+  bool scanTelemetryLogs(uint32_t& max_index, char *latest_path, size_t latest_path_size);
   bool repairPreallocatedLog(const char *path);
   uint64_t totalBytes();
   uint64_t usedBytes();

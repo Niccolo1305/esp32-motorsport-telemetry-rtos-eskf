@@ -5,7 +5,7 @@
 #include <math.h>
 
 #ifdef USE_BMI270
-const char *const FIRMWARE_VERSION = "v1.8.11-gpssup";
+const char *const FIRMWARE_VERSION = "v1.8.12-diag";
 #else
 const char *const FIRMWARE_VERSION = "v1.5.5-nav2s";
 #endif
@@ -57,8 +57,13 @@ static constexpr int SD_WRITE_BATCH_RECORDS = 8;    // AtomS3R v7: 8 x 320 B = 2
 static constexpr int SD_FLUSH_EVERY_BATCHES = 4;    // 4 batches = 32 records ~= 640 ms at 50 Hz
 static constexpr int SD_BATCH_IDLE_FLUSH_MS = 250;  // write/verify a partial batch if producer goes idle
 static constexpr int SD_FLUSH_EVERY = SD_WRITE_BATCH_RECORDS * SD_FLUSH_EVERY_BATCHES;
-static constexpr int SD_QUEUE_DEPTH  = 200;     // record buffer depth (4 s at 50 Hz)
+#ifdef USE_BMI270
+static constexpr int SD_QUEUE_DEPTH  = 100;     // v1.8.12: 320 B records need less queue RAM; observed HWM is <5
+static constexpr int SD_TASK_STACK   = 16384;   // v1.8.12: SdFat/prealloc write path margin with 2.5 KB batches
+#else
+static constexpr int SD_QUEUE_DEPTH  = 200;     // legacy AtomS3 record buffer depth (4 s at 50 Hz)
 static constexpr int SD_TASK_STACK   = 8192;    // Task_SD_Writer stack size (bytes)
+#endif
 static constexpr uint32_t SD_SPI_HZ = 10000000;
 static constexpr int SD_WRITE_RETRY_DELAY_MS = 20;      // delay before retry after close/reopen recovery
 static constexpr int SD_WRITE_STALL_TIMEOUT_MS = 10000; // max per-batch no-progress window before fatal

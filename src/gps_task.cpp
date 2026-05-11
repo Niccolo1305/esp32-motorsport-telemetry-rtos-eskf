@@ -22,8 +22,10 @@ void Task_GPS(void *pvParameters) {
 
     for (;;) {
         // Poll provider: drains UART and returns true on new GPS data/diagnostics.
+        BREADCRUMB_MARK(BREADCRUMB_PHASE_GPS_UPDATE, data.epoch);
         if (provider->update(data)) {
             if (xSemaphoreTake(gps_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+                BREADCRUMB_MARK(BREADCRUMB_PHASE_GPS_PUBLISH, data.epoch);
                 shared_gps_data = data;
                 xSemaphoreGive(gps_mutex);
             }

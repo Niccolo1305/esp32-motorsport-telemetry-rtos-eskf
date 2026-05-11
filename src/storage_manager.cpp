@@ -17,6 +17,67 @@ static SdFs sd_fs;
 
 StorageManager storage;
 
+static bool ascii_equal_ci(char a, char b) {
+  if (a >= 'A' && a <= 'Z') {
+    a = (char)(a - 'A' + 'a');
+  }
+  if (b >= 'A' && b <= 'Z') {
+    b = (char)(b - 'A' + 'a');
+  }
+  return a == b;
+}
+
+static bool has_bin_extension(const char *name) {
+  const size_t len = strlen(name);
+  if (len < 4) {
+    return false;
+  }
+  const char *ext = name + len - 4;
+  return ext[0] == '.' &&
+         ascii_equal_ci(ext[1], 'b') &&
+         ascii_equal_ci(ext[2], 'i') &&
+         ascii_equal_ci(ext[3], 'n');
+}
+
+static bool parse_telemetry_log_index(const char *raw_name, uint32_t& index) {
+  if (raw_name == nullptr || raw_name[0] == '\0') {
+    return false;
+  }
+  const char *name = raw_name;
+  const char *slash = strrchr(raw_name, '/');
+  if (slash != nullptr) {
+    name = slash + 1;
+  }
+  if (!has_bin_extension(name)) {
+    return false;
+  }
+  if (!(ascii_equal_ci(name[0], 't') &&
+        ascii_equal_ci(name[1], 'e') &&
+        ascii_equal_ci(name[2], 'l'))) {
+    return false;
+  }
+  size_t pos = 3;
+  if (name[pos] == '_') {
+    pos++;
+  }
+  if (name[pos] < '0' || name[pos] > '9') {
+    return false;
+  }
+  uint32_t value = 0;
+  while (name[pos] >= '0' && name[pos] <= '9') {
+    value = value * 10U + (uint32_t)(name[pos] - '0');
+    if (value > 99999U) {
+      return false;
+    }
+    pos++;
+  }
+  if (!(name[pos] == '_' || name[pos] == '.')) {
+    return false;
+  }
+  index = value;
+  return true;
+}
+
 static void update_worst_atomic(std::atomic<uint32_t>& target, uint32_t value) {
   uint32_t prev = target.load(std::memory_order_relaxed);
   if (value > prev) {
@@ -511,6 +572,67 @@ bool StorageManager::exists(const char *path) {
 
 bool StorageManager::openRead(const char *path, StorageReadFile& file) {
   return file.open(path);
+}
+
+bool StorageManager::scanTelemetryLogs(uint32_t& max_index,
+                                       char *latest_path,
+                                       size_t latest_path_size) {
+  max_index = 0;
+  if (latest_path != nullptr && latest_path_size > 0) {
+    latest_path[0] = '\0';
+  }
+  bool found = false;
+
+  auto observe_name = [&](const char *name) {
+    uint32_t idx = 0;
+    if (!parse_telemetry_log_index(name, idx)) {
+      return;
+    }
+    if (!found || idx > max_index) {
+      found = true;
+      max_index = idx;
+      if (latest_path != nullptr && latest_path_size > 0) {
+        if (name[0] == '/') {
+          strncpy(latest_path, name, latest_path_size - 1);
+          latest_path[latest_path_size - 1] = '\0';
+        } else {
+          snprintf(latest_path, latest_path_size, "/%s", name);
+        }
+      }
+    }
+  };
+
+#if defined(LOG_BACKEND_SDFAT)
+  FsFile root;
+  if (!root.open("/", O_RDONLY)) {
+    return false;
+  }
+  FsFile entry;
+  while (entry.openNext(&root, O_RDONLY)) {
+    if (!entry.isDir()) {
+      char name[64] = {};
+      entry.getName(name, sizeof(name));
+      observe_name(name);
+    }
+    entry.close();
+  }
+  root.close();
+#else
+  File root = SD.open("/");
+  if (!root) {
+    return false;
+  }
+  File entry = root.openNextFile();
+  while (entry) {
+    if (!entry.isDirectory()) {
+      observe_name(entry.name());
+    }
+    entry.close();
+    entry = root.openNextFile();
+  }
+  root.close();
+#endif
+  return found;
 }
 
 bool StorageManager::createLogFile(const char *path,
