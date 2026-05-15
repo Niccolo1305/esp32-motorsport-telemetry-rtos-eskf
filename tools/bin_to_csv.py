@@ -6,6 +6,8 @@ Usage:
   python bin_to_csv.py tel_23.bin           # convert → split menu
   python bin_to_csv.py tel_23.csv           # split existing CSV
   python bin_to_csv.py tel_23.bin out.csv   # convert without split
+  python bin_to_csv.py tel_23.bin out.csv --report
+  python bin_to_csv.py --report-session data/session_dir
 """
 
 import struct
@@ -13,6 +15,11 @@ import sys
 import os
 import time
 import math
+import json
+import csv
+import re
+from datetime import datetime, timezone
+from collections import Counter
 
 if hasattr(sys.stdout, "reconfigure"):
     try:
@@ -43,6 +50,27 @@ PREALLOC_TAIL_RESYNC_SCAN_BYTES = 1024 * 1024
 MAX_TIMESTAMP_US = 7 * 24 * 60 * 60 * 1_000_000
 MAX_TIMESTAMP_GAP_US = 10_000_000
 FILE_HEADER_V6_FLAG_LOG_PREALLOCATED = 0x00000010
+GPS_FRESH_MAX_US_REPORT = 1_500_000
+REPORT_SCHEMA_VERSION = 1
+REPORT_DEFAULT_KF_STEP_THRESHOLD_M = 100.0
+
+GPS_SUPERVISOR_STATE_NAMES = {
+    0: 'OK',
+    1: 'SUSPECT',
+    2: 'QUARANTINE',
+    3: 'RECOVERING',
+}
+
+GPS_SUPERVISOR_REASON_NAMES = {
+    0x0001: 'NMEA_NAV2_POS_MISMATCH',
+    0x0002: 'IMPLIED_SPEED_BAD',
+    0x0004: 'LOW_SPEED_POSITION_JUMP',
+    0x0008: 'BAD_FIXFLAGS',
+    0x0010: 'BAD_HACC_HDOP_SATS',
+    0x0020: 'ESKF_INNOVATION_BAD',
+    0x0040: 'POSITION_FROZEN_WHILE_MOVING',
+    0x0080: 'NAV2_STALE',
+}
 
 # ── Format Registry ──────────────────────────────────────────────────────────
 # 122-byte record (v0.9.8 — v1.3.0)
@@ -1042,6 +1070,63 @@ def _tail_is_all_zero(fobj, start_pos, chunk_bytes=1024 * 1024):
             return False
 
 
+def _record_valid_for_logical_scan(chunk, fmt, fields):
+    vals = struct.unpack(fmt, chunk)
+    ts_us = _timestamp_us(vals, fields)
+    if ts_us in (SENTINEL_CALIB, SENTINEL_MOUNT_YAW_OBS, SENTINEL_MOUNT_YAW_BOOT):
+        return True
+    return _record_plausible(vals, fields, prev_ts_us=None, raw=chunk)
+
+
+def _scan_preallocated_logical_end_fast(bin_path, hdr, offset, chunk_size, fmt, fields):
+    """Binary-search the first invalid preallocated record.
+
+    Firmware writes a contiguous prefix of valid records followed by unwritten
+    preallocated space. This avoids an O(n) CRC pass over multi-hour 128 MiB
+    logs while preserving the same logical EOF model used by boot repair.
+    """
+    if not _is_preallocated_log(hdr):
+        return None
+
+    file_size = os.path.getsize(bin_path)
+    max_records = max(0, file_size - offset) // chunk_size
+    if max_records <= 0:
+        return offset, 0, max(0, file_size - offset)
+
+    def valid_at(fobj, idx):
+        pos = offset + idx * chunk_size
+        fobj.seek(pos)
+        chunk = fobj.read(chunk_size)
+        if len(chunk) != chunk_size:
+            return False
+        return _record_valid_for_logical_scan(chunk, fmt, fields)
+
+    with open(bin_path, 'rb') as f:
+        lo = 0
+        hi = max_records
+        while lo < hi:
+            mid = lo + (hi - lo) // 2
+            if valid_at(f, mid):
+                lo = mid + 1
+            else:
+                hi = mid
+
+        # Local correction keeps the result conservative if the boundary is near
+        # a sentinel or if the binary search lands a few records past EOF.
+        start = max(0, lo - 16)
+        end = min(max_records, lo + 64)
+        first_invalid = lo
+        for idx in range(start, end):
+            if not valid_at(f, idx):
+                first_invalid = idx
+                break
+        else:
+            first_invalid = lo
+
+    logical_end = offset + first_invalid * chunk_size
+    return logical_end, first_invalid, file_size - logical_end
+
+
 def _scan_preallocated_logical_end(bin_path, hdr, offset, chunk_size, fmt, fields):
     """Return (logical_end, valid_records, tail_bytes) for v6 preallocated logs.
 
@@ -1054,6 +1139,12 @@ def _scan_preallocated_logical_end(bin_path, hdr, offset, chunk_size, fmt, field
     if not _is_preallocated_log(hdr):
         size = os.path.getsize(bin_path)
         return size, max(0, size - offset) // chunk_size, 0
+
+    fast_result = _scan_preallocated_logical_end_fast(
+        bin_path, hdr, offset, chunk_size, fmt, fields
+    )
+    if fast_result is not None:
+        return fast_result
 
     file_size = os.path.getsize(bin_path)
     logical_end = file_size
@@ -1274,6 +1365,722 @@ def count_csv_lines(csv_path):
     return count
 
 
+# ── Diagnostic report ─────────────────────────────────────────────────────────
+
+def _status_rank(status):
+    return {'PASS': 0, 'WARN': 1, 'FAIL': 2}.get(status, 0)
+
+
+def _worst_status(*statuses):
+    return max(statuses or ('PASS',), key=_status_rank)
+
+
+def _add_issue(issues, level, code, message):
+    issues.append({'level': level, 'code': code, 'message': message})
+
+
+def _status_from_issues(issues):
+    if any(i['level'] == 'FAIL' for i in issues):
+        return 'FAIL'
+    if any(i['level'] == 'WARN' for i in issues):
+        return 'WARN'
+    return 'PASS'
+
+
+def _safe_float(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _safe_int(value):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _ratio(numerator, denominator):
+    return (float(numerator) / float(denominator)) if denominator else None
+
+
+def _round_or_none(value, digits=6):
+    return round(value, digits) if value is not None and math.isfinite(value) else None
+
+
+def _top_event_insert(events, event, key='value', limit=10):
+    events.append(event)
+    events.sort(key=lambda item: item.get(key, 0), reverse=True)
+    if len(events) > limit:
+        del events[limit:]
+
+
+def _parse_tel_index(path):
+    name = os.path.basename(path)
+    match = re.match(r'^tel_?(\d+)', name, re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+
+def _report_output_base_from_targets(targets):
+    if len(targets) == 1 and os.path.isfile(targets[0]):
+        return os.path.splitext(targets[0])[0]
+    dirs = []
+    for target in targets:
+        dirs.append(target if os.path.isdir(target) else os.path.dirname(target) or os.getcwd())
+    common = os.path.commonpath([os.path.abspath(d) for d in dirs]) if dirs else os.getcwd()
+    return os.path.join(common, 'telemetry_session')
+
+
+def _report_paths(output_base, report_format):
+    if report_format not in ('both', 'json', 'md'):
+        raise ValueError(f"Unsupported report format: {report_format}")
+    paths = []
+    if report_format in ('both', 'json'):
+        paths.append(output_base + '.report.json')
+    if report_format in ('both', 'md'):
+        paths.append(output_base + '.report.md')
+    return paths
+
+
+def _resolve_report_targets(targets):
+    files = []
+    for target in targets:
+        if os.path.isdir(target):
+            for entry in os.scandir(target):
+                if entry.is_file() and os.path.splitext(entry.name)[1].lower() in ('.bin', '.csv'):
+                    files.append(entry.path)
+        elif os.path.isfile(target):
+            files.append(target)
+        else:
+            raise FileNotFoundError(target)
+    files = sorted(
+        files,
+        key=lambda p: (
+            _parse_tel_index(p) is None,
+            _parse_tel_index(p) if _parse_tel_index(p) is not None else 10**9,
+            os.path.basename(p).lower(),
+        )
+    )
+    return files
+
+
+def _header_report(hdr):
+    if not hdr:
+        return {
+            'present': False,
+            'firmware_version': None,
+            'header_version': None,
+            'record_size': None,
+            'reset_reason_cpu0': None,
+            'log_filename': None,
+            'header_crc_ok': None,
+        }
+    v6 = hdr.get('v6') or {}
+    return {
+        'present': True,
+        'firmware_version': hdr.get('firmware_version'),
+        'header_version': hdr.get('header_version'),
+        'record_size': hdr.get('record_size'),
+        'start_time_ms': hdr.get('start_time_ms'),
+        'header_flags': hdr.get('header_flags'),
+        'reset_reason_cpu0': v6.get('reset_reason_cpu0'),
+        'reset_reason_cpu1': v6.get('reset_reason_cpu1'),
+        'log_filename': v6.get('log_filename'),
+        'header_crc_ok': v6.get('header_crc_ok'),
+        'build_flags': v6.get('build_flags'),
+        'sd_spi_hz': v6.get('sd_spi_hz'),
+        'sd_queue_depth': v6.get('sd_queue_depth'),
+        'imu_queue_depth': v6.get('imu_queue_depth'),
+        'sd_flush_every': v6.get('sd_flush_every'),
+    }
+
+
+def _new_metric_accumulators():
+    return {
+        'data_records': 0,
+        'first_seq': None,
+        'last_seq': None,
+        'first_t_us': None,
+        'last_t_us': None,
+        'seq_gap_count': 0,
+        'seq_missing_total': 0,
+        'max_seq_gap_abs': 0,
+        'timestamp_backsteps': 0,
+        'min_dt_ms': None,
+        'max_dt_ms': None,
+        'max_sd_queue_hwm': 0,
+        'max_sd_records_dropped': 0,
+        'max_sd_partial_write_count': 0,
+        'max_sd_stall_count': 0,
+        'max_sd_reopen_count': 0,
+        'gps_valid_count': 0,
+        'gps_fresh_count': 0,
+        'max_gps_fix_step_speed_kmh': None,
+        'max_gps_eskf_innov_m': None,
+        'max_gps_nmea_nav2_dist_m': None,
+        'supervisor_state_counts': Counter(),
+        'supervisor_reason_bit_counts': Counter(),
+        'kf_step_over_threshold_count': 0,
+        'max_kf_step_m': None,
+        'top_kf_step_events': [],
+        'sentinel_counts': {
+            'CALIB_UPDATE': 0,
+            'MOUNT_YAW_OBS': 0,
+            'MOUNT_YAW_BOOT': 0,
+        },
+        'invalid_integrity_records': 0,
+    }
+
+
+def _update_metric_accumulators(acc, vals, fields, kf_threshold_m, prev):
+    ts_us = _timestamp_us(vals, fields)
+    if ts_us == SENTINEL_CALIB:
+        acc['sentinel_counts']['CALIB_UPDATE'] += 1
+        prev.clear()
+        return
+    if ts_us == SENTINEL_MOUNT_YAW_OBS:
+        acc['sentinel_counts']['MOUNT_YAW_OBS'] += 1
+        prev.clear()
+        return
+    if ts_us == SENTINEL_MOUNT_YAW_BOOT:
+        acc['sentinel_counts']['MOUNT_YAW_BOOT'] += 1
+        prev.clear()
+        return
+
+    acc['data_records'] += 1
+
+    seq = _record_seq(vals, fields)
+    if seq is not None:
+        if acc['first_seq'] is None:
+            acc['first_seq'] = seq
+        acc['last_seq'] = seq
+        prev_seq = prev.get('seq')
+        if prev_seq is not None and seq != prev_seq + 1:
+            gap_abs = abs(seq - prev_seq)
+            missing = max(0, seq - prev_seq - 1)
+            acc['seq_gap_count'] += 1
+            acc['seq_missing_total'] += missing
+            acc['max_seq_gap_abs'] = max(acc['max_seq_gap_abs'], gap_abs)
+        prev['seq'] = seq
+
+    if ts_us is not None:
+        if acc['first_t_us'] is None:
+            acc['first_t_us'] = ts_us
+        acc['last_t_us'] = ts_us
+        prev_t = prev.get('t_us')
+        if prev_t is not None:
+            dt_ms = (ts_us - prev_t) / 1000.0
+            if dt_ms < 0:
+                acc['timestamp_backsteps'] += 1
+            else:
+                acc['min_dt_ms'] = dt_ms if acc['min_dt_ms'] is None else min(acc['min_dt_ms'], dt_ms)
+                acc['max_dt_ms'] = dt_ms if acc['max_dt_ms'] is None else max(acc['max_dt_ms'], dt_ms)
+        prev['t_us'] = ts_us
+
+    for field, metric in (
+        ('sd_queue_hwm', 'max_sd_queue_hwm'),
+        ('sd_records_dropped', 'max_sd_records_dropped'),
+        ('sd_partial_write_count', 'max_sd_partial_write_count'),
+        ('sd_stall_count', 'max_sd_stall_count'),
+        ('sd_reopen_count', 'max_sd_reopen_count'),
+    ):
+        value = _field_value(vals, fields, field)
+        if value is not None:
+            acc[metric] = max(acc[metric], int(value))
+
+    gps_valid = _field_value(vals, fields, 'gps_valid')
+    if gps_valid == 1:
+        acc['gps_valid_count'] += 1
+        gps_fix_us = _field_value(vals, fields, 'gps_fix_us')
+        if ts_us is not None and gps_fix_us is not None:
+            age_us = ts_us - int(gps_fix_us)
+            if 0 <= age_us <= GPS_FRESH_MAX_US_REPORT:
+                acc['gps_fresh_count'] += 1
+
+    for field, metric in (
+        ('gps_fix_step_speed_kmh', 'max_gps_fix_step_speed_kmh'),
+        ('gps_eskf_innov_m', 'max_gps_eskf_innov_m'),
+        ('gps_nmea_nav2_dist_m', 'max_gps_nmea_nav2_dist_m'),
+    ):
+        value = _safe_float(_field_value(vals, fields, field))
+        if value is not None:
+            acc[metric] = value if acc[metric] is None else max(acc[metric], value)
+
+    sup_state = _field_value(vals, fields, 'gps_supervisor_state')
+    if sup_state is not None:
+        state_id = int(sup_state)
+        acc['supervisor_state_counts'][GPS_SUPERVISOR_STATE_NAMES.get(state_id, str(state_id))] += 1
+
+    sup_reason = _field_value(vals, fields, 'gps_supervisor_reason')
+    if sup_reason is not None:
+        mask = int(sup_reason)
+        for bit, name in GPS_SUPERVISOR_REASON_NAMES.items():
+            if mask & bit:
+                acc['supervisor_reason_bit_counts'][name] += 1
+
+    kf_x = _safe_float(_field_value(vals, fields, 'kf_x'))
+    kf_y = _safe_float(_field_value(vals, fields, 'kf_y'))
+    prev_kf = prev.get('kf')
+    if kf_x is not None and kf_y is not None and prev_kf is not None:
+        step_m = math.hypot(kf_x - prev_kf[0], kf_y - prev_kf[1])
+        acc['max_kf_step_m'] = step_m if acc['max_kf_step_m'] is None else max(acc['max_kf_step_m'], step_m)
+        if step_m > kf_threshold_m:
+            acc['kf_step_over_threshold_count'] += 1
+            _top_event_insert(
+                acc['top_kf_step_events'],
+                {
+                    'seq': seq,
+                    't_us': ts_us,
+                    'kf_step_m': _round_or_none(step_m, 3),
+                    'kf_x_m': _round_or_none(kf_x, 3),
+                    'kf_y_m': _round_or_none(kf_y, 3),
+                },
+                key='kf_step_m',
+            )
+    if kf_x is not None and kf_y is not None:
+        prev['kf'] = (kf_x, kf_y)
+
+
+def _finalize_file_report(report, acc, kf_threshold_m):
+    data_records = acc['data_records']
+    duration_s = None
+    rate_hz = None
+    if acc['first_t_us'] is not None and acc['last_t_us'] is not None:
+        duration_s = (acc['last_t_us'] - acc['first_t_us']) / 1_000_000.0
+        if duration_s > 0 and data_records > 1:
+            rate_hz = (data_records - 1) / duration_s
+
+    report['records'].update({
+        'data_records': data_records,
+        'first_seq': acc['first_seq'],
+        'last_seq': acc['last_seq'],
+        'first_t_us': acc['first_t_us'],
+        'last_t_us': acc['last_t_us'],
+        'duration_s': _round_or_none(duration_s, 6),
+        'rate_hz': _round_or_none(rate_hz, 6),
+        'min_dt_ms': _round_or_none(acc['min_dt_ms'], 3),
+        'max_dt_ms': _round_or_none(acc['max_dt_ms'], 3),
+        'seq_gap_count': acc['seq_gap_count'],
+        'seq_missing_total': acc['seq_missing_total'],
+        'max_seq_gap_abs': acc['max_seq_gap_abs'],
+        'timestamp_backsteps': acc['timestamp_backsteps'],
+        'sentinel_counts': acc['sentinel_counts'],
+        'invalid_integrity_records': acc['invalid_integrity_records'],
+    })
+
+    report['sd'] = {
+        'max_sd_queue_hwm': acc['max_sd_queue_hwm'],
+        'max_sd_records_dropped': acc['max_sd_records_dropped'],
+        'max_sd_partial_write_count': acc['max_sd_partial_write_count'],
+        'max_sd_stall_count': acc['max_sd_stall_count'],
+        'max_sd_reopen_count': acc['max_sd_reopen_count'],
+    }
+
+    report['gps'] = {
+        'gps_valid_count': acc['gps_valid_count'],
+        'gps_fresh_count': acc['gps_fresh_count'],
+        'gps_valid_ratio': _round_or_none(_ratio(acc['gps_valid_count'], data_records), 6),
+        'gps_fresh_ratio': _round_or_none(_ratio(acc['gps_fresh_count'], data_records), 6),
+        'max_gps_fix_step_speed_kmh': _round_or_none(acc['max_gps_fix_step_speed_kmh'], 3),
+        'max_gps_eskf_innov_m': _round_or_none(acc['max_gps_eskf_innov_m'], 3),
+        'max_gps_nmea_nav2_dist_m': _round_or_none(acc['max_gps_nmea_nav2_dist_m'], 3),
+    }
+
+    report['gps_supervisor'] = {
+        'state_counts': dict(acc['supervisor_state_counts']),
+        'reason_bit_counts': dict(acc['supervisor_reason_bit_counts']),
+        'top_reasons': [
+            {'reason': reason, 'count': count}
+            for reason, count in acc['supervisor_reason_bit_counts'].most_common(10)
+        ],
+    }
+
+    report['eskf'] = {
+        'kf_step_threshold_m': kf_threshold_m,
+        'max_kf_step_m': _round_or_none(acc['max_kf_step_m'], 3),
+        'kf_step_over_threshold_count': acc['kf_step_over_threshold_count'],
+        'top_kf_step_events': acc['top_kf_step_events'],
+    }
+
+    issues = report['issues']
+    hdr = report.get('header') or {}
+    if hdr.get('header_crc_ok') is False:
+        _add_issue(issues, 'FAIL', 'HEADER_CRC_BAD', 'Header CRC check failed.')
+    if data_records == 0:
+        _add_issue(issues, 'FAIL', 'NO_VALID_RECORDS', 'No data records were decoded.')
+    if acc['invalid_integrity_records'] > 0:
+        _add_issue(issues, 'FAIL', 'RECORD_INTEGRITY_BAD', 'One or more records failed magic/CRC checks.')
+    if acc['seq_gap_count'] > 0:
+        _add_issue(issues, 'FAIL', 'SEQ_GAP', 'Sequence gaps were found inside the file.')
+    if acc['timestamp_backsteps'] > 0:
+        _add_issue(issues, 'FAIL', 'TIMESTAMP_BACKSTEP', 'Timestamp moved backwards inside the file.')
+    if acc['max_sd_records_dropped'] > 0:
+        _add_issue(issues, 'FAIL', 'SD_DROPS', 'SD queue drops were recorded.')
+    if acc['max_sd_partial_write_count'] > 0:
+        _add_issue(issues, 'FAIL', 'SD_PARTIAL_WRITE', 'Partial SD writes were recorded.')
+    if acc['max_sd_stall_count'] > 0:
+        _add_issue(issues, 'FAIL', 'SD_STALL', 'SD stalls were recorded.')
+
+    if report['file']['tail_bytes'] > 0:
+        _add_issue(issues, 'WARN', 'PREALLOC_TAIL', 'File contains an unwritten preallocated tail.')
+    if acc['max_sd_reopen_count'] > 0:
+        _add_issue(issues, 'WARN', 'SD_REOPEN', 'SD reopen recovery was used.')
+    queue_depth = hdr.get('sd_queue_depth')
+    if queue_depth and acc['max_sd_queue_hwm'] >= 0.8 * queue_depth:
+        _add_issue(issues, 'WARN', 'SD_QUEUE_HIGH_WATERMARK', 'SD queue high-water mark exceeded 80% of depth.')
+    fresh_ratio = report['gps']['gps_fresh_ratio']
+    if fresh_ratio is not None and fresh_ratio < 0.95:
+        _add_issue(issues, 'WARN', 'GPS_FRESH_LOW', 'GPS fresh ratio is below 95%.')
+    state_counts = acc['supervisor_state_counts']
+    if state_counts.get('QUARANTINE', 0) or state_counts.get('RECOVERING', 0):
+        _add_issue(issues, 'WARN', 'GPS_SUPERVISOR_ACTIVE', 'GPS supervisor entered QUARANTINE or RECOVERING.')
+    if acc['kf_step_over_threshold_count'] > 0:
+        _add_issue(issues, 'WARN', 'KF_STEP_LARGE', 'ESKF position step exceeded threshold.')
+
+    report['status'] = _status_from_issues(issues)
+
+
+def build_bin_health_report(bin_path, layout=None, kf_threshold_m=REPORT_DEFAULT_KF_STEP_THRESHOLD_M):
+    if layout is None:
+        layout = bin_logical_layout(bin_path, quiet=True)
+    hdr = layout['hdr']
+    chunk_size = layout['chunk_size']
+    fmt, hdr_cols, _ = get_format(chunk_size, hdr.get('header_version') if hdr else None)
+    fields = _field_indices(hdr_cols)
+
+    report = {
+        'path': bin_path,
+        'type': 'bin',
+        'tel_index': _parse_tel_index(bin_path),
+        'status': 'PASS',
+        'issues': [],
+        'file': {
+            'name': os.path.basename(bin_path),
+            'physical_size_bytes': os.path.getsize(bin_path),
+            'logical_size_bytes': layout['logical_end'],
+            'tail_bytes': layout['tail_bytes'],
+            'offset_bytes': layout['offset'],
+            'record_size_bytes': chunk_size,
+            'layout_valid_records': layout['valid_records'],
+        },
+        'header': _header_report(hdr),
+        'records': {},
+        'sd': {},
+        'gps': {},
+        'gps_supervisor': {},
+        'eskf': {},
+    }
+
+    acc = _new_metric_accumulators()
+    prev = {}
+    with open(bin_path, 'rb') as f:
+        f.seek(layout['offset'])
+        while f.tell() < layout['logical_end']:
+            chunk = f.read(chunk_size)
+            if len(chunk) < chunk_size:
+                break
+            vals = struct.unpack(fmt, chunk)
+            # bin_logical_layout() already validates the contiguous record prefix
+            # through magic/CRC for v6 preallocated logs. Recomputing CRC for
+            # every row here makes health reports on 128 MiB logs unnecessarily
+            # slow, so this pass only computes diagnostics over the valid range.
+            _update_metric_accumulators(acc, vals, fields, kf_threshold_m, prev)
+
+    _finalize_file_report(report, acc, kf_threshold_m)
+    return report
+
+
+def build_csv_health_report(csv_path, kf_threshold_m=REPORT_DEFAULT_KF_STEP_THRESHOLD_M):
+    preamble, header_line = read_csv_preamble_and_header(csv_path)
+    header_cols = next(csv.reader([header_line.strip()]))
+    fields = _field_indices(header_cols)
+    report = {
+        'path': csv_path,
+        'type': 'csv',
+        'tel_index': _parse_tel_index(csv_path),
+        'status': 'PASS',
+        'issues': [{'level': 'WARN', 'code': 'CSV_REDUCED_REPORT',
+                    'message': 'CSV report lacks binary header, CRC, reset and preallocation metadata.'}],
+        'file': {
+            'name': os.path.basename(csv_path),
+            'physical_size_bytes': os.path.getsize(csv_path),
+            'logical_size_bytes': os.path.getsize(csv_path),
+            'tail_bytes': None,
+            'offset_bytes': None,
+            'record_size_bytes': None,
+            'layout_valid_records': None,
+        },
+        'header': {
+            'present': bool(preamble),
+            'firmware_version': None,
+            'header_version': None,
+            'record_size': None,
+            'reset_reason_cpu0': None,
+            'log_filename': None,
+            'header_crc_ok': None,
+        },
+        'records': {},
+        'sd': {},
+        'gps': {},
+        'gps_supervisor': {},
+        'eskf': {},
+    }
+    acc = _new_metric_accumulators()
+    prev = {}
+    with open_text_read(csv_path) as f:
+        header_seen = False
+        for raw_line in f:
+            stripped = raw_line.rstrip('\n\r')
+            if not stripped:
+                continue
+            if not header_seen:
+                if stripped.startswith('#'):
+                    continue
+                header_seen = True
+                continue
+            if stripped.startswith('#'):
+                if stripped.startswith('# CALIB_UPDATE'):
+                    acc['sentinel_counts']['CALIB_UPDATE'] += 1
+                elif stripped.startswith('# MOUNT_YAW_OBS'):
+                    acc['sentinel_counts']['MOUNT_YAW_OBS'] += 1
+                elif stripped.startswith('# MOUNT_YAW_BOOT'):
+                    acc['sentinel_counts']['MOUNT_YAW_BOOT'] += 1
+                prev.clear()
+                continue
+            row = next(csv.reader([stripped]))
+            vals = []
+            for item in row:
+                num = _safe_float(item)
+                vals.append(num if num is not None else item)
+            _update_metric_accumulators(acc, vals, fields, kf_threshold_m, prev)
+
+    _finalize_file_report(report, acc, kf_threshold_m)
+    return report
+
+
+def build_file_health_report(path, layout=None, kf_threshold_m=REPORT_DEFAULT_KF_STEP_THRESHOLD_M):
+    ext = os.path.splitext(path)[1].lower()
+    if ext == '.bin':
+        return build_bin_health_report(path, layout=layout, kf_threshold_m=kf_threshold_m)
+    if ext == '.csv':
+        return build_csv_health_report(path, kf_threshold_m=kf_threshold_m)
+    raise ValueError(f"Unsupported report input: {path}")
+
+
+def build_session_health_report(paths, mode='session', kf_threshold_m=REPORT_DEFAULT_KF_STEP_THRESHOLD_M):
+    files = [build_file_health_report(path, kf_threshold_m=kf_threshold_m) for path in paths]
+    transitions = []
+    for prev_report, next_report in zip(files, files[1:]):
+        prev_seq = prev_report['records'].get('last_seq')
+        next_seq = next_report['records'].get('first_seq')
+        prev_t = prev_report['records'].get('last_t_us')
+        next_t = next_report['records'].get('first_t_us')
+        seq_delta = (next_seq - prev_seq) if prev_seq is not None and next_seq is not None else None
+        time_gap_s = ((next_t - prev_t) / 1_000_000.0) if prev_t is not None and next_t is not None else None
+        new_boot = next_seq == 0 if next_seq is not None else False
+        continuous = seq_delta == 1
+        issues = []
+        if not continuous and not new_boot:
+            _add_issue(issues, 'WARN', 'SESSION_SEQ_DISCONTINUITY', 'Adjacent files are not seq-continuous.')
+        transition = {
+            'prev_file': prev_report['file']['name'],
+            'next_file': next_report['file']['name'],
+            'seq_delta': seq_delta,
+            'time_gap_s': _round_or_none(time_gap_s, 6),
+            'continuous': continuous,
+            'new_boot': new_boot,
+            'status': _status_from_issues(issues),
+            'issues': issues,
+        }
+        transitions.append(transition)
+
+    status = 'PASS'
+    for file_report in files:
+        status = _worst_status(status, file_report['status'])
+    for transition in transitions:
+        status = _worst_status(status, transition['status'])
+
+    total_records = sum((f['records'].get('data_records') or 0) for f in files)
+    total_duration_s = sum((f['records'].get('duration_s') or 0.0) for f in files)
+    return {
+        'schema_version': REPORT_SCHEMA_VERSION,
+        'generated_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+        'mode': mode,
+        'status': status,
+        'files': files,
+        'transitions': transitions,
+        'summary': {
+            'file_count': len(files),
+            'total_data_records': total_records,
+            'total_duration_s': _round_or_none(total_duration_s, 6),
+            'statuses': dict(Counter(f['status'] for f in files)),
+            'transition_statuses': dict(Counter(t['status'] for t in transitions)),
+        },
+    }
+
+
+def _md_table(headers, rows):
+    out = []
+    out.append('| ' + ' | '.join(headers) + ' |')
+    out.append('| ' + ' | '.join('---' for _ in headers) + ' |')
+    for row in rows:
+        out.append('| ' + ' | '.join(str(item) for item in row) + ' |')
+    return '\n'.join(out)
+
+
+def render_health_report_markdown(report):
+    lines = [
+        f"# Telemetry Diagnostic Report",
+        "",
+        f"- Status: **{report['status']}**",
+        f"- Mode: `{report['mode']}`",
+        f"- Generated: `{report['generated_at']}`",
+        "",
+        "## Files",
+    ]
+    rows = []
+    for f in report['files']:
+        rows.append([
+            f['file']['name'],
+            f['status'],
+            f['header'].get('firmware_version') or '',
+            f['header'].get('reset_reason_cpu0') if f['header'].get('reset_reason_cpu0') is not None else '',
+            f['records'].get('data_records') or 0,
+            f['file'].get('tail_bytes') if f['file'].get('tail_bytes') is not None else '',
+            f['records'].get('duration_s') or '',
+            f['records'].get('rate_hz') or '',
+            f['sd'].get('max_sd_queue_hwm') if f.get('sd') else '',
+            f['gps'].get('gps_fresh_ratio') if f.get('gps') else '',
+        ])
+    lines.append(_md_table(
+        ['file', 'status', 'firmware', 'reset', 'records', 'tail_bytes', 'duration_s', 'rate_hz', 'sd_hwm', 'gps_fresh'],
+        rows,
+    ))
+
+    if report['transitions']:
+        lines.extend(["", "## Transitions"])
+        rows = []
+        for t in report['transitions']:
+            rows.append([t['prev_file'], t['next_file'], t['status'], t['seq_delta'], t['time_gap_s'], t['continuous'], t['new_boot']])
+        lines.append(_md_table(['prev', 'next', 'status', 'seq_delta', 'time_gap_s', 'continuous', 'new_boot'], rows))
+
+    all_issues = []
+    for f in report['files']:
+        for issue in f['issues']:
+            all_issues.append([f['file']['name'], issue['level'], issue['code'], issue['message']])
+    for t in report['transitions']:
+        for issue in t['issues']:
+            all_issues.append([f"{t['prev_file']} -> {t['next_file']}", issue['level'], issue['code'], issue['message']])
+    if all_issues:
+        lines.extend(["", "## Warnings And Failures", _md_table(['scope', 'level', 'code', 'message'], all_issues)])
+
+    top_kf = []
+    for f in report['files']:
+        for event in f.get('eskf', {}).get('top_kf_step_events', []):
+            top_kf.append((event.get('kf_step_m') or 0, f['file']['name'], event))
+    top_kf.sort(key=lambda item: item[0], reverse=True)
+    if top_kf:
+        lines.extend(["", "## Top Kf Steps"])
+        rows = []
+        for _, file_name, event in top_kf[:10]:
+            rows.append([file_name, event.get('seq'), event.get('t_us'), event.get('kf_step_m'), event.get('kf_x_m'), event.get('kf_y_m')])
+        lines.append(_md_table(['file', 'seq', 't_us', 'kf_step_m', 'kf_x_m', 'kf_y_m'], rows))
+
+    reason_rows = []
+    reason_totals = Counter()
+    for f in report['files']:
+        reason_totals.update(f.get('gps_supervisor', {}).get('reason_bit_counts', {}))
+    for reason, count in reason_totals.most_common(10):
+        reason_rows.append([reason, count])
+    if reason_rows:
+        lines.extend(["", "## Top GPS Supervisor Reasons", _md_table(['reason', 'count'], reason_rows)])
+
+    return '\n'.join(lines) + '\n'
+
+
+def write_health_report_outputs(report, output_base, report_format='both'):
+    written = []
+    for path in _report_paths(output_base, report_format):
+        if path.endswith('.json'):
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(report, f, indent=2, ensure_ascii=False)
+                f.write('\n')
+        elif path.endswith('.md'):
+            with open(path, 'w', encoding='utf-8', newline='\n') as f:
+                f.write(render_health_report_markdown(report))
+        written.append(path)
+    return written
+
+
+def generate_health_report_for_targets(targets, output_base=None, report_format='both',
+                                       mode='session',
+                                       kf_threshold_m=REPORT_DEFAULT_KF_STEP_THRESHOLD_M):
+    paths = _resolve_report_targets(targets)
+    if not paths:
+        raise ValueError('No .bin or .csv files found for report.')
+    report = build_session_health_report(paths, mode=mode, kf_threshold_m=kf_threshold_m)
+    if output_base is None:
+        output_base = _report_output_base_from_targets(paths)
+    written = write_health_report_outputs(report, output_base, report_format)
+    print(f"  {GREEN}Report:{RESET} status={report['status']} files={len(paths)}")
+    for path in written:
+        print(f"    {GREEN}✓{RESET} {path}")
+    return report, written
+
+
+def parse_cli_options(raw_args):
+    opts = {
+        'repair_bin': False,
+        'report': None,
+        'report_format': 'both',
+        'report_session': None,
+        'kf_step_threshold': REPORT_DEFAULT_KF_STEP_THRESHOLD_M,
+        'positionals': [],
+    }
+    i = 0
+    while i < len(raw_args):
+        arg = raw_args[i]
+        if arg == '--repair-bin':
+            opts['repair_bin'] = True
+            i += 1
+        elif arg == '--report':
+            opts['report'] = True
+            i += 1
+        elif arg == '--no-report':
+            opts['report'] = False
+            i += 1
+        elif arg == '--report-format':
+            if i + 1 >= len(raw_args):
+                raise ValueError('--report-format requires both, json, or md')
+            value = raw_args[i + 1].lower()
+            if value not in ('both', 'json', 'md'):
+                raise ValueError('--report-format must be both, json, or md')
+            opts['report_format'] = value
+            i += 2
+        elif arg == '--kf-step-threshold':
+            if i + 1 >= len(raw_args):
+                raise ValueError('--kf-step-threshold requires a numeric value')
+            opts['kf_step_threshold'] = float(raw_args[i + 1])
+            i += 2
+        elif arg == '--report-session':
+            targets = []
+            i += 1
+            while i < len(raw_args) and not raw_args[i].startswith('--'):
+                targets.append(raw_args[i])
+                i += 1
+            if not targets:
+                raise ValueError('--report-session requires at least one directory or file')
+            opts['report_session'] = targets
+        elif arg.startswith('--'):
+            raise ValueError(f'Unknown option: {arg}')
+        else:
+            opts['positionals'].append(arg)
+            i += 1
+    return opts
+
+
 # ── Split methods ─────────────────────────────────────────────────────────────
 
 def write_split_files(lines_gen, base_name, split_fn, description):
@@ -1428,11 +2235,27 @@ def main():
     global HEADER_LINE, CSV_PREAMBLE_LINES
     banner()
 
-    args = sys.argv[1:]
-    repair_bin = False
-    if '--repair-bin' in args:
-        repair_bin = True
-        args = [arg for arg in args if arg != '--repair-bin']
+    try:
+        cli = parse_cli_options(sys.argv[1:])
+    except ValueError as exc:
+        print(f"  {RED}ERROR:{RESET} {exc}")
+        sys.exit(1)
+
+    if cli['report_session'] is not None:
+        try:
+            generate_health_report_for_targets(
+                cli['report_session'],
+                report_format=cli['report_format'],
+                mode='session',
+                kf_threshold_m=cli['kf_step_threshold'],
+            )
+        except Exception as exc:
+            print(f"  {RED}Report failed:{RESET} {exc}")
+            sys.exit(1)
+        return
+
+    args = cli['positionals']
+    repair_bin = cli['repair_bin']
 
     # Determine input
     if len(args) >= 2:
@@ -1454,6 +2277,18 @@ def main():
         layout = bin_logical_layout(bin_file)
         total = bin_record_count(bin_file, layout)
         no_split(bin_to_csv_lines(bin_file, total, layout), csv_file)
+        if cli['report'] is True:
+            try:
+                generate_health_report_for_targets(
+                    [bin_file],
+                    output_base=os.path.splitext(csv_file)[0],
+                    report_format=cli['report_format'],
+                    mode='direct',
+                    kf_threshold_m=cli['kf_step_threshold'],
+                )
+            except Exception as exc:
+                print(f"  {RED}Report failed:{RESET} {exc}")
+                sys.exit(1)
         return
 
     if len(args) == 1:
@@ -1501,6 +2336,26 @@ def main():
         print(f"  {DIM}{os.path.getsize(input_file) / (1024*1024):.1f} MB binary, "
               f"{total_lines:,} records, ~{est_csv_mb:.1f} MB as CSV{RESET}")
 
+        generate_report = False
+        if cli['report'] is True:
+            generate_report = True
+        elif cli['report'] is None:
+            confirm = ask("Generate diagnostic report? (y/n)", "y")
+            generate_report = confirm.lower() in ('y', 'yes')
+        if generate_report:
+            try:
+                report = build_session_health_report(
+                    [input_file],
+                    mode='file',
+                    kf_threshold_m=cli['kf_step_threshold'],
+                )
+                written = write_health_report_outputs(report, base, cli['report_format'])
+                print(f"  {GREEN}Report:{RESET} status={report['status']}")
+                for path in written:
+                    print(f"    {GREEN}✓{RESET} {path}")
+            except Exception as exc:
+                print(f"  {RED}Report failed:{RESET} {exc}")
+
         def gen_factory():
             return bin_to_csv_lines(input_file, total_lines, layout)
 
@@ -1513,6 +2368,19 @@ def main():
         print(f"  {DIM}Counting rows...{RESET}", end=' ', flush=True)
         total_lines = count_csv_lines(input_file)
         print(f"{total_lines:,} data rows")
+
+        if cli['report'] is True:
+            try:
+                generate_health_report_for_targets(
+                    [input_file],
+                    output_base=base,
+                    report_format=cli['report_format'],
+                    mode='file',
+                    kf_threshold_m=cli['kf_step_threshold'],
+                )
+            except Exception as exc:
+                print(f"  {RED}Report failed:{RESET} {exc}")
+                sys.exit(1)
 
         if file_mb < 31:
             print(f"\n  {GREEN}File is already under 31 MB — split not needed.{RESET}")
