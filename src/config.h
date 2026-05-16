@@ -5,9 +5,9 @@
 #include <math.h>
 
 #ifdef USE_BMI270
-const char *const FIRMWARE_VERSION = "v1.8.12-diag";
+const char *const FIRMWARE_VERSION = "v1.8.13-diag";
 #else
-const char *const FIRMWARE_VERSION = "v1.5.5-nav2s";
+const char *const FIRMWARE_VERSION = "v1.5.6-butter";
 #endif
 
 #if !defined(LOG_BACKEND_SD_H) && !defined(LOG_BACKEND_SDFAT)
@@ -33,14 +33,21 @@ const int DISPLAY_5HZ_CYCLES = LOOP_HZ / 5;
 // Math
 const float DEG2RAD = (float)M_PI / 180.0f;
 
-// Single EMA on all accel + gyro axes (tau ~313 ms at 50 Hz).
-// Does NOT feed the ESKF (Data Fork): used only for display/MQTT/SD/ZARU.
-const float alpha = 0.06f;
+// End-of-pipe Butterworth presentation filter for display/MQTT/SD channels.
+// Does not feed Madgwick, ZARU, ESKF, NHC, GPS correction, or mount-yaw logic.
+// Coefficients are Butterworth2 low-pass, fc=1.5 Hz, fs=50 Hz.
+static constexpr float PRESENTATION_LPF_CUTOFF_HZ = 1.5f;
+static constexpr float PRESENTATION_LPF_FS_HZ = 50.0f;
+static constexpr float BUTTER_B0 = 0.007820208f;
+static constexpr float BUTTER_B1 = 0.015640416f;
+static constexpr float BUTTER_B2 = 0.007820208f;
+static constexpr float BUTTER_A1 = -1.734725769f;
+static constexpr float BUTTER_A2 = 0.766006601f;
 
 // Statistical ZUPT/ZARU engine
 static constexpr int VAR_BUF_SIZE = 50; // 1 s of samples at 50 Hz
-// Variance thresholds for raw gyro (post-rotation, pre-EMA).
-// Raw MEMS noise is higher than EMA-smoothed: starting estimates,
+// Variance thresholds for raw gyro (post-rotation, pre-presentation).
+// Raw MEMS noise is higher than presentation-smoothed output: starting estimates,
 // tune empirically from stationary recordings (raw_gx/gy/gz in SD log).
 #ifdef USE_BMI270
 // BMI270 thresholds for the Bosch-direct 50 Hz / ~20 Hz LPF configuration.

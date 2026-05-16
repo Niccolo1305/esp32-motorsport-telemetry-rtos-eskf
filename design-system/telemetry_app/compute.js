@@ -9,6 +9,8 @@
     't_us':'t_us','t_ms':'t_ms',
     'ax':'ax','ay':'ay','az':'az',
     'gx':'gx','gy':'gy','gz':'gz',
+    'butter_ax':'ax','butter_ay':'ay','butter_az':'az',
+    'butter_gx':'gx','butter_gy':'gy','butter_gz':'gz',
     'temp_c':'temp_c','lap':'lap',
     'gps_lat':'gps_lat','gps_lon':'gps_lon',
     'gps_sog_kmh':'gps_sog_kmh','gps_speed_kmh':'gps_sog_kmh',
@@ -108,7 +110,7 @@
     } else if(o.pipe_lin_ax && o.pipe_lin_ay && o.pipe_body_gx && o.pipe_body_gz){
       o.raw_ax = o.pipe_lin_ax; o.raw_ay = o.pipe_lin_ay; o.raw_az = o.pipe_lin_az;
       o.raw_gx = o.pipe_body_gx; o.raw_gy = o.pipe_body_gy; o.raw_gz = o.pipe_body_gz;
-      o._rawSource = 'pipe_pre_ema';
+      o._rawSource = 'pipe_pre_presentation';
     } else if(o.bmi_acc_x_g && o.bmi_acc_y_g && o.bmi_gyr_x_dps && o.bmi_gyr_z_dps){
       o.raw_ax = o.bmi_acc_x_g; o.raw_ay = o.bmi_acc_y_g; o.raw_az = o.bmi_acc_z_g;
       o.raw_gx = o.bmi_gyr_x_dps; o.raw_gy = o.bmi_gyr_y_dps; o.raw_gz = o.bmi_gyr_z_dps;

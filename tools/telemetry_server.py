@@ -100,6 +100,12 @@ CSV_ALIAS = {
     "gx": "gx",
     "gy": "gy",
     "gz": "gz",
+    "butter_ax": "ax",
+    "butter_ay": "ay",
+    "butter_az": "az",
+    "butter_gx": "gx",
+    "butter_gy": "gy",
+    "butter_gz": "gz",
     "lap": "lap",
     "gps_lat": "gps_lat",
     "gps_lon": "gps_lon",
@@ -340,7 +346,7 @@ def _canonicalize(source: dict[str, np.ndarray]) -> tuple[np.ndarray, dict[str, 
         raw_ax, raw_ay, raw_az = source["raw_ax"], source["raw_ay"], source["raw_az"]
         raw_gx, raw_gy, raw_gz = source["raw_gx"], source["raw_gy"], source["raw_gz"]
     elif _has_all(source, ["pipe_lin_ax", "pipe_lin_ay", "pipe_lin_az", "pipe_body_gx", "pipe_body_gy", "pipe_body_gz"]):
-        raw_source = "pipe_pre_ema"
+        raw_source = "pipe_pre_presentation"
         raw_ax, raw_ay, raw_az = source["pipe_lin_ax"], source["pipe_lin_ay"], source["pipe_lin_az"]
         raw_gx, raw_gy, raw_gz = source["pipe_body_gx"], source["pipe_body_gy"], source["pipe_body_gz"]
     elif _has_all(source, ["bmi_acc_x_g", "bmi_acc_y_g", "bmi_acc_z_g", "bmi_gyr_x_dps", "bmi_gyr_y_dps", "bmi_gyr_z_dps"]):

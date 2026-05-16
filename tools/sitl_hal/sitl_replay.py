@@ -7,7 +7,7 @@ using the Level 1 sensor-frame channels logged by the firmware:
 
   bmi_acc/gyr physical pre-pipeline -> axis remap -> ellipsoid -> rotate_3d
             -> mounting bias -> VGPL + Madgwick
-            -> gravity removal -> ZARU -> ESKF 5D -> end-of-pipe EMA
+            -> gravity removal -> ZARU -> ESKF 5D -> end-of-pipe Butterworth2
 
 Input can be either:
   - a CSV produced by `tools/bin_to_csv.py`
@@ -71,7 +71,11 @@ G_ACCEL = 9.80665
 EARTH_RADIUS_M = 6371000.0
 DT_DEFAULT = 0.02
 
-ALPHA = 0.06
+BUTTER_B0 = 0.007820208
+BUTTER_B1 = 0.015640416
+BUTTER_B2 = 0.007820208
+BUTTER_A1 = -1.734725769
+BUTTER_A2 = 0.766006601
 VAR_BUF_SIZE = 50
 LEGACY_VAR_STILLNESS_GZ_THRESHOLD = 0.25
 LEGACY_VAR_STILLNESS_GXY_THRESHOLD = 0.35
@@ -146,6 +150,39 @@ REQUIRED_COLUMNS = {
 HEADER_UNIT_RE = re.compile(r"\s*\([^)]*\)\s*$")
 CALIB_RE = re.compile(r"^#\s*(CALIB_BOOT|CALIB_UPDATE):\s*(.*)$")
 CALIB_KV_RE = re.compile(r"([a-z_]+)=([+-]?(?:\d+(?:\.\d*)?|\.\d+))")
+
+
+class BiquadLowPass2:
+    def __init__(self) -> None:
+        self.x1 = 0.0
+        self.x2 = 0.0
+        self.y1 = 0.0
+        self.y2 = 0.0
+        self.seeded = False
+
+    def seed(self, value: float) -> None:
+        self.x1 = value
+        self.x2 = value
+        self.y1 = value
+        self.y2 = value
+        self.seeded = True
+
+    def update(self, value: float) -> float:
+        if not self.seeded:
+            self.seed(value)
+            return value
+        y = (
+            BUTTER_B0 * value
+            + BUTTER_B1 * self.x1
+            + BUTTER_B2 * self.x2
+            - BUTTER_A1 * self.y1
+            - BUTTER_A2 * self.y2
+        )
+        self.x2 = self.x1
+        self.x1 = value
+        self.y2 = self.y1
+        self.y1 = y
+        return y
 
 
 @dataclass
@@ -666,10 +703,10 @@ class SITLReplayer:
             gps_soft_cap_m=self.gps_soft_cap_m,
         )
         self.ahrs = MadgwickAHRS()
-        self.reset_dynamic_state(seed_next_ema=False)
+        self.reset_dynamic_state(seed_next_butter=False)
         self.total_rows = 0
 
-    def reset_dynamic_state(self, seed_next_ema: bool) -> None:
+    def reset_dynamic_state(self, seed_next_butter: bool) -> None:
         self.gz_var_buf = [0.0] * VAR_BUF_SIZE
         self.gx_var_buf = [0.0] * VAR_BUF_SIZE
         self.gy_var_buf = [0.0] * VAR_BUF_SIZE
@@ -700,15 +737,15 @@ class SITLReplayer:
         self.prev_v_eskf = 0.0
         self.last_timestamp_us = 0
 
-        self.prev_ax = 0.0
-        self.prev_ay = 0.0
-        self.prev_az = 0.0
         self.nav_ax_buf: List[float] = []
         self.nav_ay_buf: List[float] = []
-        self.prev_gx = 0.0
-        self.prev_gy = 0.0
-        self.prev_gz = 0.0
-        self.first_sample_after_recalib = seed_next_ema
+        self.butter_ax_filter = BiquadLowPass2()
+        self.butter_ay_filter = BiquadLowPass2()
+        self.butter_az_filter = BiquadLowPass2()
+        self.butter_gx_filter = BiquadLowPass2()
+        self.butter_gy_filter = BiquadLowPass2()
+        self.butter_gz_filter = BiquadLowPass2()
+        self.first_sample_after_recalib = seed_next_butter
 
         self.gps_origin_set = False
         self.gps_origin_lat = 0.0
@@ -733,7 +770,7 @@ class SITLReplayer:
     def apply_calibration(self, calibration: CalibrationState, is_update: bool) -> None:
         self.calibration = calibration
         if is_update or self.total_rows == 0:
-            self.reset_dynamic_state(seed_next_ema=True)
+            self.reset_dynamic_state(seed_next_butter=True)
 
     def process_row(self, row: Dict[str, float]) -> Dict[str, float]:
         if self.calibration is None:
@@ -934,28 +971,34 @@ class SITLReplayer:
         tb_gy = self.thermal_bias_gy
         tb_gz = self.thermal_bias_gz
 
-        ema_ax = ALPHA * lin_ax + (1.0 - ALPHA) * self.prev_ax
-        ema_ay = ALPHA * lin_ay + (1.0 - ALPHA) * self.prev_ay
-        ema_az = ALPHA * lin_az + (1.0 - ALPHA) * self.prev_az
-        ema_gx = ALPHA * (gx_r - tb_gx) + (1.0 - ALPHA) * self.prev_gx
-        ema_gy = ALPHA * (gy_r - tb_gy) + (1.0 - ALPHA) * self.prev_gy
-        ema_gz = ALPHA * (gz_r - tb_gz) + (1.0 - ALPHA) * self.prev_gz
+        butter_in_ax = lin_ax
+        butter_in_ay = lin_ay
+        butter_in_az = lin_az
+        butter_in_gx = gx_r - tb_gx
+        butter_in_gy = gy_r - tb_gy
+        butter_in_gz = gz_r - tb_gz
 
         if self.first_sample_after_recalib:
-            ema_ax = lin_ax
-            ema_ay = lin_ay
-            ema_az = lin_az
-            ema_gx = gx_r - tb_gx
-            ema_gy = gy_r - tb_gy
-            ema_gz = gz_r - tb_gz
+            self.butter_ax_filter.seed(butter_in_ax)
+            self.butter_ay_filter.seed(butter_in_ay)
+            self.butter_az_filter.seed(butter_in_az)
+            self.butter_gx_filter.seed(butter_in_gx)
+            self.butter_gy_filter.seed(butter_in_gy)
+            self.butter_gz_filter.seed(butter_in_gz)
+            butter_ax = butter_in_ax
+            butter_ay = butter_in_ay
+            butter_az = butter_in_az
+            butter_gx = butter_in_gx
+            butter_gy = butter_in_gy
+            butter_gz = butter_in_gz
             self.first_sample_after_recalib = False
-
-        self.prev_ax = ema_ax
-        self.prev_ay = ema_ay
-        self.prev_az = ema_az
-        self.prev_gx = ema_gx
-        self.prev_gy = ema_gy
-        self.prev_gz = ema_gz
+        else:
+            butter_ax = self.butter_ax_filter.update(butter_in_ax)
+            butter_ay = self.butter_ay_filter.update(butter_in_ay)
+            butter_az = self.butter_az_filter.update(butter_in_az)
+            butter_gx = self.butter_gx_filter.update(butter_in_gx)
+            butter_gy = self.butter_gy_filter.update(butter_in_gy)
+            butter_gz = self.butter_gz_filter.update(butter_in_gz)
 
         sitl_flags = 0
         if is_stationary:
@@ -983,12 +1026,18 @@ class SITLReplayer:
             "sitl_raw_gx": gx_r,
             "sitl_raw_gy": gy_r,
             "sitl_raw_gz": gz_r,
-            "sitl_ax": ema_ax,
-            "sitl_ay": ema_ay,
-            "sitl_az": ema_az,
-            "sitl_gx": ema_gx,
-            "sitl_gy": ema_gy,
-            "sitl_gz": ema_gz,
+            "sitl_butter_ax": butter_ax,
+            "sitl_butter_ay": butter_ay,
+            "sitl_butter_az": butter_az,
+            "sitl_butter_gx": butter_gx,
+            "sitl_butter_gy": butter_gy,
+            "sitl_butter_gz": butter_gz,
+            "sitl_ax": butter_ax,
+            "sitl_ay": butter_ay,
+            "sitl_az": butter_az,
+            "sitl_gx": butter_gx,
+            "sitl_gy": butter_gy,
+            "sitl_gz": butter_gz,
             "sitl_kf_x": self.eskf.x[0],
             "sitl_kf_y": self.eskf.x[1],
             "sitl_kf_vel": self.eskf.speed_ms(),
@@ -1265,12 +1314,12 @@ def make_output_writer(path: Path) -> Tuple[TextIO, csv.writer]:
             "sitl_raw_gx",
             "sitl_raw_gy",
             "sitl_raw_gz",
-            "sitl_ax",
-            "sitl_ay",
-            "sitl_az",
-            "sitl_gx",
-            "sitl_gy",
-            "sitl_gz",
+            "sitl_butter_ax",
+            "sitl_butter_ay",
+            "sitl_butter_az",
+            "sitl_butter_gx",
+            "sitl_butter_gy",
+            "sitl_butter_gz",
             "sitl_kf_x",
             "sitl_kf_y",
             "sitl_kf_vel",
@@ -1294,12 +1343,12 @@ def make_output_writer(path: Path) -> Tuple[TextIO, csv.writer]:
             "err_raw_gx",
             "err_raw_gy",
             "err_raw_gz",
-            "err_ax",
-            "err_ay",
-            "err_az",
-            "err_gx",
-            "err_gy",
-            "err_gz",
+            "err_butter_ax",
+            "err_butter_ay",
+            "err_butter_az",
+            "err_butter_gx",
+            "err_butter_gy",
+            "err_butter_gz",
             "err_kf_x",
             "err_kf_y",
             "err_kf_vel",
@@ -1358,12 +1407,12 @@ def write_output_row(writer: csv.writer,
             replay["sitl_raw_gx"],
             replay["sitl_raw_gy"],
             replay["sitl_raw_gz"],
-            replay["sitl_ax"],
-            replay["sitl_ay"],
-            replay["sitl_az"],
-            replay["sitl_gx"],
-            replay["sitl_gy"],
-            replay["sitl_gz"],
+            replay["sitl_butter_ax"],
+            replay["sitl_butter_ay"],
+            replay["sitl_butter_az"],
+            replay["sitl_butter_gx"],
+            replay["sitl_butter_gy"],
+            replay["sitl_butter_gz"],
             replay["sitl_kf_x"],
             replay["sitl_kf_y"],
             replay["sitl_kf_vel"],
@@ -1387,12 +1436,12 @@ def write_output_row(writer: csv.writer,
             replay["sitl_raw_gx"] - row["raw_gx"],
             replay["sitl_raw_gy"] - row["raw_gy"],
             replay["sitl_raw_gz"] - row["raw_gz"],
-            replay["sitl_ax"] - row["ax"],
-            replay["sitl_ay"] - row["ay"],
-            replay["sitl_az"] - row["az"],
-            replay["sitl_gx"] - row["gx"],
-            replay["sitl_gy"] - row["gy"],
-            replay["sitl_gz"] - row["gz"],
+            replay["sitl_butter_ax"] - row["ax"],
+            replay["sitl_butter_ay"] - row["ay"],
+            replay["sitl_butter_az"] - row["az"],
+            replay["sitl_butter_gx"] - row["gx"],
+            replay["sitl_butter_gy"] - row["gy"],
+            replay["sitl_butter_gz"] - row["gz"],
             replay["sitl_kf_x"] - row["kf_x"],
             replay["sitl_kf_y"] - row["kf_y"],
             replay["sitl_kf_vel"] - row["kf_vel"],

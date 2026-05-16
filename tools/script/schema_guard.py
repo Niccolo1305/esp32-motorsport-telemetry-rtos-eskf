@@ -22,6 +22,14 @@ V5_COLUMNS = {
     "bmm_ut_x",
     "fifo_frames_drained",
 }
+BUTTER_COLUMNS = {
+    "butter_ax",
+    "butter_ay",
+    "butter_az",
+    "butter_gx",
+    "butter_gy",
+    "butter_gz",
+}
 
 HEADER_UNIT_RE = re.compile(r"\s*\([^)]*\)\s*$")
 
@@ -35,4 +43,8 @@ def reject_v5_columns(columns: Iterable[str], path: str | Path) -> None:
     if any(col in normalized for col in V5_COLUMNS):
         raise SystemExit(
             f"{path}: Telemetria v5 CSV detected. This legacy tools/script analysis is intentionally limited to <= v4 logs."
+        )
+    if any(col in normalized for col in BUTTER_COLUMNS):
+        raise SystemExit(
+            f"{path}: Butterworth CSV detected. This legacy tools/script analysis expects dated EMA-era schemas; use tools/sitl_hal or dashboard tooling instead."
         )

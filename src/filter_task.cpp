@@ -4,15 +4,15 @@
 // Math pipeline: calibration → alignment → ZARU→gyro rad (corrected) →
 // VGPL centripetal compensation → Madgwick (corrected gyro) → gravity removal →
 // Statistical Engine (raw variance) → ZARU update → ESKF 5D (corrected gz) →
-// ESKF 6D shadow (raw gz) → NHC → GPS correct → EMA (end-of-pipe) → SD.
+// ESKF 6D shadow (raw gz) → NHC → GPS correct → Butterworth presentation → SD.
 //
-// Architecture: "End-of-Pipe EMA" + "ZARU-to-Madgwick" (v1.3.5)
+// Architecture: "End-of-Pipe Butterworth" + "ZARU-to-Madgwick".
 //
-// Three structural fixes over v1.3.4:
+// Structural boundaries:
 //
-// 1. End-of-Pipe EMA: the EMA filter is an aesthetic layer for display/MQTT/SD
+// 1. End-of-Pipe Butterworth: the presentation filter is display/MQTT/SD only
 //    and must NOT contaminate the ZARU detection path. Variance buffers feed on
-//    raw gyro so the EMA's ~313 ms decay tail cannot trigger false stationary
+//    raw gyro so presentation smoothing cannot trigger false stationary
 //    detection after an abrupt stop.
 //
 // 2. ZARU-to-Madgwick ("Bias Starvation" fix): thermal_bias_gx/gy/gz from the
@@ -25,7 +25,7 @@
 //    Raw values are preserved as gz_rad_raw for ESKF 6D shadow comparison.
 //
 // 3. Straight-Line ZARU zero-latency gate: gz_gate uses raw corrected
-//    (gz_r - thermal_bias_gz) instead of EMA, closing instantly on corner entry.
+//    (gz_r - thermal_bias_gz) instead of presentation output, closing instantly on corner entry.
 #include "filter_task.h"
 
 #include "globals.h"
@@ -83,6 +83,44 @@ static constexpr float MOUNT_YAW_BOOT_MIN_QUALITY = 0.65f;
 static constexpr float MOUNT_YAW_BOOT_MIN_LONG_CORR = 0.45f;
 static constexpr float MOUNT_YAW_BOOT_MAX_OBS_STABILITY_STD_DEG = 15.0f;
 static constexpr float MOUNT_YAW_BOOT_MAX_CONSENSUS_STD_DEG = 8.0f;
+
+struct BiquadLowPass2 {
+  float x1 = 0.0f;
+  float x2 = 0.0f;
+  float y1 = 0.0f;
+  float y2 = 0.0f;
+  bool seeded = false;
+
+  float update(float x) {
+    if (!seeded) {
+      seed(x);
+      return x;
+    }
+    const float y = BUTTER_B0 * x + BUTTER_B1 * x1 + BUTTER_B2 * x2
+                  - BUTTER_A1 * y1 - BUTTER_A2 * y2;
+    x2 = x1;
+    x1 = x;
+    y2 = y1;
+    y1 = y;
+    return y;
+  }
+
+  void seed(float x) {
+    x1 = x;
+    x2 = x;
+    y1 = x;
+    y2 = x;
+    seeded = true;
+  }
+
+  void reset() {
+    x1 = 0.0f;
+    x2 = 0.0f;
+    y1 = 0.0f;
+    y2 = 0.0f;
+    seeded = false;
+  }
+};
 
 struct MountYawWindow {
   bool active = false;
@@ -994,6 +1032,12 @@ void Task_Filter(void *pvParameters) {
   float prev_cent_x = 0.0f;      // v1.4.1: VGPL lateral rate limiter state
   float prev_long_y = 0.0f;      // v1.4.1: VGPL longitudinal rate limiter state
   float prev_v_eskf = 0.0f;      // v1.4.1: previous velocity for dv/dt
+  BiquadLowPass2 butter_ax_filter;
+  BiquadLowPass2 butter_ay_filter;
+  BiquadLowPass2 butter_az_filter;
+  BiquadLowPass2 butter_gx_filter;
+  BiquadLowPass2 butter_gy_filter;
+  BiquadLowPass2 butter_gz_filter;
 #ifdef USE_BMI270
   uint32_t imu_stale_consecutive = 0;
 #endif
@@ -1036,21 +1080,13 @@ void Task_Filter(void *pvParameters) {
 
       // ── PHASE 1: First telemetry_mutex — Steps 1-6 only ─────────────────
       // Scope: calibration → gravity removal.
-      // EMA is no longer computed here (moved to end-of-pipe after ZARU).
-      // prev_* globals are read into locals so the EMA can be computed later
-      // without holding the mutex. Writing back to prev_* happens in Phase 4.
+      // Presentation smoothing is computed end-of-pipe after ZARU/ESKF/NHC.
       //
       // AUDIT-NOTE (CROSS-MINOR-3, updated v1.3.5): mutex now covers Steps 1-6
       // only (~300 µs, ~1.5% of 20 ms period). Previously held through Steps 7-8
-      // (EMA + variance, ~500 µs). The remaining concern is calibrate_alignment(),
-      // which zeroes prev_ax..prev_gz under telemetry_mutex. If it runs between
-      // Phase 1 (read) and Phase 4 (write-back), Phase 4 would overwrite those
-      // zeros with EMA values from the stale locals. This is safe: calibrate_
-      // alignment() also sets recalibration_pending=true, which is checked at
-      // the top of the next iteration and triggers a full reset (including
-      // prev_* → 0). One-cycle inconsistency at 50 Hz — not observable.
-      float local_prev_ax, local_prev_ay, local_prev_az;
-      float local_prev_gx, local_prev_gy, local_prev_gz;
+      // (presentation smoothing + variance, ~500 µs). calibrate_alignment()
+      // also sets recalibration_pending=true, so the next iteration resets all
+      // navigation and presentation-filter state before packing a new record.
       uint8_t lap_snap;
 
       // Intermediate pipeline results declared here; used across phases.
@@ -1092,6 +1128,12 @@ void Task_Filter(void *pvParameters) {
           prev_cent_x = 0.0f;  // VGPL: reset stale centripetal compensation
           prev_long_y = 0.0f;  // VGPL: reset stale longitudinal compensation
           prev_v_eskf = 0.0f;
+          butter_ax_filter.reset();
+          butter_ay_filter.reset();
+          butter_az_filter.reset();
+          butter_gx_filter.reset();
+          butter_gy_filter.reset();
+          butter_gz_filter.reset();
           reset_mount_yaw_state(mount_yaw);
           gps_gate = GpsCorrectionGateState{};
           eskf_internal_reject_count = 0;
@@ -1159,6 +1201,12 @@ void Task_Filter(void *pvParameters) {
           prev_long_y = 0.0f;
           ahrs.q[0] = 1.0f; ahrs.q[1] = 0.0f; ahrs.q[2] = 0.0f; ahrs.q[3] = 0.0f;
           first_sample_after_recalib = true;
+          butter_ax_filter.reset();
+          butter_ay_filter.reset();
+          butter_az_filter.reset();
+          butter_gx_filter.reset();
+          butter_gy_filter.reset();
+          butter_gz_filter.reset();
           mount_yaw.boot.just_activated = false;
         }
 
@@ -1252,12 +1300,6 @@ void Task_Filter(void *pvParameters) {
         lin_az = az_r - grav_z;
         update_mount_yaw_imu_history(mount_yaw, data.timestamp_us, lin_ax, lin_ay, lin_az);
 
-        // Snapshot prev_* EMA globals for use in the end-of-pipe EMA (Phase 3).
-        // calibrate_alignment() may zero these between now and Phase 4 write-back,
-        // but recalibration_pending ensures the next iteration resets everything.
-        local_prev_ax = prev_ax; local_prev_ay = prev_ay; local_prev_az = prev_az;
-        local_prev_gx = prev_gx; local_prev_gy = prev_gy; local_prev_gz = prev_gz;
-
         // lap_snap captured inside the lock: consistent with the pipeline cycle.
         lap_snap = (system_state == 2) ? 1 : 0;
 
@@ -1272,14 +1314,12 @@ void Task_Filter(void *pvParameters) {
 
       // ── STEP 8: Statistical ZUPT/ZARU Engine — 3-axis (v1.2.1 / v1.3.5) ──
       // Circular buffer of 50 samples (1 s at 50 Hz) of RAW vehicle-frame gyro.
-      // v1.3.5 change: buffers now store gz_r/gx_r/gy_r (post-rotation, pre-EMA)
-      // instead of ema_gz/gx/gy. This eliminates the ~313 ms EMA decay lag from
-      // the detection path: when the vehicle stops abruptly, raw variance spikes
-      // immediately while EMA variance would have remained low for ~1.6 s
-      // (causing false stationary detection and a spurious thermal_bias capture).
+      // v1.3.5 change: buffers now store gz_r/gx_r/gy_r (post-rotation,
+      // pre-presentation). This keeps smoothing lag out of the detection path:
+      // when the vehicle stops abruptly, raw variance spikes immediately.
       // gx/gy share the same index and warm-up counter: no extra overhead.
       // NOTE: buffers are pre-ZARU-correction to avoid feedback loop — thermal_bias
-      // is subtracted only at the output (EMA layer / display / log), not here.
+      // is subtracted only at the presentation output / display / log, not here.
       //
       // Warm-up: variance is not computed until gz_var_count >= VAR_BUF_SIZE
       // → prevents false positives from a partially filled buffer.
@@ -1328,8 +1368,8 @@ void Task_Filter(void *pvParameters) {
       //   - gz_rad: yaw angular rate [rad/s] (raw gyro in vehicle frame)
       //     corrected by the learned thermal_bias_gz.
       //
-      // EMA is computed AFTER all navigation updates (end-of-pipe). It does NOT
-      // enter the ESKF and is used exclusively for display/MQTT/SD logging.
+      // Butterworth is computed AFTER all navigation updates (end-of-pipe). It
+      // does not enter the ESKF and is display/MQTT/SD logging only.
       // ──────────────────────────────────────────────────────────────────────
 
       // GPS snapshot for SD and ESKF
@@ -1425,7 +1465,7 @@ void Task_Filter(void *pvParameters) {
       // When the vehicle is stationary, the raw gz buffer mean represents
       // the residual thermal drift of gyro Z. This value is saved as
       // thermal_bias_gz and subtracted from gz_rad before feeding the ESKF
-      // and from gz_r before feeding the end-of-pipe EMA.
+      // and from gz_r before feeding the end-of-pipe Butterworth filter.
       // In motion, the bias learned at standstill keeps compensating the
       // drift without introducing latency.
       if (is_stationary) {
@@ -1442,12 +1482,12 @@ void Task_Filter(void *pvParameters) {
       // consistency with the static ZARU path.
       //
       // Previous version (v0.9.7): only lat + gz gates, no COG.
-      // BUG-3 fixes preserved: speed 40 km/h, lin_ax (not ema_ax).
+      // BUG-3 fixes preserved: speed 40 km/h, lin_ax (not presentation ax).
       // v1.3.2: cog_ref_east/north/prev_cog_rad/has_cog_ref/cog_variation
       // are now function-scope (moved for recalibration reset support).
       // v1.3.5: gz_gate uses RAW corrected data (gz_r - thermal_bias_gz) for
-      // zero-latency response. The previous version used EMA-filtered data
-      // (local_prev_gz, τ≈313 ms delay) which held the gate open for several
+      // zero-latency response. The previous version used smoothed data
+      // with phase delay, which held the gate open for several
       // hundred ms after corner entry, allowing the ZARU to capture the
       // initial yaw rate as kinematic contamination in the thermal bias.
       // A spurious single-sample closure from MEMS noise in a straight is
@@ -1727,65 +1767,81 @@ void Task_Filter(void *pvParameters) {
         );
       }
 
-      // ── PHASE 3: End-of-pipe EMA ───────────────────────────────────────────
+      // ── PHASE 3: End-of-pipe Butterworth ───────────────────────────────────
       // Computed AFTER all ZARU updates so that:
       //   (a) thermal_bias_* reflects the bias learned in THIS cycle.
-      //   (b) Gyro EMA input is ZARU-corrected (gz_r - tb_gz), centering the
-      //       EMA output on zero. The EMA state (prev_gz) then tracks the
-      //       corrected signal. When the bias changes (e.g., at a stop), the
-      //       EMA smoothly transitions without carrying the old bias in its
-      //       internal state — masking the bias step-change in logged data.
+      //   (b) Gyro Butterworth input is ZARU-corrected (gz_r - tb_gz),
+      //       centering presentation output on zero. When the bias changes
+      //       (e.g., at a stop), the filter state follows the corrected signal.
       //   (c) No separate "- tb_*" subtraction is needed at output.
       //
       // tb_* snapshot taken HERE (after ZARU) so the logged tbias_gz field
-      // reflects the bias actually used to correct the EMA in this sample
+      // reflects the bias actually used to correct presentation gyro in this sample
       // (improvement over v1.3.4 which snapshotted before ZARU).
       const float tb_gx = thermal_bias_gx;
       const float tb_gy = thermal_bias_gy;
       const float tb_gz = thermal_bias_gz;
 
-      float ema_ax = alpha * lin_ax          + (1.0f - alpha) * local_prev_ax;
-      float ema_ay = alpha * lin_ay          + (1.0f - alpha) * local_prev_ay;
-      float ema_az = alpha * lin_az          + (1.0f - alpha) * local_prev_az;
-      float ema_gx = alpha * (gx_r - tb_gx) + (1.0f - alpha) * local_prev_gx;
-      float ema_gy = alpha * (gy_r - tb_gy) + (1.0f - alpha) * local_prev_gy;
-      float ema_gz = alpha * (gz_r - tb_gz) + (1.0f - alpha) * local_prev_gz;
+      const float butter_in_ax = lin_ax;
+      const float butter_in_ay = lin_ay;
+      const float butter_in_az = lin_az;
+      const float butter_in_gx = gx_r - tb_gx;
+      const float butter_in_gy = gy_r - tb_gy;
+      const float butter_in_gz = gz_r - tb_gz;
 
-      // Capture before EMA seeding clears it (Phase 5 needs it for zaru_flags bit 3)
+      float butter_ax;
+      float butter_ay;
+      float butter_az;
+      float butter_gx;
+      float butter_gy;
+      float butter_gz;
+
+      // Capture before Butterworth seeding clears it (Phase 5 needs bit 3)
       const bool recalib_marker = first_sample_after_recalib;
 
-      // v1.3.2: seed EMA from first raw sample after recalibration to prevent
-      // 313 ms decay transient. After recalib, thermal_bias_* = 0.0f so
+      // Seed Butterworth from the first raw sample after recalibration to avoid
+      // a startup transient. After recalib, thermal_bias_* = 0.0f so
       // (gx_r - tb_gx) = gx_r — same seeding value as before.
       if (first_sample_after_recalib) {
-        ema_ax = lin_ax;       ema_ay = lin_ay;       ema_az = lin_az;
-        ema_gx = gx_r - tb_gx; ema_gy = gy_r - tb_gy; ema_gz = gz_r - tb_gz;
+        butter_ax_filter.seed(butter_in_ax);
+        butter_ay_filter.seed(butter_in_ay);
+        butter_az_filter.seed(butter_in_az);
+        butter_gx_filter.seed(butter_in_gx);
+        butter_gy_filter.seed(butter_in_gy);
+        butter_gz_filter.seed(butter_in_gz);
+        butter_ax = butter_in_ax;
+        butter_ay = butter_in_ay;
+        butter_az = butter_in_az;
+        butter_gx = butter_in_gx;
+        butter_gy = butter_in_gy;
+        butter_gz = butter_in_gz;
         first_sample_after_recalib = false;
+      } else {
+        butter_ax = butter_ax_filter.update(butter_in_ax);
+        butter_ay = butter_ay_filter.update(butter_in_ay);
+        butter_az = butter_az_filter.update(butter_in_az);
+        butter_gx = butter_gx_filter.update(butter_in_gx);
+        butter_gy = butter_gy_filter.update(butter_in_gy);
+        butter_gz = butter_gz_filter.update(butter_in_gz);
       }
 
-      // ── PHASE 4: Merged telemetry_mutex — EMA state + shared_telemetry + ESKF
+      // ── PHASE 4: Merged telemetry_mutex — presentation + shared_telemetry + ESKF
       // Merges the former "second mutex" (ESKF output, old lines 459-465) with
-      // the EMA state write-back and shared_telemetry update.
+      // the presentation-filter publish and shared_telemetry update.
       //
       // AUDIT-NOTE (PIPELINE-MINOR-3, updated v1.3.5): 2 ms timeout means if
-      // loop() holds the mutex (e.g. during MQTT reconnect), both EMA state
+      // loop() holds the mutex (e.g. during MQTT reconnect), both presentation
       // and ESKF output are not written to shared_telemetry for that cycle.
       // Display and MQTT show stale data for one 20 ms frame. Self-heals next
-      // cycle. Also: if timeout fires, prev_* globals are not updated — next
-      // cycle computes EMA from prev_* that are 40 ms old instead of 20 ms.
-      // Benign at 50 Hz.
+      // cycle. The Task_Filter-local Butterworth state has already advanced.
       if (xSemaphoreTake(telemetry_mutex, pdMS_TO_TICKS(2)) == pdTRUE) {
-        // Write-back EMA state to globals (feeds next cycle and calibrate_alignment)
-        prev_ax = ema_ax; prev_ay = ema_ay; prev_az = ema_az;
-        prev_gx = ema_gx; prev_gy = ema_gy; prev_gz = ema_gz;
-
-        // EMA values are already ZARU-corrected — no "- tb_*" needed at output
-        shared_telemetry.ema_ax = ema_ax;
-        shared_telemetry.ema_ay = ema_ay;
-        shared_telemetry.ema_az = ema_az;
-        shared_telemetry.ema_gx = ema_gx;
-        shared_telemetry.ema_gy = ema_gy;
-        shared_telemetry.ema_gz = ema_gz;
+        // Butterworth values are already ZARU-corrected; no "- tb_*" at output.
+        shared_telemetry.butter_ax = butter_ax;
+        shared_telemetry.butter_ay = butter_ay;
+        shared_telemetry.butter_az = butter_az;
+        shared_telemetry.butter_gx = butter_gx;
+        shared_telemetry.butter_gy = butter_gy;
+        shared_telemetry.butter_gz = butter_gz;
 
         // ESKF output (merged from former second mutex)
         shared_telemetry.kf_x = eskf.px();
@@ -1804,13 +1860,13 @@ void Task_Filter(void *pvParameters) {
         BREADCRUMB_MARK(BREADCRUMB_PHASE_FILTER_SD_ENQUEUE, record_seq);
         TelemetryRecord rec = {};
         rec.timestamp_us = data.timestamp_us;
-        // EMA accel/gyro: already ZARU-corrected (no "- tb_*" subtraction needed)
-        rec.ax = ema_ax;
-        rec.ay = ema_ay;
-        rec.az = ema_az;
-        rec.gx = ema_gx;
-        rec.gy = ema_gy;
-        rec.gz = ema_gz;
+        // Butterworth accel/gyro: already ZARU-corrected; no "- tb_*" output subtraction.
+        rec.ax = butter_ax;
+        rec.ay = butter_ay;
+        rec.az = butter_az;
+        rec.gx = butter_gx;
+        rec.gy = butter_gy;
+        rec.gz = butter_gz;
         rec.temp_c = data.temp_c;
         rec.lap = lap_snap;
         // GPS: use the static cache last_gps (already updated above)
@@ -1826,7 +1882,7 @@ void Task_Filter(void *pvParameters) {
         rec.kf_vel = eskf.speed_ms();
         rec.kf_heading = eskf.heading();
         // Zero-latency pipeline channels: gravity-removed linear accel and
-        // vehicle-frame gyro before EMA.
+        // vehicle-frame gyro before presentation filtering.
         rec.pipe_lin_ax = lin_ax; rec.pipe_lin_ay = lin_ay; rec.pipe_lin_az = lin_az;
         rec.pipe_body_gx = gx_r;  rec.pipe_body_gy = gy_r;  rec.pipe_body_gz = gz_r;
         // ESKF 6D Shadow (v0.9.8)
@@ -1842,7 +1898,7 @@ void Task_Filter(void *pvParameters) {
         if (nhc_active)          flags |= 0x04; // bit 2: NHC
         if (recalib_marker)      flags |= 0x08; // bit 3: Recalibration
         rec.zaru_flags = flags;
-        rec.tbias_gz = tb_gz; // post-ZARU snapshot (consistent with EMA correction)
+        rec.tbias_gz = tb_gz; // post-ZARU snapshot (consistent with presentation correction)
 #ifdef USE_BMI270
         rec.bmi_post_lpf20_prepipe_ax = data.bmi_post_lpf20_prepipe_ax;
         rec.bmi_post_lpf20_prepipe_ay = data.bmi_post_lpf20_prepipe_ay;

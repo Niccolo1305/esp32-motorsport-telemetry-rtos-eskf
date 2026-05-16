@@ -8,7 +8,8 @@ v5 AtomS3R logs renamed the old mixed-semantics columns into explicit groups:
   - bmi_raw_* / bmm_raw_* / ...   : acquisition truth
 
 Older SITL/static tools still use legacy names:
-  - raw_*     : zero-latency post-pipeline/pre-EMA outputs (pipe_*)
+  - ax/gx      : presentation-filter outputs (now butter_*)
+  - raw_*     : zero-latency post-pipeline/pre-presentation outputs (pipe_*)
   - sensor_*  : pre-pipeline physical IMU channels remapped to pipeline axes
 
 This module keeps the tooling honest by generating those aliases only inside
@@ -36,6 +37,24 @@ LEGACY_SENSOR_AXES = {
     "sensor_gx",
     "sensor_gy",
     "sensor_gz",
+}
+
+PRESENTATION_AXES = {
+    "ax",
+    "ay",
+    "az",
+    "gx",
+    "gy",
+    "gz",
+}
+
+BUTTER_PRESENTATION_AXES = {
+    "butter_ax",
+    "butter_ay",
+    "butter_az",
+    "butter_gx",
+    "butter_gy",
+    "butter_gz",
 }
 
 V5_PIPE_AXES = {
@@ -77,6 +96,8 @@ def remap_chip_axes_to_pipeline(x: float, y: float, z: float) -> Tuple[float, fl
 
 def expand_available_columns(columns: Iterable[str]) -> Set[str]:
     available = set(columns)
+    if BUTTER_PRESENTATION_AXES.issubset(available):
+        available.update(PRESENTATION_AXES)
     if V5_PIPE_AXES.issubset(available):
         available.update(LEGACY_RAW_AXES)
     if V5_SENSOR_AXES.issubset(available):
@@ -98,6 +119,15 @@ def ellipsoid_calibration_for_columns(
 
 def apply_runtime_aliases(row: MutableMapping[str, float]) -> MutableMapping[str, float]:
     """Add analysis-only compatibility aliases for v5 rows."""
+    if "ax" not in row and "butter_ax" in row:
+        row["ax"] = row["butter_ax"]
+        row["ay"] = row["butter_ay"]
+        row["az"] = row["butter_az"]
+    if "gx" not in row and "butter_gx" in row:
+        row["gx"] = row["butter_gx"]
+        row["gy"] = row["butter_gy"]
+        row["gz"] = row["butter_gz"]
+
     if "raw_ax" not in row and "pipe_lin_ax" in row:
         row["raw_ax"] = row["pipe_lin_ax"]
         row["raw_ay"] = row["pipe_lin_ay"]

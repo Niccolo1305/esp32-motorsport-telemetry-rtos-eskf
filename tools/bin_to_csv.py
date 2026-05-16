@@ -342,6 +342,64 @@ FMT_DEFAULT = FMT_122
 HEADER = HEADER_122
 COL_FMT = COL_FMT_122
 
+PRESENTATION_FILTER_NOTE = (
+    "# FILTER_NOTE: presentation_filter=butterworth2_lowpass "
+    "cutoff_hz=1.5 sample_hz=50"
+)
+CURRENT_BUTTER_FIRMWARE_MARKERS = ("v1.8.13", "v1.5.6", "butter")
+PRESENTATION_HEADER_RENAMES = {
+    "ax": "butter_ax",
+    "ay": "butter_ay",
+    "az": "butter_az",
+    "gx": "butter_gx",
+    "gy": "butter_gy",
+    "gz": "butter_gz",
+}
+
+
+def _base_col_name(name):
+    return name.split(' (', 1)[0].strip()
+
+
+def csv_output_headers(header_cols):
+    """Return emitted CSV headers while keeping decoder-internal names stable."""
+    output = []
+    for idx, name in enumerate(header_cols):
+        base = _base_col_name(name)
+        if 1 <= idx <= 6 and base in PRESENTATION_HEADER_RENAMES:
+            output.append(name.replace(base, PRESENTATION_HEADER_RENAMES[base], 1))
+        else:
+            output.append(name)
+    return output
+
+
+def is_butterworth_firmware_header(hdr):
+    if not hdr:
+        return False
+    fw = (hdr.get('firmware_version') or '').lower()
+    return any(marker in fw for marker in CURRENT_BUTTER_FIRMWARE_MARKERS)
+
+
+def dated_schema_warning_line(hdr):
+    if not hdr:
+        return (
+            "# SCHEMA_WARNING: no FileHeader detected; legacy/pre-Butterworth "
+            "BIN is outside current-script support and presentation slots may be EMA."
+        )
+    if not is_butterworth_firmware_header(hdr):
+        return (
+            "# SCHEMA_WARNING: firmware_header="
+            f"{hdr.get('firmware_version', 'unknown')} is pre-Butterworth or unknown; "
+            "current scripts emit butter_* columns but this capture is dated."
+        )
+    return None
+
+
+def warn_if_dated_schema(hdr):
+    warning = dated_schema_warning_line(hdr)
+    if warning:
+        print(f"  {YELLOW}{warning[2:]}{RESET}")
+
 def get_format(record_size, header_version=None):
     """Return (struct_fmt, header_list, col_fmt_list) for a given record size."""
     if record_size == 320:
@@ -369,7 +427,7 @@ def get_format(record_size, header_version=None):
     # Default: 122-byte format (also used for legacy files)
     return FMT_122, HEADER_122, COL_FMT_122
 
-HEADER_LINE = ','.join(HEADER) + '\n'
+HEADER_LINE = ','.join(csv_output_headers(HEADER)) + '\n'
 CSV_PREAMBLE_LINES = []
 
 # ── ANSI Colors ───────────────────────────────────────────────────────────────
@@ -689,6 +747,10 @@ def open_text_read(path):
 def build_csv_preamble_lines(hdr):
     """Build metadata comment lines that must appear before the CSV header."""
     lines = []
+    schema_warning = dated_schema_warning_line(hdr)
+    if schema_warning:
+        lines.append(schema_warning)
+    lines.append(PRESENTATION_FILTER_NOTE)
     if hdr and 'calibration' in hdr:
         c = hdr['calibration']
         lines.append(
@@ -780,10 +842,6 @@ def read_csv_preamble_and_header(csv_path):
 
 
 # ── Binary → CSV row conversion ───────────────────────────────────────────────
-
-def _base_col_name(name):
-    return name.split(' (', 1)[0].strip()
-
 
 def _field_indices(header_cols):
     return {_base_col_name(name): i for i, name in enumerate(header_cols)}
@@ -2271,8 +2329,11 @@ def main():
         if hdr:
             print(f"  Firmware: {hdr['firmware_version']}, record_size={hdr['record_size']}B")
             _, hdr_cols, _ = get_format(hdr['record_size'], hdr.get('header_version'))
-            HEADER_LINE = ','.join(hdr_cols) + '\n'
+            HEADER_LINE = ','.join(csv_output_headers(hdr_cols)) + '\n'
             CSV_PREAMBLE_LINES = build_csv_preamble_lines(hdr)
+        else:
+            CSV_PREAMBLE_LINES = build_csv_preamble_lines(None)
+        warn_if_dated_schema(hdr)
         print(f"  Direct conversion: {bin_file} → {csv_file}")
         layout = bin_logical_layout(bin_file)
         total = bin_record_count(bin_file, layout)
@@ -2314,11 +2375,13 @@ def main():
                   f"start={hdr['start_time_ms']}ms")
             # Update HEADER_LINE for the detected record format
             _, hdr_cols, _ = get_format(hdr['record_size'], hdr.get('header_version'))
-            HEADER_LINE = ','.join(hdr_cols) + '\n'
+            HEADER_LINE = ','.join(csv_output_headers(hdr_cols)) + '\n'
             CSV_PREAMBLE_LINES = build_csv_preamble_lines(hdr)
+            warn_if_dated_schema(hdr)
         else:
             print(f"  {DIM}Legacy file (no header) — record_size={CHUNK_SIZE_DEFAULT}B{RESET}")
-            CSV_PREAMBLE_LINES = []
+            CSV_PREAMBLE_LINES = build_csv_preamble_lines(None)
+            warn_if_dated_schema(None)
 
         layout = bin_logical_layout(input_file)
         total_lines = bin_record_count(input_file, layout)

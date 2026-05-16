@@ -150,10 +150,6 @@ float bias_ax = 0.0f, bias_ay = 0.0f, bias_az = 0.0f;
 float mag_ref_ut_x = 0.0f, mag_ref_ut_y = 0.0f, mag_ref_ut_z = 0.0f;
 bool mag_ref_valid = false;
 
-// ── EMA Previous Values ────────────────────────────────────────────────────
-float prev_ax = 0.0f, prev_ay = 0.0f, prev_az = 0.0f;
-float prev_gx = 0.0f, prev_gy = 0.0f, prev_gz = 0.0f;
-
 // ── Peripheral Objects ─────────────────────────────────────────────────────
 // wifiClient must be defined before mqttClient (constructor dependency).
 WiFiClient wifiClient;

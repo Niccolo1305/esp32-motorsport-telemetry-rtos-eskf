@@ -107,12 +107,6 @@ void calibrate_alignment(IImuProvider* imu) {
       mag_ref_valid = false;
     }
 
-    prev_ax = 0;
-    prev_ay = 0;
-    prev_az = 0;
-    prev_gx = 0;
-    prev_gy = 0;
-    prev_gz = 0;
     ahrs.q[0] = 1.0f;
     ahrs.q[1] = 0.0f;
     ahrs.q[2] = 0.0f;

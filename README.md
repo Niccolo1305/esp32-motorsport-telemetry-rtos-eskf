@@ -73,7 +73,7 @@ The entire project is designed to be affordable, modular, and extremely compact.
 
 ## Features
 
-- **50 Hz IMU pipeline** — 5-phase signal chain: axis remap (AtomS3R) → ellipsoid calibration → geometric alignment → VGPL-compensated Madgwick AHRS → gravity removal → ESKF navigation → end-of-pipe EMA
+- **50 Hz IMU pipeline** — 5-phase signal chain: axis remap (AtomS3R) → ellipsoid calibration → geometric alignment → VGPL-compensated Madgwick AHRS → gravity removal → ESKF navigation → end-of-pipe Butterworth presentation filter
 - **Ellipsoid hard/soft-iron calibration** for the accelerometer (tumble-test derived, `W·(a−B)` applied pre-rotation)
 - **VGPL kinematic compensation** (v1.4.1) — subtracts both centripetal (`v×ωz/g`) and longitudinal (`dv/dt/g`) acceleration before Madgwick, keeping beta > 0 at all times and eliminating horizon tilt from gyro drift
 - **ZARU-to-Madgwick bias correction** — thermal bias learned by ZARU is fed back into the gyro before Madgwick each cycle, preventing ~4.7 °/s/hr electronic drift from projecting phantom acceleration into the navigation output
@@ -284,7 +284,7 @@ python tools/sitl_hal/sitl_replay.py <file.csv>
 python tools/sitl_hal/sitl_replay.py <file.bin> --output <out_sitl.csv>
 ```
 
-Replays the exact firmware pipeline (`filter_task.cpp`) offline using the sensor-frame channels logged in the binary records. On AtomS3 this uses `sensor_ax/ay/az`, `sensor_gx/gy/gz`; on AtomS3R v5/v6 logs it uses the native BMI270 physical channels (`bmi_acc_*_g`, `bmi_gyr_*_dps`). Produces a new CSV with re-computed EMA, ZARU, ESKF, and VGPL outputs — useful for tuning constants without reflashing.
+Replays the exact firmware pipeline (`filter_task.cpp`) offline using the sensor-frame channels logged in the binary records. On AtomS3 this uses `sensor_ax/ay/az`, `sensor_gx/gy/gz`; on AtomS3R v5/v6 logs it uses the native BMI270 physical channels (`bmi_acc_*_g`, `bmi_gyr_*_dps`). Produces a new CSV with re-computed `sitl_butter_*`, ZARU, ESKF, and VGPL outputs — useful for tuning constants without reflashing.
 
 The replay mirrors the on-device production GPS path (`gps_sog_kmh`) and preserves DHV / passive NAV-PV metadata for diagnostics. Legacy logs still reproduce GPS staleness deterministically via `gps_fix_us` / `gps_valid`.
 
@@ -308,7 +308,7 @@ A WebGL-accelerated viewer for post-session analysis. All charts are linked: hov
 
 #### Controls
 
-- **Raw Data** — switch from EMA-filtered (α = 0.06, τ ≈ 313 ms) to zero-latency post-Madgwick data
+- **Raw Data** — switch from Butterworth presentation channels to zero-latency post-Madgwick data
 - **X-Axis: Distance** — switch Yaw and Timeline X-axis from time (s) to distance (m)
 - **3D G-G** — toggle G-G between 2-D and 3-D
 - **G-G Fixed Scale** — lock axes to the full-session envelope for cross-sector comparison
@@ -359,7 +359,7 @@ Produces a native `.ld` file openable in **i2 Pro** or **i2 Standard**:
 
 ### Signal Processing Pipeline
 
-Each 20 ms cycle inside `Task_Filter` runs 5 phases. The key architectural principle is **"End-of-Pipe EMA + ZARU-to-Madgwick"**: the EMA filter is purely aesthetic (display/MQTT/SD) and sits after all navigation updates, while the ZARU thermal bias is fed back into the gyro *before* Madgwick each cycle.
+Each 20 ms cycle inside `Task_Filter` runs 5 phases. The key architectural principle is **"End-of-Pipe Butterworth + ZARU-to-Madgwick"**: the Butterworth presentation filter is display/MQTT/SD-only and sits after all navigation updates, while the ZARU thermal bias is fed back into the gyro *before* Madgwick each cycle.
 
 > Authoritative reference: the in-source pipeline comment block in [`src/Telemetria.ino`](src/Telemetria.ino) tracks the current firmware. The standalone Mermaid source in [`docs/pipeline/Mermaid pipeline v1.8.7.md`](docs/pipeline/Mermaid%20pipeline%20v1.8.7.md) is a legacy v1.8.7 reference.
 
@@ -381,8 +381,8 @@ flowchart TD
 
     P1["Phase 1 - telemetry_mutex\nskip stale AtomS3R FIFO samples\ncompute dynamic dt\naxis remap -> ellipsoid cal -> alignment\ngyro bias + ZARU pre-correction\nVGPL + Madgwick -> gravity removal"]:::phase
     P2["Phase 2 - no mutex\nraw gyro variance\nGPS freshness and SOG source\nGPS LOST only after previous fix\nstatic + straight-line ZARU\nESKF 5D + ESKF 6D predict\nNHC + gated GPS correction\nmount-yaw diagnostic sentinels"]:::ctrl
-    P3["Phase 3 - end-of-pipe EMA\npost-ZARU bias snapshot\nalpha=0.06\nEMA is display/MQTT/SD only"]:::phase
-    P4["Phase 4 - telemetry_mutex\nprev_* write-back\nshared_telemetry = EMA + ESKF 5D"]:::ctrl
+    P3["Phase 3 - end-of-pipe Butterworth\npost-ZARU bias snapshot\nfc=1.5 Hz @ 50 Hz\npresentation only"]:::phase
+    P4["Phase 4 - telemetry_mutex\nshared_telemetry = Butterworth + ESKF 5D"]:::ctrl
     P5["Phase 5 - SD record\noutside mutex\nAtomS3 202B / AtomS3R v7 320B\ngps_valid means fresh-for-fusion"]:::out
     SDW["Task_SD_Writer\nfills AtomS3R magic/seq/SD diagnostics/CRC16\n8-record writes\nsync every 32 records or 250 ms idle"]:::out
     LOOP["loop()\nCore 1 Arduino task"]:::task
@@ -477,8 +477,8 @@ Legacy header sizes: 25 B (v1), 26 B (v2), 66 B (v3/v4), 80 B (v5).
 | Field | Type | Bytes | Description |
 |-------|------|-------|-------------|
 | `timestamp_us` | uint64 | 8 | IMU hardware clock (µs, `esp_timer_get_time()`) |
-| `ax`, `ay`, `az` | 3 × float | 12 | EMA linear acceleration [G], ZARU-corrected |
-| `gx`, `gy`, `gz` | 3 × float | 12 | EMA angular rate [°/s], ZARU-corrected |
+| `ax`, `ay`, `az` | 3 × float | 12 | Butterworth presentation linear acceleration [G], ZARU-corrected |
+| `gx`, `gy`, `gz` | 3 × float | 12 | Butterworth presentation angular rate [°/s], ZARU-corrected |
 | `temp_c` | float | 4 | Sensor temperature [°C] |
 | `lap` | uint8 | 1 | Session flag (1 = recording, 0 = idle) |
 | `gps_lat`, `gps_lon` | 2 × double | 16 | GPS coordinates (WGS84) |
@@ -486,7 +486,7 @@ Legacy header sizes: 25 B (v1), 26 B (v2), 66 B (v3/v4), 80 B (v5).
 | `gps_sats` | uint8 | 1 | Satellites locked |
 | `gps_hdop` | float | 4 | Horizontal dilution of precision |
 | `kf_x..kf_heading` | 4 × float | 16 | ESKF 5D: ENU position [m], speed [m/s], heading [rad] |
-| `pipe_lin_ax..pipe_body_gz` | 6 × float | 24 | Post-Madgwick IMU, zero latency, bypasses EMA |
+| `pipe_lin_ax..pipe_body_gz` | 6 × float | 24 | Post-Madgwick IMU, zero latency, bypasses presentation filtering |
 | `kf6_x..kf6_bgz` | 5 × float | 20 | ESKF 6D shadow output + estimated gz bias |
 | `zaru_flags` | uint8 | 1 | Bitmask: bit0=Static ZARU, bit1=Straight ZARU, bit2=NHC, bit3=Recalibration |
 | `tbias_gz` | float | 4 | Current learned thermal bias gz [°/s] |
@@ -545,7 +545,7 @@ The AtomS3R v7 record shares the common block up to `tbias_gz`, keeps the v6 acq
 
 ### CalibrationRecord (sentinel)
 
-On mid-session recalibration (long press ≥ 1.5 s), a sentinel record is injected with `timestamp_us = 0xFFFFFFFFFFFFFFFF`. The EMA float fields carry the new calibration parameters. Post-processing tools detect and skip it automatically.
+On mid-session recalibration (long press ≥ 1.5 s), a sentinel record is injected with `timestamp_us = 0xFFFFFFFFFFFFFFFF`. The presentation float slots carry the new calibration parameters. Post-processing tools detect and skip it automatically.
 
 ---
 
@@ -561,8 +561,9 @@ Default: `telemetry/<unit_id>/data` where `<unit_id>` is derived from the last 3
 
 ```json
 {
-  "ax": -0.12, "ay": 0.34, "az": 1.00,
-  "gx":  0.21, "gy": -0.10, "gz": 1.85,
+  "butter_ax": -0.12, "butter_ay": 0.34, "butter_az": 1.00,
+  "butter_gx":  0.21, "butter_gy": -0.10, "butter_gz": 1.85,
+  "imu_filter": "butter2_1p5",
   "lap": 1,
   "lat": 45.123456, "lon": 9.123456,
   "spd": 87.3, "alt": 142.0, "sats": 14, "hdop": 0.9,
@@ -572,8 +573,9 @@ Default: `telemetry/<unit_id>/data` where `<unit_id>` is derived from the last 3
 
 | Field | Unit | Description |
 |-------|------|-------------|
-| `ax` `ay` `az` | G | EMA-filtered linear acceleration (gravity removed) |
-| `gx` `gy` `gz` | °/s | EMA-filtered gyroscope rates |
+| `butter_ax` `butter_ay` `butter_az` | G | Butterworth-filtered linear acceleration (gravity removed) |
+| `butter_gx` `butter_gy` `butter_gz` | °/s | Butterworth-filtered gyroscope rates |
+| `imu_filter` | — | Presentation filter identifier (`butter2_1p5`) |
 | `lap` | — | `1` while recording, `0` otherwise |
 | `lat` `lon` | ° | GPS coordinates (WGS84) |
 | `spd` | km/h | GPS ground speed |

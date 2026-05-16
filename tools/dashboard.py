@@ -117,6 +117,12 @@ COL_MAP = {
     "gx":            "gx (°/s)",
     "gy":            "gy (°/s)",
     "gz":            "gz (°/s)",
+    "butter_ax":     "ax (G)",
+    "butter_ay":     "ay (G)",
+    "butter_az":     "az (G)",
+    "butter_gx":     "gx (°/s)",
+    "butter_gy":     "gy (°/s)",
+    "butter_gz":     "gz (°/s)",
     "temp_c":        "temp_c (°C)",
     "lap":           "lap",
     "gps_lat":       "gps_lat (°)",
@@ -136,10 +142,10 @@ COL_MAP = {
     "raw_gx":        "raw_gx (°/s)",
     "raw_gy":        "raw_gy (°/s)",
     "raw_gz":        "raw_gz (°/s)",
-    "pipe_lin_ax":   "raw_ax (G)",     # legacy dashboard name: post-pipeline, pre-EMA
+    "pipe_lin_ax":   "raw_ax (G)",     # legacy dashboard name: post-pipeline, pre-presentation
     "pipe_lin_ay":   "raw_ay (G)",
     "pipe_lin_az":   "raw_az (G)",
-    "pipe_body_gx":  "raw_gx (°/s)",   # legacy dashboard name: post-pipeline, pre-EMA
+    "pipe_body_gx":  "raw_gx (°/s)",   # legacy dashboard name: post-pipeline, pre-presentation
     "pipe_body_gy":  "raw_gy (°/s)",
     "pipe_body_gz":  "raw_gz (°/s)",
     "kf6_x":         "kf6_x (m)",
@@ -295,9 +301,9 @@ def load_and_prepare(path: str) -> pd.DataFrame:
     # - pipe_lin_* / pipe_body_* are zero-latency vehicle-frame pipeline outputs
     #   after axis remap, 3D rotation, mounting-bias removal, and Madgwick gravity
     #   removal for accel; ESKF/Kalman is a separate navigation branch.
-    # - ax/ay/az and gx/gy/gz are final post-pipeline EMA outputs.
+    # - ax/ay/az and gx/gy/gz are final post-pipeline presentation outputs.
     # This dashboard keeps the historical "raw_*" internal names for the
-    # pre-EMA pipeline channels because those are the useful vehicle-dynamics
+    # pre-presentation pipeline channels because those are the useful vehicle-dynamics
     # signals for G-G, yaw, brake/accel thresholding.
     df["ax_g"] = df["ax (G)"]
     df["ay_g"] = df["ay (G)"]

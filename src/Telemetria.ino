@@ -35,8 +35,8 @@
 // --- 4. SIGNAL FILTERS (telemetria.ino) ---
 // VARIABLE                     VALUE           DESCRIPTION
 // beta (Madgwick)              0.1f            Madgwick AHRS gain. Adaptive: decays to 0 under G-forces in cornering.
-// alpha (EMA)                  0.06f           Single EMA filter on all accel + gyro axes (tau ~313ms at 50Hz).
-//                                              Does NOT feed the ESKF (Data Fork): used only for display/MQTT/SD/ZARU.
+// Butterworth2 LPF             1.5Hz @ 50Hz    End-of-pipe presentation filter for accel + gyro axes.
+//                                              Does NOT feed Madgwick/ZARU/ESKF/NHC/GPS correction.
 //
 // --- 5. ZARU STATISTICAL ENGINE (telemetria.ino) ---
 // VARIABLE                     VALUE           DESCRIPTION
@@ -69,10 +69,10 @@
 // IMU PIPELINE — Data flow in Task_Filter (Core 1, 50Hz) — v1.8.9
 // ==============================================================================================
 //
-// Architecture: "End-of-Pipe EMA" + "ZARU-to-Madgwick"
+// Architecture: "End-of-Pipe Butterworth" + "ZARU-to-Madgwick"
 // - ZARU thermal_bias is subtracted from gyro BEFORE Madgwick (prevents horizon tilt)
-// - Variance buffers feed on RAW gyro (prevents false stationary from EMA decay tail)
-// - EMA is computed at the END of the pipeline, after all ZARU updates
+// - Variance buffers feed on RAW gyro (prevents false stationary from smoothing lag)
+// - Butterworth presentation output is computed at the END of the pipeline, after all ZARU updates
 // - Straight-Line ZARU gz_gate uses RAW corrected data (zero latency)
 // - GPS freshness is part of the control gate: stale/no-fix GPS cannot assert ZARU
 // - AtomS3R stale BMI270 FIFO samples are skipped before integration
@@ -121,13 +121,13 @@
 // │   | STEP 7: Gravity Cancellation via Quaternion                             │
 // │   |   lin_a{x,y,z} = a_r - grav(q)   [g, gravity removed, zero latency]    │
 // │   |                                                                         │
-// │   | Snapshot local_prev_* (EMA globals) + lap_snap                          │
+// │   | Snapshot lap_snap                                                       │
 // └──────────────────────────────────────────────────────────────────────────────┘
 //   |
 //   |                          PHASE 2: no mutex
 //   |
 //   | STEP 8: Statistical Engine — RAW variance (3-axis, v1.3.5)
-//   |   Circular buffer 50 samples (1s at 50Hz) of gz_r/gx_r/gy_r [RAW, not EMA]
+//   |   Circular buffer 50 samples (1s at 50Hz) of gz_r/gx_r/gy_r [RAW, not presentation]
 //   |   var_gz/gx/gy = E[x^2] - E[x]^2 (clamped >= 0)
 //   |   mean_gz/gx/gy = buffer means (absolute bias, pre-correction)
 //   |
@@ -189,24 +189,24 @@
 //   |   Emit MOUNT_YAW_OBS / MOUNT_YAW_BOOT sentinel records for offline analysis
 //   |   MOUNT_YAW_APPLY_LIVE=false: no live frame rotation without nav reinit
 //   |
-//   |                          PHASE 3: end-of-pipe EMA
+//   |                          PHASE 3: end-of-pipe Butterworth
 //   |
 //   | STEP 15: Thermal bias snapshot (post-ZARU)
 //   |   tb_gx/gy/gz = thermal_bias_gx/gy/gz (current cycle's value)
 //   |
-//   | STEP 16: EMA alpha=0.06 (end-of-pipe, v1.3.5)
-//   |   ema_a = alpha * lin_a          + (1-alpha) * prev_a
-//   |   ema_g = alpha * (g_r - tb_g)   + (1-alpha) * prev_g  [ZARU-corrected input]
-//   |   -> Display 5Hz, MQTT 10Hz, SD 50Hz
+//   | STEP 16: Butterworth2 low-pass, fc=1.5 Hz @ 50 Hz
+//   |   butter_a = LPF(lin_a)
+//   |   butter_g = LPF(g_r - tb_g)  [ZARU-corrected input]
+//   |   -> Display 5Hz, MQTT 10Hz, SD 50Hz, CSV butter_* columns
 //   |
 //   |                          PHASE 4: telemetry_mutex (merged)
 //   |
-//   | prev_* write-back + shared_telemetry (EMA + ESKF) + 2ms timeout
+//   | shared_telemetry (Butterworth + ESKF) + 2ms timeout
 //   |
 //   |                          PHASE 5: SD record (no mutex)
 //   |
 //   | 202 bytes on AtomS3, 320 bytes on AtomS3R v7:
-//   |   EMA + zero-latency pipeline channels + GPS + ESKF 5D + 6D Shadow
+//   |   Butterworth presentation + zero-latency pipeline channels + GPS + ESKF 5D + 6D Shadow
 //   |   + ZARU flags (bit 3: recalib) + tbias_gz + Bosch-direct acquisition truth
 //   |   + gps_fix_us + gps_valid (fresh-for-fusion flag) + gps_sog_kmh
 //   |   + nav_speed2d/nav_s_acc/nav_vel_n/nav_vel_e/nav_vel_valid
@@ -1560,6 +1560,29 @@
 //     tel_0184_boot_v1812d_r4.bin. The repair scanner accepts both old tel_N.bin
 //     names and the new diagnostic names.
 //
+// v1.8.13-diag - End-of-Pipe Butterworth Presentation Filter
+//   - [FILTER] Replaces the presentation EMA with a causal Butterworth2 low-pass
+//     filter, fc=1.5 Hz at 50 Hz, applied only at the end of Task_Filter. The
+//     filter uses gravity-free lin_a and ZARU-corrected gyro inputs and does not
+//     feed Madgwick, ZARU, variance, NHC, ESKF, or GPS correction paths.
+//   - [RESET] Butterworth states seed from the current sample at boot and after
+//     recalibration or live mount-yaw activation, avoiding a long first-sample
+//     transient. The old presentation `alpha` and `prev_ax...prev_gz` globals
+//     are removed; STRAIGHT_ALPHA and mount-yaw diagnostic EMAs remain separate.
+//   - [DATA] Binary layout is unchanged: TelemetryRecord ax/ay/az/gx/gy/gz keep
+//     their C++ member names and now carry Butterworth presentation values.
+//     pipe_lin_* and pipe_body_* remain the primary channels for physical
+//     analysis. AtomS3 stays 202 B; AtomS3R v7 stays 320 B.
+//   - [MQTT] Display and live JSON publish `butter_ax...butter_gz`, with
+//     `imu_filter="butter2_1p5"` so clients can identify the presentation
+//     filter used by the current firmware.
+//   - [TOOL] bin_to_csv.py emits CSV columns `butter_ax...butter_gz` plus
+//     FILTER_NOTE metadata. Pre-Butterworth firmware headers are reported as a
+//     dated schema instead of being silently relabeled as Butterworth data.
+//   - [SITL] Offline replay and static bench validation use the same biquad
+//     coefficients and seed/reset rules as firmware, exporting `sitl_butter_*`
+//     and `err_butter_*` comparison channels.
+//
 // --- TODO (deferred to v1.9.0 CAN format bump) ---
 //   - [TODO] Add CAN bus task (Core 0) for RPM, throttle, wheel speeds (×4),
 //     engine temp, steering angle. CanData struct + can_mutex pattern, mirroring
@@ -2362,8 +2385,9 @@ void loop() {
                                             ? GPS_SPD_NAV2_PVH
                                             : GPS_SPD_NMEA_SOG;
       snprintf(buf, sizeof(buf),
-               "{\"ax\":%.2f,\"ay\":%.2f,\"az\":%.2f,"
-               "\"gx\":%.2f,\"gy\":%.2f,\"gz\":%.2f,"
+               "{\"butter_ax\":%.2f,\"butter_ay\":%.2f,\"butter_az\":%.2f,"
+               "\"butter_gx\":%.2f,\"butter_gy\":%.2f,\"butter_gz\":%.2f,"
+               "\"imu_filter\":\"butter2_1p5\","
                "\"lap\":%d,\"lat\":%.6f,\"lon\":%.6f,"
                "\"spd\":%.1f,\"sog_kmh\":%.1f,\"alt\":%.1f,\"sats\":%d,\"hdop\":%.1f,"
                "\"gps_fix_us\":%llu,\"gps_epoch\":%lu,"
@@ -2374,8 +2398,8 @@ void loop() {
                "\"dbg_prt_ack\":%u,\"dbg_prt_nack\":%u,"
                "\"dbg_cfg_ack\":%u,\"dbg_cfg_nack\":%u,"
                "\"dbg_nav2pvh\":%lu,\"dbg_nav2_vel\":%lu}",
-               local_data.ema_ax, local_data.ema_ay, local_data.ema_az,
-               local_data.ema_gx, local_data.ema_gy, local_data.ema_gz, lap_flag,
+               local_data.butter_ax, local_data.butter_ay, local_data.butter_az,
+               local_data.butter_gx, local_data.butter_gy, local_data.butter_gz, lap_flag,
                gps_snap.lat, gps_snap.lon, selected_speed_kmh,
                gps_snap.sog_kmh, gps_snap.alt_m,
                (int)gps_snap.sats, gps_snap.hdop,
@@ -2524,11 +2548,11 @@ void loop() {
       }
     } else if (!display_off && !display_confirm_pending &&
                (system_state == 0 || system_state == 2)) {
-      snprintf(buf, sizeof(buf), "A:%.1f %.1f %.1f", local_data.ema_ax,
-               local_data.ema_ay, local_data.ema_az);
+      snprintf(buf, sizeof(buf), "A:%.1f %.1f %.1f", local_data.butter_ax,
+               local_data.butter_ay, local_data.butter_az);
       setLabel(10, buf);
-      snprintf(buf, sizeof(buf), "G:%.0f %.0f %.0f", local_data.ema_gx,
-               local_data.ema_gy, local_data.ema_gz);
+      snprintf(buf, sizeof(buf), "G:%.0f %.0f %.0f", local_data.butter_gx,
+               local_data.butter_gy, local_data.butter_gz);
       setLabel(30, buf);
       // GPS row: static cache — if the mutex is busy this cycle (GPS update
       // in progress), the display shows the last valid data instead of

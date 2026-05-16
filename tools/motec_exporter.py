@@ -36,7 +36,7 @@ from datetime import datetime
 #
 #   Field order and types (little-endian):
 #   t_ms            uint32    4 B   — IMU hardware timestamp (ms)
-#   ax..gz          7×float   28 B  — EMA-filtered accel (G) + gyro (deg/s) + temp (°C)
+#   ax..gz          7×float   28 B  — presentation-filtered accel (G) + gyro (deg/s) + temp (°C)
 #   lap             uint8     1 B   — lap counter
 #   gps_lat/lon     2×double  16 B  — GPS coordinates (WGS84 degrees)
 #   gps_speed_kmh   float     4 B   — GPS ground speed (km/h)
@@ -402,6 +402,14 @@ def read_csv(path):
     Returns (records: list[dict], fw_version: str, has_raw: bool).
     """
     records = []
+    presentation_aliases = {
+        'butter_ax': 'ax',
+        'butter_ay': 'ay',
+        'butter_az': 'az',
+        'butter_gx': 'gx',
+        'butter_gy': 'gy',
+        'butter_gz': 'gz',
+    }
     with open(path, 'r') as f:
         raw_headers = []
         for line in f:
@@ -418,7 +426,8 @@ def read_csv(path):
         for h in raw_headers:
             h = h.strip()
             paren = h.find(' (')
-            headers.append(h[:paren] if paren != -1 else h)
+            base = h[:paren] if paren != -1 else h
+            headers.append(presentation_aliases.get(base, base))
 
         has_raw = ('raw_ax' in headers) or ('pipe_lin_ax' in headers)
 
@@ -560,19 +569,19 @@ def export_motec_ld(records, has_raw, output_path, venue, fw_version, input_name
         return
 
     # IMU source: raw post-Madgwick channels (zero latency) when available,
-    # EMA-filtered channels as fallback for legacy files.
-    use_ema = not has_raw
-    if use_ema:
-        print('[MoTeC] WARNING: no raw IMU channels found — falling back to EMA '
+    # presentation-filtered channels as fallback.
+    use_presentation = not has_raw
+    if use_presentation:
+        print('[MoTeC] WARNING: no raw IMU channels found — falling back to presentation '
               '(ax/ay/az, gx/gy/gz).')
-        print('         EMA has ~313ms phase delay. For clean data use firmware v0.9.8+.')
+        print('         For physical analysis prefer pipe_lin_* / pipe_body_* when present.')
 
-    ax_key = 'ax' if use_ema else ('pipe_lin_ax' if 'pipe_lin_ax' in records[0] else 'raw_ax')
-    ay_key = 'ay' if use_ema else ('pipe_lin_ay' if 'pipe_lin_ay' in records[0] else 'raw_ay')
-    az_key = 'az' if use_ema else ('pipe_lin_az' if 'pipe_lin_az' in records[0] else 'raw_az')
-    gx_key = 'gx' if use_ema else ('pipe_body_gx' if 'pipe_body_gx' in records[0] else 'raw_gx')
-    gy_key = 'gy' if use_ema else ('pipe_body_gy' if 'pipe_body_gy' in records[0] else 'raw_gy')
-    gz_key = 'gz' if use_ema else ('pipe_body_gz' if 'pipe_body_gz' in records[0] else 'raw_gz')
+    ax_key = 'ax' if use_presentation else ('pipe_lin_ax' if 'pipe_lin_ax' in records[0] else 'raw_ax')
+    ay_key = 'ay' if use_presentation else ('pipe_lin_ay' if 'pipe_lin_ay' in records[0] else 'raw_ay')
+    az_key = 'az' if use_presentation else ('pipe_lin_az' if 'pipe_lin_az' in records[0] else 'raw_az')
+    gx_key = 'gx' if use_presentation else ('pipe_body_gx' if 'pipe_body_gx' in records[0] else 'raw_gx')
+    gy_key = 'gy' if use_presentation else ('pipe_body_gy' if 'pipe_body_gy' in records[0] else 'raw_gy')
+    gz_key = 'gz' if use_presentation else ('pipe_body_gz' if 'pipe_body_gz' in records[0] else 'raw_gz')
 
     channels_def = [
         # (name,           short,     unit,    Hz,  extractor)

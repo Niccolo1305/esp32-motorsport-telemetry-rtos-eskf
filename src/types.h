@@ -239,8 +239,8 @@ struct ImuRawData {
 };
 
 struct FilteredTelemetry {
-  float ema_ax, ema_ay, ema_az;
-  float ema_gx, ema_gy, ema_gz;
+  float butter_ax, butter_ay, butter_az;
+  float butter_gx, butter_gy, butter_gz;
   float kf_x, kf_y, kf_vel, kf_heading;
 };
 

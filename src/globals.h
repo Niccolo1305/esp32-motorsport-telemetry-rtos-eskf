@@ -114,11 +114,6 @@ extern float bias_ax, bias_ay, bias_az;
 extern float mag_ref_ut_x, mag_ref_ut_y, mag_ref_ut_z;
 extern bool mag_ref_valid;
 
-// ── EMA Previous Values ────────────────────────────────────────────────────
-// Read/written by Task_Filter under telemetry_mutex.
-extern float prev_ax, prev_ay, prev_az;
-extern float prev_gx, prev_gy, prev_gz;
-
 // ── Peripheral Objects ─────────────────────────────────────────────────────
 extern WiFiClient wifiClient;
 extern PubSubClient mqttClient;
