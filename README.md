@@ -361,7 +361,7 @@ Produces a native `.ld` file openable in **i2 Pro** or **i2 Standard**:
 
 Each 20 ms cycle inside `Task_Filter` runs 5 phases. The key architectural principle is **"End-of-Pipe Butterworth + ZARU-to-Madgwick"**: the Butterworth presentation filter is display/MQTT/SD-only and sits after all navigation updates, while the ZARU thermal bias is fed back into the gyro *before* Madgwick each cycle.
 
-> Authoritative reference: the in-source pipeline comment block in [`src/Telemetria.ino`](src/Telemetria.ino) tracks the current firmware. The standalone Mermaid source in [`docs/pipeline/Mermaid pipeline v1.8.7.md`](docs/pipeline/Mermaid%20pipeline%20v1.8.7.md) is a legacy v1.8.7 reference.
+> Authoritative reference: the in-source pipeline comment block in [`src/Telemetria.ino`](src/Telemetria.ino) tracks the current firmware.
 
 ```mermaid
 flowchart TD
@@ -444,9 +444,14 @@ To recalibrate:
 
 | Report | Description |
 |--------|-------------|
-| `Reports/IMU_Calibration_and_Validation_Report (Final).pdf` | Full calibration methodology and pendulum validation |
-| `Reports/report_ellipsoid_fitting_en.pdf` | Ellipsoid fitting algorithm and tumble-test results |
-| `Reports/MPU6886_ThermalDrift_Report_v3.1.pdf` | Thermal drift characterisation of the MPU-6886 |
+| `analysis/reports/IMU_Calibration_and_Validation_Report.pdf` | Full calibration methodology and pendulum validation |
+| `analysis/reports/Ellipsoid_fitting_Report.pdf` | Ellipsoid fitting algorithm and tumble-test results |
+| `analysis/reports/MPU6886_ThermalDrift_Report.pdf` | Thermal drift characterisation of the MPU-6886 |
+| `analysis/reports/MPU6886_BiasDrift_Report.pdf` | Static bias-drift characterization used to tune standstill handling |
+
+Full raw CSV/BIN/JSON datasets are kept outside this firmware repository so the
+project remains easy to clone. See `docs/evidence/DATASETS.md` for the external
+dataset layout, source-to-destination mapping, and report traceability.
 
 ---
 
@@ -646,22 +651,23 @@ esp32-telemetry-clean/
 │   │   └── schema_compat.py     # Schema compatibility helpers
 │   ├── script/
 │   │   ├── schema_guard.py      # Validates struct/format alignment between firmware and Python
-│   │   └── …                    # Analysis scripts (analyze4, bias_drift_report, gsen_analysis, …)
+|   |   `-- kgs_calc.py          # Small engineering calculator utility
 │   ├── dashboard.py             # Plotly/Dash interactive telemetry viewer
 │   ├── motec_exporter.py        # MoTeC i2 Pro .ld exporter
 │   └── requirements.txt         # Python dependencies
 │
-├── docs/pipeline/               # Mermaid pipeline diagrams and generated references
-├── Reports/                     # Technical documentation (PDF)
+├── docs/datasheets/             # Sensor, GPS, CAN, and board reference PDFs
+├── docs/evidence/               # Curated evidence packs and dataset manifest
+├── analysis/reports/            # Curated PDF reports kept in this repository
 ├── assets/images/               # Screenshots used in this README
 │
 ├── platformio.ini
 ├── wifi_config.example.txt
-├── CLAUDE.md                    # Claude Code project context
 └── README.md
 ```
 
-> `.pio/` (build artefacts) and `wifi_config.txt` (credentials) are excluded via `.gitignore`.
+> `.pio/` (build artefacts), `wifi_config.txt` (credentials), and raw telemetry
+> datasets are excluded via `.gitignore`.
 
 ---
 

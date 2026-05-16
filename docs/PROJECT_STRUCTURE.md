@@ -10,20 +10,13 @@ esp32-telemetry-clean/
 |   `-- benchmarks/              # Standalone benchmark projects
 |-- tools/                       # Python converters, dashboards, SITL, CAN tools
 |   |-- can_bus/                 # CAN analysis and helper firmwares
-|   |-- script/                  # Analysis scripts and bias reports
+|   |-- script/                  # Small validation and engineering utilities
 |   `-- sitl_hal/                # Offline replay and validation tools
 |-- docs/
-|   |-- guides/                  # Manuals, migration guides, protocols
 |   |-- datasheets/              # Hardware and sensor datasheets
-|   |-- evidence/                # Evidence packs and source material
-|   |-- history/                 # Patch notes and historical audits
-|   |-- pipeline/                # Mermaid pipeline diagrams
-|   `-- llm-context/             # Repomix/context snapshots for LLM review
-|-- data/
-|   |-- samples/                 # Sample telemetry BIN/CSV/LD files
-|   `-- test-drives/             # Test-drive datasets
+|   `-- evidence/                # Curated evidence packs and dataset manifest
 |-- analysis/
-|   `-- reports/                 # Generated reports and validation outputs
+|   `-- reports/                 # Curated PDF reports kept in this repository
 |-- assets/
 |   `-- images/                  # README and documentation images
 |-- design-system/               # UI kit and telemetry browser assets
@@ -39,7 +32,8 @@ esp32-telemetry-clean/
 - Put standalone firmware experiments and benchmark projects in `firmware/`.
 - Put executable Python tools in `tools/`.
 - Put reusable project documentation in `docs/`.
-- Put raw or sample telemetry files in `data/`.
-- Put generated reports, validation output, and analysis artifacts in `analysis/`.
+- Keep raw telemetry datasets outside this repository; `docs/evidence/DATASETS.md`
+  describes the external evidence-data repository.
+- Put only curated final report PDFs in `analysis/reports/`.
 - Put screenshots and documentation images in `assets/images/`.
 - Keep repository-level agent guidance in `AGENTS.md`.
