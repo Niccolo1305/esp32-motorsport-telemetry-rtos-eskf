@@ -51,7 +51,7 @@ Thumbs.db
 docs/llm-context/
 docs/pipeline/
 Problema da risolvere.md
-data/test-drives/madgwick-fix/
+data/
 tools/analyze_roundabout_deep.py
 tools/analyze_roundabout_fix.py
 tools/analyze_tbias_deep.py
@@ -117,7 +117,10 @@ tools/can_bus/*.pdf
 tools/gps_speed_compare.py
 tools/sitl_hal/__init__.py
 tools/sitl_hal/_smoke/
+tools/sitl_hal/bench-bin-tests/
+tools/sitl_hal/bench-bin-tests-v1.5.0/
 tools/sitl_hal/gps_speed_compare.py
+tools/sitl_hal/mount_yaw_sentinel.py
 tools/sitl_hal/static_bench_compare.py
 tools/sitl_hal/static_bench_validator.py
 tools/sitl_hal/static_gate_debug.py
@@ -129,6 +132,7 @@ Protocollo Operativo.txt
 audit_v1.5.1.md
 whitepaper_at6668_dhv_navpv_findings.md
 whitepaper_at6668_dhv_navpv_findings.pdf
+docs/datasheets/GPS V1.1 M5Stack/Zkw_BDS-GNSS_InterfaceSpec_r6.3.2.*
 docs/guides/
 analysis/reports/*.md
 

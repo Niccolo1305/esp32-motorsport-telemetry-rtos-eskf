@@ -114,6 +114,23 @@ python tools/telemetry_server.py
 analysis scripts to reject newer v5/v6 CSV layouts. It is not a complete
 firmware/Python struct alignment validator.
 
+## Validation Entrypoint
+
+Use `tools/validate.ps1` as the first-choice local validation entrypoint. It
+does not replace deeper hardware or drive-log validation; it makes the common
+checks repeatable from the repository root.
+
+```powershell
+.\tools\validate.ps1 -Target docs      # git diff whitespace checks
+.\tools\validate.ps1 -Target python    # Python syntax check for tracked/unignored tools
+.\tools\validate.ps1 -Target atoms3    # PlatformIO build for AtomS3
+.\tools\validate.ps1 -Target atoms3r   # PlatformIO build for AtomS3R
+.\tools\validate.ps1 -Target firmware  # both production firmware builds
+.\tools\validate.ps1 -Target bench     # both IMU bench builds
+.\tools\validate.ps1 -Target can       # both CAN helper builds
+.\tools\validate.ps1 -Target all       # docs + python + production firmware
+```
+
 ## Architecture
 
 Main firmware modules:
@@ -195,20 +212,101 @@ AtomS3R v6 record data must preserve acquisition truth:
 - `record_magic`, `record_seq`, and `crc16` are integrity fields. Keep parser
   resync and preallocated-log EOF behavior in sync with firmware writes.
 
+## Operational Checklists
+
+Use these checklists when a change touches a high-risk surface. They are not
+generic process; they describe the minimum files and checks that keep this
+firmware, its binary logs, and the Python tools aligned.
+
+### Binary Format Change
+
+Use this when changing `TelemetryRecord`, `FileHeader`, `FileHeaderV6`, record
+sizes, field order, field units, CRC/magic/sequence behavior, calibration
+records, or CSV column names.
+
+- Update `src/types.h` first, including `static_assert` sizes and comments.
+- Update record packing in `src/filter_task.cpp`, calibration-record injection
+  in `src/calibration.cpp` when applicable, and header creation in
+  `src/Telemetria.ino`.
+- Update SD integrity assumptions in `src/sd_writer.cpp` and
+  `src/storage_manager.*` when record size, CRC, magic, sequence, or
+  preallocation behavior changes.
+- Update `tools/bin_to_csv.py` format registry, headers, preamble output,
+  plausibility checks, resync behavior, and legacy fallback rules.
+- Update downstream readers that consume parsed columns: at minimum
+  `tools/sitl_hal/sitl_replay.py`, `tools/motec_exporter.py`, and
+  `tools/telemetry_server.py` when their input columns or metadata change.
+- Update `README.md` binary-format tables, current-version notes, and any
+  evidence/report text that claims exact sizes or field semantics.
+- Validate with both production builds: `tools/validate.ps1 -Target firmware`.
+- Run parser smoke checks on representative logs when available. If no
+  representative `.bin` exists for the new layout, state that gap explicitly in
+  the final response and describe the substitute validation.
+
+### Pipeline, Filter, Or ESKF Change
+
+Use this when changing `src/filter_task.cpp`, Madgwick/VGPL behavior, ESKF
+prediction or correction, ZARU, NHC, gravity removal, frame semantics, GPS
+freshness, or smoothing.
+
+- Read the pipeline comment block in `src/Telemetria.ino` and update it when the
+  processing order, source of truth, or logged diagnostics change.
+- Preserve frame semantics: vehicle frame is `X=forward`, `Y=left`, `Z=up`, and
+  ESKF position is local ENU from the first GPS fix.
+- Keep EMA out of variance, ZARU, and correction inputs unless the work is an
+  explicit design change.
+- Keep the production GPS speed control path on NMEA SOG unless the work
+  explicitly changes that policy and updates SITL and diagnostics with it.
+- For AtomS3R, keep provider-native BMI/BMM acquisition truth separate from
+  pipeline-remapped values.
+- Update logged diagnostics when they are needed to explain or replay the new
+  behavior offline.
+- Mirror deterministic behavior in `tools/sitl_hal/sitl_replay.py` when the
+  changed logic affects replayable navigation, GPS gating, ZARU flags, or error
+  metrics.
+- Validate with the affected production build. Prefer both production builds
+  when shared pipeline code changes.
+- If hardware or real-drive validation is needed, say what remains unvalidated
+  and which log or bench run should close the gap.
+
+### Python Parser Or Tool Change
+
+Use this when changing `tools/bin_to_csv.py`, SITL replay, MoTeC export,
+dashboard/server readers, static validators, analysis scripts, or generated
+report scripts.
+
+- Identify whether the tool is authoritative infrastructure or a one-off
+  analysis helper. Keep one-off scripts from silently becoming format contracts.
+- For parser changes, update `tools/bin_to_csv.py` first and keep legacy record
+  support intact unless removal is the explicit goal.
+- Reuse the shared parser registry instead of duplicating struct formats in
+  downstream tools.
+- Keep unit names and column aliases consistent with `README.md` and SITL
+  compatibility helpers.
+- Run the changed tool against a representative input when available.
+- When no representative input exists, at least run
+  `tools/validate.ps1 -Target python` and state the missing fixture or log
+  clearly.
+- Do not commit generated CSV, dashboard images, or report outputs unless they
+  are intentionally part of an evidence pack or test fixture.
+
 ## Validation Expectations
 
 Run the narrowest validation that matches the changed surface:
 
-- Firmware-only changes: `pio run -e m5stack-atoms3` and/or
-  `pio run -e m5stack-atoms3r`.
-- Bench firmware changes: the matching `atoms3_bench` or `atoms3r_bench` build.
-- CAN helper changes: the matching `can_sniffer` or `can_obd2_validator` build.
+- Firmware-only changes: `tools/validate.ps1 -Target atoms3` and/or
+  `tools/validate.ps1 -Target atoms3r`.
+- Shared production firmware changes: `tools/validate.ps1 -Target firmware`.
+- Bench firmware changes: `tools/validate.ps1 -Target bench` or the matching
+  individual PlatformIO environment when a narrower build is enough.
+- CAN helper changes: `tools/validate.ps1 -Target can` or the matching
+  individual PlatformIO environment when a narrower build is enough.
 - Binary layout changes: both production builds plus parser smoke checks on a
   representative `.bin` or a clearly documented reason no sample was available.
 - Python parser/tool changes: run the changed script against representative
-  input when available; otherwise run syntax/import checks and state the test
-  gap.
-- Documentation-only changes: `git diff --check`.
+  input when available; otherwise run `tools/validate.ps1 -Target python` and
+  state the test gap.
+- Documentation-only changes: `tools/validate.ps1 -Target docs`.
 
 If hardware flashing or real telemetry capture is required but not possible in
 the current environment, say that directly and describe what was validated
